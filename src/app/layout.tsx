@@ -3,6 +3,7 @@ import { Barlow_Semi_Condensed, Geist_Mono } from "next/font/google";
 import localFont from "next/font/local";
 import { Agentation } from "agentation";
 
+import { ActivityToaster } from "@/components/storefront/activity-toaster";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { themePreferenceBootstrapScript } from "@/lib/theme/theme-preference";
 import "./globals.css";
@@ -39,7 +40,11 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <script dangerouslySetInnerHTML={{ __html: themePreferenceBootstrapScript }} />
       </head>
       <body>
-        <ThemeProvider>{children}</ThemeProvider>
+        <ThemeProvider>
+          {children}
+          {/* Inside the provider: the toaster reads the resolved theme. */}
+          <ActivityToaster />
+        </ThemeProvider>
         {process.env.NODE_ENV === "development" && <Agentation />}
       </body>
     </html>

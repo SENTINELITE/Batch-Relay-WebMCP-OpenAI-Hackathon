@@ -146,7 +146,10 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
 
 var out = console.log.bind(console);
 
-var err = console.error.bind(console);
+var err = function() {
+  if (arguments.length === 1 && typeof arguments[0] === "string" && arguments[0].includes("Created TensorFlow Lite XNNPACK delegate for CPU.")) return;
+  console.error.apply(console, arguments);
+};
 
 // end include: shell.js
 // include: preamble.js

@@ -17,6 +17,7 @@ import {
   readSubjectWidthPercent,
   resolveFocusPreset,
   type CropPatchValues,
+  type FocusPreset,
   type FocusPresetResult,
 } from "@/lib/storefront/focus-preset";
 import { defaultCropForSubject, subjectRegionFromFaces } from "@/lib/storefront/face-geometry";
@@ -83,15 +84,24 @@ import { detectFaces, faceDetectionAvailable, type FaceBox } from "@/lib/storefr
 import { faceDebugEnabled, workbenchResetRequested, type FaceDebugEntry, type FaceDebugMap } from "@/lib/storefront/debug-flags";
 import {
   clearWorkbenchSnapshot,
+  createWorkbenchHistory,
   createWorkbenchWriter,
   readWorkbenchSnapshot,
   relinkWorkbenchSnapshot,
   restoreNotice,
+  workbenchSnapshotFromState,
   workbenchState,
   type WorkbenchSnapshot,
+  type WorkbenchState,
   type WorkbenchStorage,
   type WorkbenchWriter,
 } from "@/lib/storefront/workbench-persistence";
+import {
+  agentActionLabel,
+  agentActivity,
+  isMutatingAgentAction,
+  type AgentActivity,
+} from "@/lib/storefront/agent-activity";
 import {
   agentDraftPlacement,
   emptyShopperViewContext,
@@ -150,6 +160,7 @@ import {
   respondToStorefrontWebMcpAction,
   subscribeToStorefrontWebMcpActions,
 } from "@/webmcp/storefront-bridge";
+import { toast } from "sonner";
 
 type Notice = { tone: "error" | "info"; message: string } | null;
 /** Everything a draft configured behind the shopper's screen needs, resolved
@@ -415,6 +426,10 @@ export function ManualStorefront() {
   const [cropX, setCropX] = useState(50);
   const [cropY, setCropY] = useState(50);
   const [cropZoom, setCropZoom] = useState(1);
+  // The focal intent is local UI state rather than a hidden print contract.
+  // It is keyed per direct crop / template slot so changing slots cannot make
+  // another photograph unexpectedly inherit a face-centred zoom.
+  const [framingFocusByTarget, setFramingFocusByTarget] = useState<Record<string, FocusPreset>>({});
   const [managedAsset, setManagedAsset] = useState<IngestedAsset | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [templates, setTemplates] = useState<PublishedTemplate[]>([]);
@@ -554,6 +569,23 @@ export function ManualStorefront() {
   // workbench needs its own signal that it changed.
   const [roleMemoryRevision, setRoleMemoryRevision] = useState(0);
   const cartRef = useRef(cart);
+  /**
+   * The last ten states an agent action was about to change, newest last.
+   *
+   * Held in a ref rather than state because nothing renders from it: the undo
+   * affordance is the toast's own button and the tool, neither of which needs a
+   * re-render when the depth changes. It is deliberately not persisted — a
+   * reload is already the bigger undo, and restoring a history alongside the
+   * workbench it describes invites the two to disagree.
+   */
+  const workbenchHistory = useRef(createWorkbenchHistory());
+  /**
+   * Bumped when an agent changes the workbench, to play one short ring pulse
+   * over the prepare step. The preview repaints and the deck animates on their
+   * own; the slot table and the framing controls do not, so an agent's crop
+   * change used to land with no motion at all to catch the eye.
+   */
+  const [workbenchPulse, setWorkbenchPulse] = useState(0);
 
   /** Files a resolved preview document under its published output, so any other
    *  surface — notably the proposal card — can paint from it directly. */
@@ -618,7 +650,14 @@ export function ManualStorefront() {
    * Idempotent by design: running it again with a fuller tray simply re-links
    * more of the same snapshot, which is what the late pass below relies on.
    */
-  function applyWorkbenchRestore(snapshot: WorkbenchSnapshot, photos: readonly BrowserPhoto[]) {
+  function applyWorkbenchRestore(
+    snapshot: WorkbenchSnapshot,
+    photos: readonly BrowserPhoto[],
+    // An undo says what it undid in its own toast, in the shopper's terms. The
+    // reload notice — "Restored 4 drafts." — would be both redundant and wrong
+    // about what just happened.
+    { announce = true }: { announce?: boolean } = {},
+  ) {
     const restore = relinkWorkbenchSnapshot(snapshot, photos);
     setDrafts(restore.drafts);
     draftsRef.current = restore.drafts;
@@ -639,8 +678,72 @@ export function ManualStorefront() {
       step: restore.step,
     };
     setViewRestoreRevision((revision) => revision + 1);
-    restoreMessage.current = restoreNotice(restore);
+    restoreMessage.current = announce ? restoreNotice(restore) : null;
     if (restoreMessage.current) setNotice({ tone: "info", message: restoreMessage.current });
+    return restore;
+  }
+
+  /**
+   * Shows one agent action to the shopper: a line of text, a pulse where the
+   * change landed, and — when there is a step to go back to — the Undo button
+   * that is the visible half of `undo_last_change`.
+   *
+   * Only the bridge calls this. A shopper who dragged a photograph into a slot
+   * watched themselves do it and does not need to be told.
+   */
+  function announceAgentActivity(activity: AgentActivity) {
+    if (activity.pulse === "workbench") setWorkbenchPulse((revision) => revision + 1);
+    const undoable = activity.undoable && workbenchHistory.current.depth() > 0;
+    toast(activity.message, {
+      description: activity.detail,
+      action: undoable
+        ? {
+          label: "Undo",
+          // The same restore path the tool uses, so the button and the words
+          // "undo that" cannot drift apart.
+          onClick: () => {
+            const undone = undoWorkbenchChange(1);
+            toast(undone ? `Undid: ${undone.label}` : "There is nothing left to undo");
+          },
+        }
+        : undefined,
+    });
+  }
+
+  /** The workbench as it stands right now, in the shape a snapshot records. */
+  function captureWorkbenchState(): WorkbenchState {
+    return workbenchState({
+      photos: photoLibrary.photos,
+      drafts: draftsRef.current,
+      cart: cartRef.current,
+      proposals: pendingCartProposals(proposalStackRef.current),
+      roleMemory: photoRoleMemory.current,
+      backgroundDraftIds: backgroundDraftIds.current,
+      selectedDraftId,
+      selectedProductKey,
+      step,
+      directCrop: { zoom: cropZoom, focusX: cropX, focusY: cropY },
+    });
+  }
+
+  /**
+   * Walks the workbench back through the same relink-and-apply path a reload
+   * restore uses, so a restored proposal card renders exactly as a restored one
+   * already does. Returns what was undone, or null when the history is empty.
+   */
+  function undoWorkbenchChange(steps: number) {
+    const undone = workbenchHistory.current.undo(steps);
+    if (!undone) return null;
+    // The shopper has plainly moved on from any half-linked reload restore, so
+    // a late re-link pass must not fire on top of the state just put back.
+    pendingRestore.current = null;
+    const restore = applyWorkbenchRestore(
+      workbenchSnapshotFromState(undone.state),
+      photoLibrary.photos,
+      { announce: false },
+    );
+    setNotice({ tone: "info", message: `Undid: ${undone.label}.` });
+    return { ...undone, restore, remaining: workbenchHistory.current.depth() };
   }
 
   /**
@@ -938,6 +1041,14 @@ export function ManualStorefront() {
   const selectedProductId = selectedProduct?.id ?? null;
   const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
   const selectedDraft = drafts.find((draft) => draft.id === selectedDraftId) ?? null;
+  const framingFocusTarget = customization === "template"
+    ? activeImageSlotKey && templateAssignments[activeImageSlotKey]
+      ? `template:${selectedDraftId ?? selectedProductKey ?? "new"}:${activeImageSlotKey}:${templateAssignments[activeImageSlotKey]}`
+      : null
+    : selectedPhoto
+      ? `direct:${selectedDraftId ?? selectedProductKey ?? "new"}:${selectedPhoto.id}`
+      : null;
+  const framingFocus = framingFocusTarget ? framingFocusByTarget[framingFocusTarget] ?? "center" : "center";
   const browserPreviewAssetURLs = useMemo(() => previewAssetURLs(browserPreviewDocument), [browserPreviewDocument]);
   const crop = selectedProduct ? cropFor(selectedProduct) : "4:5";
   const visibleTemplateSlots = useMemo(() => templateContract?.slots.map((slot) => ({
@@ -1838,7 +1949,11 @@ export function ManualStorefront() {
    *  proof they are looking at the selected draft. */
   function updateBrowserPreviewTransform(slotKey: string, transform: BrowserPreviewTransform) {
     noteShopperLookingAtSelectedDraft();
-    const next = { ...lastBrowserPreviewTransforms.current, [slotKey]: transform };
+    // A range input's pointer-up can run from the render that started the
+    // drag. Commit the latest live value rather than allowing that older prop
+    // to overwrite the final zoom/focus the shopper just chose.
+    const latest = lastBrowserPreviewTransforms.current[slotKey] ?? transform;
+    const next = { ...lastBrowserPreviewTransforms.current, [slotKey]: latest };
     lastBrowserPreviewTransforms.current = next;
     setSlotTransforms(next);
     if (selectedDraftId) patchDraft(selectedDraftId, { slotTransforms: next, proofState: "idle" });
@@ -1925,6 +2040,81 @@ export function ManualStorefront() {
       sourceAspectRatio: photoAspectRatio(options.photoId),
       hasPhoto: Boolean(options.photoId),
     });
+  }
+
+  /**
+   * Visible slider changes must stay responsive. Unlike a WebMCP command, they
+   * never wait for face detection: Faces either has a completed local result
+   * to use now, or leaves the existing pan alone and explains why when the
+   * shopper explicitly asks for it.
+   */
+  function resolveVisibleFramingFocus(options: {
+    photoId: string | null;
+    targetAspectRatio: number | null;
+    preset: FocusPreset;
+    zoom: number;
+  }): FocusPresetResult {
+    const faces = options.photoId
+      ? photoFacesRef.current[options.photoId] ?? (photoFacesResolvedRef.current[options.photoId] ? [] : null)
+      : null;
+    return resolveFocusPreset({
+      preset: options.preset,
+      patch: { zoom: options.zoom },
+      faces,
+      detectionAvailable: faceDetectionAvailable(),
+      targetAspectRatio: options.targetAspectRatio,
+      sourceAspectRatio: photoAspectRatio(options.photoId),
+      hasPhoto: Boolean(options.photoId),
+    });
+  }
+
+  /** Apply a named focal intent whenever the shopper changes the zoom slider. */
+  function applyVisibleFramingFocus(preset: FocusPreset, zoom: number, announceFailure = false) {
+    const rememberFocus = () => {
+      if (!framingFocusTarget) return;
+      setFramingFocusByTarget((current) => ({ ...current, [framingFocusTarget]: preset }));
+    };
+
+    if (customization === "template" && activeImageSlotKey && activeSlotTransform) {
+      const photoId = templateAssignments[activeImageSlotKey] ?? null;
+      const box = browserPreviewSlotBoxes(browserPreviewDocumentRef.current)[activeImageSlotKey] ?? null;
+      const result = resolveVisibleFramingFocus({
+        photoId,
+        targetAspectRatio: boxAspectRatio(box),
+        preset,
+        zoom,
+      });
+      const transform = result.focusApplied === preset
+        ? slotTransformFromCropPatch(initialBrowserPreviewTransform, result.patch, slotCropGeometry(photoId, box))
+        : { ...activeSlotTransform, zoom };
+      changeBrowserPreviewTransform(activeImageSlotKey, transform);
+      rememberFocus();
+      if (announceFailure && result.focusApplied !== preset) {
+        setNotice({ tone: "info", message: result.note });
+      }
+      return;
+    }
+
+    const photoId = selectedPhoto?.id ?? null;
+    const result = resolveVisibleFramingFocus({
+      photoId,
+      targetAspectRatio: boxAspectRatio(selectedProduct?.physical_output ?? null),
+      preset,
+      zoom,
+    });
+    const nextFocusX = result.focusApplied === preset ? result.patch.focusX ?? cropX : cropX;
+    const nextFocusY = result.focusApplied === preset ? result.patch.focusY ?? cropY : cropY;
+    noteShopperLookingAtSelectedDraft();
+    setCropZoom(zoom);
+    setCropX(nextFocusX);
+    setCropY(nextFocusY);
+    if (selectedDraftId) patchDraft(selectedDraftId, {
+      directCrop: { zoom, focusX: nextFocusX, focusY: nextFocusY },
+    });
+    rememberFocus();
+    if (announceFailure && result.focusApplied !== preset) {
+      setNotice({ tone: "info", message: result.note });
+    }
   }
 
   /** The honesty fields. `focus_applied` is the only licence to claim framing. */
@@ -2255,6 +2445,38 @@ export function ManualStorefront() {
   }, [canAddAnyVisibleDraft, cartPrintCount, catalogState, pendingProposals, customization, managedAsset, photoLibrary, selectedProduct, selectedProductId, selectedTemplate, templateAssignments, templateContract, templateOutput, visibleTemplateSlots]);
 
   useEffect(() => subscribeToStorefrontWebMcpActions((request) => {
+    /**
+     * The workbench as it stands before this action touches anything.
+     *
+     * Taken here, at the one point every bridge action passes through, and
+     * before any branch has run — a snapshot taken inside a handler would
+     * already contain half the change it is supposed to undo. It is only
+     * *recorded* once the response says something actually changed, so a
+     * refused call and a batch that staged nothing leave no empty undo step.
+     *
+     * An undo is deliberately excluded: it is not a change to be undone, and
+     * recording it would turn a second undo into a redo of the first.
+     */
+    const preMutation = isMutatingAgentAction(request.action) && request.action !== "undo_last_change"
+      ? { label: agentActionLabel(request.action, request.input), state: captureWorkbenchState() }
+      : null;
+    /**
+     * Answers the agent, and — for a mutation, and only for a mutation — files
+     * the undo step and tells the shopper what just happened to their screen.
+     *
+     * The single mapping from action plus result to a line of text lives in
+     * `agent-activity.ts`; nothing here decides wording, and no branch below
+     * fires a toast of its own. Read-only actions keep calling the imported
+     * responder directly, so they cannot announce anything by accident.
+     */
+    const respondWithActivity = (response: { requestId: string; result: unknown }) => {
+      const activity = agentActivity(request.action, request.input, response.result);
+      if (activity?.undoable && preMutation) {
+        workbenchHistory.current.push(preMutation.label, preMutation.state);
+      }
+      respondToStorefrontWebMcpAction(response);
+      if (activity) announceAgentActivity(activity);
+    };
     void (async () => {
       try {
         if (request.action === "ask_storefront") {
@@ -2750,7 +2972,7 @@ export function ManualStorefront() {
             responseContract?.slots ?? [],
             responseSlotAliases,
           );
-          respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+          respondWithActivity({ requestId: request.requestId, result: {
             status: "configured",
             draft_id: draft.id,
             // Say plainly whether this draft took the screen, so the agent
@@ -2997,7 +3219,7 @@ export function ManualStorefront() {
           // Every repaint — workbench preview and proposal cards — lands before
           // the agent hears back, so it never reports a change nobody can see.
           await nextPaint();
-          respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+          respondWithActivity({ requestId: request.requestId, result: {
             status: applied > 0 ? "revised" : "nothing_revised",
             applied_count: applied,
             skipped_count: skipped,
@@ -3065,7 +3287,7 @@ export function ManualStorefront() {
           if (validPhotos.length === 0) {
             setNotice({ tone: "info", message: `No visible tray photographs could be staged for ${batchProduct.name}.` });
             await nextPaint();
-            respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+            respondWithActivity({ requestId: request.requestId, result: {
               status: "nothing_proposed",
               product: { id: batchProduct.id, revision: batchProduct.revision, name: batchProduct.name },
               quantity_each: batchQuantity,
@@ -3100,7 +3322,7 @@ export function ManualStorefront() {
                 : result;
             });
             const retryProposedCount = retryResults.filter((result) => result.status === "already_proposed").length;
-            respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+            respondWithActivity({ requestId: request.requestId, result: {
               status: "awaiting_shopper_confirmation",
               idempotent_retry: true,
               product: { id: batchProduct.id, revision: batchProduct.revision, name: batchProduct.name },
@@ -3144,7 +3366,7 @@ export function ManualStorefront() {
             // partial rail of drafts or a repeated failure for every photo.
             setNotice({ tone: "error", message: `Batch staging unavailable: ${failure.message}` });
             await nextPaint();
-            respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+            respondWithActivity({ requestId: request.requestId, result: {
               status: "batch_preflight_failed",
               error: { code: failure.code, scope: "batch", message: failure.message, retryable: failure.code !== "template_not_found" && failure.code !== "template_ambiguous", candidates: failure.candidates },
               product: { id: batchProduct.id, revision: batchProduct.revision, name: batchProduct.name },
@@ -3254,7 +3476,7 @@ export function ManualStorefront() {
             : `No print could be staged for ${batchProduct.name}.` });
           // Every card must be on screen before the agent hears back.
           await nextPaint();
-          respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+          respondWithActivity({ requestId: request.requestId, result: {
             status: proposedCount > 0 ? "awaiting_shopper_confirmation" : "nothing_proposed",
             product: { id: batchProduct.id, revision: batchProduct.revision, name: batchProduct.name },
             quantity_each: batchQuantity,
@@ -3317,7 +3539,7 @@ export function ManualStorefront() {
           if (isShopperVisibleDraft(shopperViewRef.current, draft.id, Date.now())) {
             const { items: nextCart, line: added } = addDraftToCart(draft, requestedQuantity);
             await nextPaint();
-            respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+            respondWithActivity({ requestId: request.requestId, result: {
               status: "added",
               draft_id: draft.id,
               item_id: added.id,
@@ -3338,7 +3560,7 @@ export function ManualStorefront() {
           // The proposal card must be on screen before the agent hears back.
           await nextPaint();
           const stackCount = livePendingProposals().length;
-          respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+          respondWithActivity({ requestId: request.requestId, result: {
             status: "awaiting_shopper_confirmation",
             proposal_id: proposal.id,
             draft_id: proposal.draftId,
@@ -3361,6 +3583,49 @@ export function ManualStorefront() {
         if (request.action === "resolve_cart_proposal") {
           const proposalId = readIdentifierAlias(request.input, "proposalId", "proposal_id");
           const requestedDecision = request.input.decision;
+          // "Make that one two copies" changes the question the card is asking,
+          // it does not answer it. Nothing enters the cart, the card keeps
+          // standing, and no shopperConfirmation is demanded — quoting the
+          // shopper accepting a proposal they have not accepted would be a lie
+          // told to satisfy a guard meant to prevent exactly that.
+          if (requestedDecision === "update_quantity") {
+            const nextQuantity = Number(request.input.quantity);
+            if (!Number.isInteger(nextQuantity) || nextQuantity < 1 || nextQuantity > 99) {
+              throw new Error("update_quantity requires a quantity from 1 through 99.");
+            }
+            const standingNow = livePendingProposals();
+            const target = standingNow.find((candidate) => candidate.id === proposalId);
+            if (!target) {
+              throw new Error(proposalId
+                ? `No proposal ${proposalId} is waiting. The cards waiting now are ${cartProposalWireItems(standingNow).map((item) => `${item.proposal_id} (${item.product_name})`).join(", ")}.`
+                : "update_quantity names one card: pass its proposalId.");
+            }
+            const previousQuantity = target.quantity;
+            // Patched in place so the card keeps its position in the deck and
+            // its live preview is never torn down and remounted; only the
+            // quantity badge changes.
+            commitProposalStack((entries) => entries.map((entry) =>
+              entry.proposal.id === target.id && !entry.exit
+                ? { ...entry, proposal: { ...entry.proposal, quantity: nextQuantity } }
+                : entry));
+            setNotice({ tone: "info", message: `That card now asks for ${nextQuantity} × ${target.productName}.` });
+            // The badge must have repainted before the agent hears back.
+            await nextPaint();
+            respondWithActivity({ requestId: request.requestId, result: {
+              decision: "quantity_updated",
+              scope: "one_proposal",
+              proposal_id: target.id,
+              draft_id: target.draftId,
+              product_name: target.productName,
+              previous_quantity: previousQuantity,
+              quantity: nextQuantity,
+              pending_proposal_count: livePendingProposals().length,
+              decided_by: "shopper_request",
+              guidance: `The card for ${target.productName} now shows ${nextQuantity} and is still waiting on the shopper — nothing was added to the demo cart and no proposal was answered. Accepting it later will add ${nextQuantity}, not ${previousQuantity}. Tell them the card has been changed and stop.`,
+              nextStep: "await_shopper_decision",
+            } });
+            return;
+          }
           // accept_ready answers a subset of the stack rather than one card or
           // all of them: it is still the shopper's decision, just a narrower
           // one, so it takes no proposalId and still demands their words.
@@ -3370,7 +3635,7 @@ export function ManualStorefront() {
             : requestedDecision === "reject_all" ? "reject"
               : requestedDecision;
           if (decision !== "accept" && decision !== "reject") {
-            throw new Error("decision must be accept, reject, accept_all, reject_all, or accept_ready.");
+            throw new Error("decision must be accept, reject, accept_all, reject_all, accept_ready, or update_quantity.");
           }
           // The confirmation is the shopper's own sentence. Requiring it here as
           // well as in the tool means a proposal can only be answered by
@@ -3411,7 +3676,7 @@ export function ManualStorefront() {
           const nextCart = resolveProposals(targets, decision);
           const remaining = livePendingProposals().length;
           await nextPaint();
-          respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+          respondWithActivity({ requestId: request.requestId, result: {
             decision: decision === "accept" ? "accepted" : "rejected",
             scope: readyOnly ? "ready_pending" : bulk ? "all_pending" : "one_proposal",
             resolved: targets.map((proposal) => ({
@@ -3435,6 +3700,39 @@ export function ManualStorefront() {
           } });
           return;
         }
+        if (request.action === "undo_last_change") {
+          const requestedSteps = request.input.steps === undefined ? 1 : Number(request.input.steps);
+          if (!Number.isInteger(requestedSteps) || requestedSteps < 1 || requestedSteps > 5) {
+            throw new Error("steps must be a whole number from 1 through 5.");
+          }
+          const undone = undoWorkbenchChange(requestedSteps);
+          // Refusing in words beats restoring an identical workbench and
+          // claiming to have undone something.
+          if (!undone) {
+            throw new Error("Nothing has changed in this workbench yet, so there is nothing to undo. The history holds only changes made since this page was opened, and it does not survive a reload.");
+          }
+          // Drafts, cards and cart must all be back on screen before the agent
+          // hears back, exactly as they must be after a reload restore.
+          await nextPaint();
+          respondWithActivity({ requestId: request.requestId, result: {
+            status: "undone",
+            // Read straight off the recorded label, so the agent narrates the
+            // change the shopper actually watched rather than describing the
+            // restored state and calling that an explanation.
+            undone: undone.label,
+            undone_changes: undone.labels,
+            undone_count: undone.undoneCount,
+            requested_steps: requestedSteps,
+            remaining_undo_steps: undone.remaining,
+            draft_count: undone.restore.restoredDraftCount,
+            pending_proposal_count: livePendingProposals().length,
+            cart_item_count: localCartPrintCount(undone.restore.cart),
+            unlinked_photo_count: undone.restore.unlinkedPhotoCount,
+            guidance: `The workbench is back to how it stood before ${undone.label}${undone.undoneCount > 1 ? ` and ${undone.undoneCount - 1} further change${undone.undoneCount === 2 ? "" : "s"}` : ""}. Every draft, proposal card and cart line has repainted, and each photograph was re-linked against the tray as it stands now.${undone.restore.unlinkedPhotoCount > 0 ? ` ${undone.restore.unlinkedPhotoCount} photograph${undone.restore.unlinkedPhotoCount === 1 ? " is" : "s are"} no longer in the tray, so their slots came back empty — say so.` : ""} There is no redo: this cannot be taken back. ${undone.remaining > 0 ? `${undone.remaining} earlier change${undone.remaining === 1 ? "" : "s"} can still be undone.` : "Nothing further can be undone."}`,
+            nextStep: "tell_the_shopper_what_came_back",
+          } });
+          return;
+        }
         const action = request.input.action;
         const itemId = typeof request.input.itemId === "string" ? request.input.itemId : undefined;
         const quantity = typeof request.input.quantity === "number" ? request.input.quantity : undefined;
@@ -3452,7 +3750,7 @@ export function ManualStorefront() {
           setCart(nextCart);
           await nextPaint();
         }
-        respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+        respondWithActivity({ requestId: request.requestId, result: {
           action,
           cart_item_count: localCartPrintCount(nextCart),
           cart_line_count: nextCart.length,
@@ -3505,7 +3803,16 @@ export function ManualStorefront() {
         <FormatPicker onSelect={selectProduct} products={catalog} selectedProductKey={selectedProductKey} state={catalogState} />
       </div>}
 
-      {step === "prepare" && selectedProduct && <PrepareStep
+      {/* The pulse is a keyed sibling, never a key on the step itself: keying
+          the workbench would remount the live preview the pulse exists to draw
+          attention to, tearing down the very repaint the shopper should see. */}
+      {step === "prepare" && selectedProduct && <div className="relative">
+        {workbenchPulse > 0 && <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -inset-3 rounded-[22px] animate-agent-pulse"
+          key={`agent-pulse-${workbenchPulse}`}
+        />}
+        <PrepareStep
         activeImageSlotKey={activeImageSlotKey}
         activeSlotPanLimits={activeSlotPanLimits}
         activeSlotTransform={activeSlotTransform}
@@ -3515,6 +3822,7 @@ export function ManualStorefront() {
         cropY={cropY}
         cropZoom={cropZoom}
         customization={customization}
+        framingFocus={framingFocus}
         hasLocalImage={Boolean(localImage)}
         imageName={imageName}
         imagePreview={imagePreview}
@@ -3524,7 +3832,11 @@ export function ManualStorefront() {
         onChangeFormat={() => setStep("catalog")}
         onCropXChange={(focusX) => { noteShopperLookingAtSelectedDraft(); setCropX(focusX); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { focusX } }); }}
         onCropYChange={(focusY) => { noteShopperLookingAtSelectedDraft(); setCropY(focusY); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { focusY } }); }}
-        onCropZoomChange={(zoom) => { noteShopperLookingAtSelectedDraft(); setCropZoom(zoom); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { zoom } }); }}
+        onFramingFocusChange={(focus) => {
+          const zoom = customization === "template" && activeSlotTransform ? activeSlotTransform.zoom : cropZoom;
+          applyVisibleFramingFocus(focus, zoom, true);
+        }}
+        onFramingZoomChange={(zoom) => applyVisibleFramingFocus(framingFocus, zoom)}
         onPrepareLocalImage={prepareLocalImage}
         onSelectTemplate={(templateId) => void chooseTemplate(templateId).catch((error) => setTemplateNotice({ tone: "error", message: responseMessage(error) }))}
         onSlotTransformChange={changeBrowserPreviewTransform}
@@ -3542,7 +3854,8 @@ export function ManualStorefront() {
         templateInputs={templateInputs}
         templates={templates}
         visibleTemplateSlots={visibleTemplateSlots}
-      />}
+        />
+      </div>}
 
       <footer className="mt-6 flex justify-center border-t border-border pt-6 text-center text-sm text-muted-foreground">
         <span>

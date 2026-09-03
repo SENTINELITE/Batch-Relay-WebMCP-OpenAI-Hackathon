@@ -12,6 +12,7 @@ import {
 import { photoDropTargetClassName, usePhotoDropTarget } from "@/components/storefront/photo-drag";
 import { TemplateSlotAssignment } from "@/components/storefront/template-slot-assignment";
 import { cn } from "@/lib/cn";
+import type { FocusPreset } from "@/lib/storefront/focus-preset";
 import type {
   CatalogProduct,
   IngestedAsset,
@@ -32,6 +33,8 @@ export type PrepareStepProps = {
   cropY: number;
   cropZoom: number;
   customization: "direct" | "template";
+  /** The focal intent reapplied whenever the shopper changes zoom. */
+  framingFocus: FocusPreset;
   hasLocalImage: boolean;
   imageName: string | null;
   imagePreview: string | null;
@@ -42,7 +45,8 @@ export type PrepareStepProps = {
   onChangeFormat: () => void;
   onCropXChange: (focusX: number) => void;
   onCropYChange: (focusY: number) => void;
-  onCropZoomChange: (zoom: number) => void;
+  onFramingFocusChange: (focus: FocusPreset) => void;
+  onFramingZoomChange: (zoom: number) => void;
   onPrepareLocalImage: () => void;
   onSelectTemplate: (templateId: string) => void;
   /** Live framing while a slider is moving; the preview repaints from it. */
@@ -72,6 +76,40 @@ function PanelHeading({ id, title }: { id: string; title: string }) {
   );
 }
 
+/**
+ * Zoom is an intent as much as a scale: make the anchoring rule explicit so a
+ * standing portrait does not quietly drift back to the middle of its frame.
+ */
+function FramingFocusToggle({
+  value,
+  onChange,
+}: {
+  value: FocusPreset;
+  onChange: (focus: FocusPreset) => void;
+}) {
+  return (
+    <div aria-label="Keep crop focus on" className="flex flex-wrap items-center gap-2">
+      <span className="text-sm text-muted-foreground">Keep zoom focused on</span>
+      <Button
+        aria-pressed={value === "center"}
+        className="h-9 px-3 text-sm"
+        onClick={() => onChange("center")}
+        variant={value === "center" ? "primary" : "secondary"}
+      >
+        Center
+      </Button>
+      <Button
+        aria-pressed={value === "faces"}
+        className="h-9 px-3 text-sm"
+        onClick={() => onChange("faces")}
+        variant={value === "faces" ? "primary" : "secondary"}
+      >
+        Faces
+      </Button>
+    </div>
+  );
+}
+
 export function PrepareStep({
   activeImageSlotKey,
   activeSlotPanLimits,
@@ -82,6 +120,7 @@ export function PrepareStep({
   cropY,
   cropZoom,
   customization,
+  framingFocus,
   hasLocalImage,
   imagePreview,
   managedAsset,
@@ -90,7 +129,8 @@ export function PrepareStep({
   onChangeFormat,
   onCropXChange,
   onCropYChange,
-  onCropZoomChange,
+  onFramingFocusChange,
+  onFramingZoomChange,
   onPrepareLocalImage,
   onSelectTemplate,
   onSlotTransformChange,
@@ -270,13 +310,14 @@ export function PrepareStep({
                     <div className="grid gap-1">
                       <p className="text-sm font-semibold text-foreground">Frame selected image</p>
                     </div>
+                    <FramingFocusToggle onChange={onFramingFocusChange} value={framingFocus} />
                     <RangeField
                       hint={`${activeSlotTransform.zoom.toFixed(2)} times`}
                       label="Zoom"
                       max={4}
                       min={1}
                       onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                      onChange={(event) => onSlotTransformChange(activeImageSlotKey, { ...activeSlotTransform, zoom: Number(event.target.value) })}
+                      onChange={(event) => onFramingZoomChange(Number(event.target.value))}
                       onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
                       step={0.01}
                       value={activeSlotTransform.zoom}
@@ -309,12 +350,13 @@ export function PrepareStep({
                 ) : (
                   <div className="flex flex-col gap-4">
                     <p className="text-sm font-semibold text-foreground">Frame selected photo</p>
+                    <FramingFocusToggle onChange={onFramingFocusChange} value={framingFocus} />
                     <RangeField
                       hint={`${cropZoom.toFixed(2)} times`}
                       label="Zoom"
                       max={4}
                       min={1}
-                      onChange={(event) => onCropZoomChange(Number(event.target.value))}
+                      onChange={(event) => onFramingZoomChange(Number(event.target.value))}
                       step={0.05}
                       value={cropZoom}
                     />

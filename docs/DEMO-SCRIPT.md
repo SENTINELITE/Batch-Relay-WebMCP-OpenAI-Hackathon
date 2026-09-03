@@ -1,10 +1,15 @@
 # Demo script — Batch Relay WebMCP storefront
 
-Stage aid. Total runtime ~6 minutes: 30s pitch, ~5 min runbook, 20s close. Beat 6
+Stage aid. Total runtime ~7 minutes: 30s pitch, ~6 min runbook, 20s close. Beat 6
 is the money sequence — cut Beat 3 or Beat 8 before you cut any of it.
 
 Before you start: dev server up on `http://localhost:3000`, agent connected to the
 page, folder of demo photos ready on the desktop, cart empty, no proposal cards stacked in the corner.
+
+Also worth knowing before you present: a short toast appears at the bottom of the
+screen for **agent** actions only — never for anything you do with your own hands,
+and never for the read-only tools. If you click something and no toast appears,
+that is correct.
 
 ---
 
@@ -32,6 +37,9 @@ page, folder of demo photos ready on the desktop, cart empty, no proposal cards 
 > warning. Fix that one with your mouse, say *"frame the others like this,"* and
 > the agent reads your framing off the page and applies it to the rest. Then
 > *"accept the ready ones"* takes the five and leaves the flagged one standing.
+>
+> And because the agent is working *your* screen, you get told what it did — a
+> one-line note for every change it makes, with an undo on it.
 >
 > Same page, same pixels, for a human or an agent.
 
@@ -216,7 +224,7 @@ click **Add to cart** on just one with the mouse — same outcome, different doo
 
 ---
 
-### Beat 6 — The batch, the exception, and "do the rest like that" (~70s)
+### Beat 6 — The batch, the exception, taking it back, and "do the rest like that" (~110s)
 
 *The money sequence. If you cut anything, do not cut this.*
 
@@ -270,6 +278,47 @@ preview and proposal card before it resolves.
 framing off the page in the same vocabulary it writes crops in, and applied it to
 five others. That round trip — my hands to its tools and back — is the whole
 thesis of this thing."
+
+**Then say:**
+> "Actually — undo that."
+
+**Screen:** every card in the deck snaps back to the framing it had a moment ago,
+visibly, all at once. The toast says what went back: *"Undid: revise_prints
+framing across 5 drafts."*
+
+**Fires:** `undo_last_change` with no arguments. It returns `undone:
+"revise_prints framing across 5 drafts"` — the description the agent narrates —
+plus how many steps are left.
+
+**Line for the room:** "That is the part people actually worry about. An agent
+that can change five things at once needs to be an agent you can take five things
+back from. The workbench snapshots itself before every change the agent makes,
+and the undo comes back through the exact same restore path a page reload uses —
+so the cards come back as cards, still waiting, not as debris. The toast on every
+one of those changes carries the same button; you never have to know the tool
+exists."
+
+**Then say:**
+> "No, you were right — do it again."
+
+**Screen:** the deck repaints back to the shared framing. `revise_prints` fires a
+second time, and the cards re-chip to ✓ Ready.
+
+**Do:** point at one standing card and say:
+> "Make that one two copies."
+
+**Screen:** that card's **Qty** badge ticks from 1 to 2 in place. The card does
+not move, does not fly away, and is still waiting for an answer. Nothing has
+entered the cart.
+
+**Fires:** `resolve_cart_proposal` with `decision: "update_quantity"`,
+`proposalId: <that card>`, `quantity: 2` — and deliberately **no**
+`shopperConfirmation`, because changing what a card is asking for is not
+answering it.
+
+**Line for the room:** "Every other decision on that tool has to quote me. This
+one does not, and that is the point: it did not accept anything. It changed the
+question. When I do accept it, two go in the cart, not one."
 
 **Say:**
 > "Accept the ready ones."
@@ -341,6 +390,9 @@ agent can look up sizes while the shopper keeps working by hand.
 | Product query resolves to nothing | Two live products matched, or zero. Say the exact size: **"the 8 by 10 print"** or **"the memory mate."** Or run `find_prints` first: "What can you print?" |
 | Photo reference ambiguous | Duplicate filenames fail closed by design. Use the ordinal: **"image 5,"** not the filename. |
 | Agent drifts or hallucinates state | Say **"Ask the storefront what's on screen."** One `ask_storefront` call re-grounds it. |
+| "Undo that" says there is nothing to undo | The history only holds changes made since the page was opened, and only the agent's own — it is not restored by a reload. If you have just reloaded, there is genuinely nothing to walk back; carry on. |
+| The undo went back further than you meant | There is no redo. Ask for the change again in the same words you used the first time — every one of these actions is a tool call, so repeating it is cheap and lands identically. |
+| An undo left a slot empty | The snapshot names photographs, never copies them, so a picture that has left the tray comes back unlinked. The response says how many, and the slot says what it needs. Drop the photo back in and assign it. |
 | Everything is stuck | Reload the page. **Your work survives it.** Drafts, slot assignments, framing, the demo cart and any waiting cards are saved to this browser and come back re-linked once the remembered folder finishes re-importing — about a second. Keep talking through it. |
 | After a reload it says *"…N photographs could not be re-linked"* | Those pictures came in through the file picker rather than the remembered folder, so the browser cannot find them again. The drafts survived; the affected slots are simply empty and say what they need. Re-choose the folder and the drafts re-link themselves, or drop the missing photo back in and assign it. |
 | Everything is stuck **and the reload did not help** | Add `?reset=workbench` to the URL. It wipes the saved workbench for this browser and starts you on an empty storefront — the tray, the remembered folder permission and the API are untouched. Resume from Beat 2. |
@@ -361,7 +413,7 @@ agent can look up sizes while the shopper keeps working by hand.
   depth past 2.5x, a focus point inside the template's own important-content
   inset, an aspect more than 2x from the slot's. A `needs_review` verdict is a
   reason to look, never a refusal — both buttons stay live on every card.
-- **One stable tool surface, readiness enforced in the handler.** All eight tools
+- **One stable tool surface, readiness enforced in the handler.** All nine tools
   register once and stay registered, so the agent can plan a whole turn against
   a tool list that never shifts underneath it. Calling one before the page is
   ready does not fail silently or vanish — the visible workbench answers with a

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -290,6 +291,13 @@ test("the model and wasm paths are same-origin, so nothing is fetched from a CDN
     assert.ok(path.startsWith("/"), `${path} is not a same-origin path`);
     assert.doesNotMatch(path, /^https?:|\/\//);
   }
+});
+
+test("the self-hosted loader filters only MediaPipe's benign CPU-delegate startup line", async () => {
+  const sync = await readFile(new URL("../scripts/sync-mediapipe-assets.mjs", import.meta.url), "utf8");
+  assert.match(sync, /Created TensorFlow Lite XNNPACK delegate for CPU\./);
+  assert.match(sync, /console\.error\.apply\(console, arguments\)/);
+  assert.match(sync, /arguments\.length === 1/);
 });
 
 test("detectFaces resolves to no faces where it cannot run, and then stops trying", async () => {

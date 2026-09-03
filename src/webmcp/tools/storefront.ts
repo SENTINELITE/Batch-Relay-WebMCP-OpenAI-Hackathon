@@ -89,8 +89,15 @@ type ResolveCartProposalInput = {
   proposalId?: string;
   /** Alias for proposalId, the name it is returned under. */
   proposal_id?: string;
-  decision: "accept" | "reject" | "accept_all" | "reject_all" | "accept_ready";
-  shopperConfirmation: string;
+  decision: "accept" | "reject" | "accept_all" | "reject_all" | "accept_ready" | "update_quantity";
+  /** Required for every decision except update_quantity, which is not an accept. */
+  shopperConfirmation?: string;
+  /** How many copies a standing card should ask for. update_quantity only. */
+  quantity?: number;
+};
+
+type UndoLastChangeInput = {
+  steps?: number;
 };
 
 type RevisePrintsInput = {
@@ -327,16 +334,17 @@ export const resolveCartProposal = defineTool<ResolveCartProposalInput>({
   name: "resolve_cart_proposal",
   title: "Resolve a pending cart proposal",
   description:
-    "Use exclusively to relay the shopper's own explicit decision about the picture-in-picture proposal cards stacked in the corner, spoken by them after those cards appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Use decision accept or reject with the proposalId of one card — either proposalId or proposal_id is accepted, so the ID can be copied straight out of the response it came from — and that card alone is resolved while the rest keep waiting. When the shopper answers the whole stack at once, in words like add them all or none of those, use decision accept_all or reject_all and leave proposalId out; their words still go in shopperConfirmation and apply to the batch. When they answer only the unflagged ones, in words like accept the ready ones, use decision accept_ready, which accepts every pending card whose review verdict is ready and deliberately leaves each needs_review card standing for them to look at. Acts exactly as the visible buttons would, and returns every proposal it resolved plus the resulting cart state.",
+    "Use exclusively to relay the shopper's own explicit decision about the picture-in-picture proposal cards stacked in the corner, spoken by them after those cards appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Use decision accept or reject with the proposalId of one card — either proposalId or proposal_id is accepted, so the ID can be copied straight out of the response it came from — and that card alone is resolved while the rest keep waiting. When the shopper answers the whole stack at once, in words like add them all or none of those, use decision accept_all or reject_all and leave proposalId out; their words still go in shopperConfirmation and apply to the batch. When they answer only the unflagged ones, in words like accept the ready ones, use decision accept_ready, which accepts every pending card whose review verdict is ready and deliberately leaves each needs_review card standing for them to look at. Separately, decision update_quantity changes how many copies one standing card is asking for, for a request like make that one two copies: it needs proposalId and quantity, it takes no shopperConfirmation because changing a question is not answering it, the card's quantity badge updates in place, the card keeps waiting, and nothing enters the cart until the shopper accepts it — at which point the new quantity is what is added. Acts exactly as the visible buttons would, and returns every proposal it resolved plus the resulting cart state.",
   inputSchema: {
     type: "object",
     properties: {
       proposalId: { type: "string", minLength: 1 },
       proposal_id: { type: "string", minLength: 1 },
-      decision: { type: "string", enum: ["accept", "reject", "accept_all", "reject_all", "accept_ready"] },
+      decision: { type: "string", enum: ["accept", "reject", "accept_all", "reject_all", "accept_ready", "update_quantity"] },
       shopperConfirmation: { type: "string", minLength: 1 },
+      quantity: { type: "integer", minimum: 1, maximum: 99 },
     },
-    required: ["decision", "shopperConfirmation"],
+    required: ["decision"],
     additionalProperties: false,
   },
   async execute(input) {
@@ -344,6 +352,23 @@ export const resolveCartProposal = defineTool<ResolveCartProposalInput>({
       getStorefrontWebMcpState().pendingProposalCount > 0,
       "resolve a cart proposal while none is visible",
     );
+    const raw = input as unknown as Record<string, unknown>;
+    // Changing how many copies a card asks for is not accepting it: nothing
+    // enters the cart, the card keeps waiting, and demanding the shopper's
+    // confirming words for a question they have not been asked yet would make
+    // "make that one two copies" impossible to carry out honestly.
+    if (input.decision === "update_quantity") {
+      requireIdentifierAlias(
+        raw,
+        "proposalId",
+        "proposal_id",
+        "resolve_cart_proposal with decision update_quantity needs the ID of the one card whose quantity is changing.",
+      );
+      if (!Number.isInteger(input.quantity) || (input.quantity as number) < 1 || (input.quantity as number) > 99) {
+        throw new Error("update_quantity requires quantity as a whole number from 1 through 99.");
+      }
+      return requestStorefrontWebMcpAction("resolve_cart_proposal", withResolvedIdentifierAliases(raw, [["proposalId", "proposal_id"]]));
+    }
     // The quote is the whole point of the parameter: an empty one means the
     // agent is answering its own proposal.
     if (typeof input.shopperConfirmation !== "string" || input.shopperConfirmation.trim().length === 0) {
@@ -351,7 +376,6 @@ export const resolveCartProposal = defineTool<ResolveCartProposalInput>({
         "shopperConfirmation must quote the shopper's own words accepting or declining the visible proposal. If they have not answered yet, ask them and wait.",
       );
     }
-    const raw = input as unknown as Record<string, unknown>;
     // A single-card decision needs to say which card; accept_all and reject_all
     // are the shopper answering the whole stack, so they take no ID.
     if (input.decision === "accept" || input.decision === "reject") {
@@ -518,5 +542,28 @@ export const manageCart = defineTool<ManageCartInput>({
       throw new Error("update_quantity requires a quantity.");
     }
     return requestStorefrontWebMcpAction("manage_cart", input);
+  },
+});
+
+export const undoLastChange = defineTool<UndoLastChangeInput>({
+  stableKey: "storefront.undo_last_change",
+  name: "undo_last_change",
+  title: "Undo the last change to the workbench",
+  description:
+    "Use when a shopper wants the last change taken back, for a request like actually, undo that. Restores the visible workbench — drafts, framing, slot assignments, the proposal cards waiting in the corner, and the demo cart — to how it stood before the most recent change, through the same restore path a page reload uses, and re-links every photograph against the tray as it stands now. Optionally pass steps, a whole number from 1 through 5, to walk further back; it walks back as far as the history reaches and reports how far it got. Returns undone, a plain description of the change that was taken back, such as revise_prints framing across 5 drafts, plus how many steps remain: narrate what came back using that description rather than guessing. Only changes the workbench holds are remembered, up to the last ten, and they are forgotten when the page is reloaded; there is no redo, so an undo cannot itself be undone. When nothing has changed yet it says so rather than pretending to act. It never restores a photograph to the tray, un-orders anything, or changes the live catalog.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      steps: { type: "integer", minimum: 1, maximum: 5, default: 1 },
+    },
+    additionalProperties: false,
+  },
+  annotations: { untrustedContentHint: true },
+  async execute(input) {
+    // Deliberately no readiness gate on visible state: whether there is
+    // anything to undo is a fact about the workbench's own history, which the
+    // published capability state does not carry, and the handler can say
+    // exactly what it found instead of refusing vaguely here.
+    return requestStorefrontWebMcpAction("undo_last_change", input as unknown as Record<string, unknown>);
   },
 });

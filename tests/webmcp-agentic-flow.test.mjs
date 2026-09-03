@@ -120,8 +120,8 @@ const approvedTools = [
     exportName: "resolveCartProposal",
     stableKey: "storefront.resolve_cart_proposal",
     name: "resolve_cart_proposal",
-    description: "Use exclusively to relay the shopper's own explicit decision about the picture-in-picture proposal cards stacked in the corner, spoken by them after those cards appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Use decision accept or reject with the proposalId of one card — either proposalId or proposal_id is accepted, so the ID can be copied straight out of the response it came from — and that card alone is resolved while the rest keep waiting. When the shopper answers the whole stack at once, in words like add them all or none of those, use decision accept_all or reject_all and leave proposalId out; their words still go in shopperConfirmation and apply to the batch. When they answer only the unflagged ones, in words like accept the ready ones, use decision accept_ready, which accepts every pending card whose review verdict is ready and deliberately leaves each needs_review card standing for them to look at. Acts exactly as the visible buttons would, and returns every proposal it resolved plus the resulting cart state.",
-    fields: ["proposalId", "proposal_id", "decision", "shopperConfirmation"],
+    description: "Use exclusively to relay the shopper's own explicit decision about the picture-in-picture proposal cards stacked in the corner, spoken by them after those cards appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Use decision accept or reject with the proposalId of one card — either proposalId or proposal_id is accepted, so the ID can be copied straight out of the response it came from — and that card alone is resolved while the rest keep waiting. When the shopper answers the whole stack at once, in words like add them all or none of those, use decision accept_all or reject_all and leave proposalId out; their words still go in shopperConfirmation and apply to the batch. When they answer only the unflagged ones, in words like accept the ready ones, use decision accept_ready, which accepts every pending card whose review verdict is ready and deliberately leaves each needs_review card standing for them to look at. Separately, decision update_quantity changes how many copies one standing card is asking for, for a request like make that one two copies: it needs proposalId and quantity, it takes no shopperConfirmation because changing a question is not answering it, the card's quantity badge updates in place, the card keeps waiting, and nothing enters the cart until the shopper accepts it — at which point the new quantity is what is added. Acts exactly as the visible buttons would, and returns every proposal it resolved plus the resulting cart state.",
+    fields: ["proposalId", "proposal_id", "decision", "shopperConfirmation", "quantity"],
   },
   {
     exportName: "revisePrints",
@@ -144,12 +144,19 @@ const approvedTools = [
     description: "Use when a shopper wants to inspect, change quantity, remove, or clear items in the visible demo cart. Returns the resulting cart state and never changes source photographs, charges a card, or creates an order.",
     fields: ["action", "itemId", "quantity"],
   },
+  {
+    exportName: "undoLastChange",
+    stableKey: "storefront.undo_last_change",
+    name: "undo_last_change",
+    description: "Use when a shopper wants the last change taken back, for a request like actually, undo that. Restores the visible workbench — drafts, framing, slot assignments, the proposal cards waiting in the corner, and the demo cart — to how it stood before the most recent change, through the same restore path a page reload uses, and re-links every photograph against the tray as it stands now. Optionally pass steps, a whole number from 1 through 5, to walk further back; it walks back as far as the history reaches and reports how far it got. Returns undone, a plain description of the change that was taken back, such as revise_prints framing across 5 drafts, plus how many steps remain: narrate what came back using that description rather than guessing. Only changes the workbench holds are remembered, up to the last ten, and they are forgotten when the page is reloaded; there is no redo, so an undo cannot itself be undone. When nothing has changed yet it says so rather than pretending to act. It never restores a photograph to the tray, un-orders anything, or changes the live catalog.",
+    fields: ["steps"],
+  },
 ];
 
-test("WebMCP preserves stable keys while publishing the approved eight-tool agentic flow", async () => {
+test("WebMCP preserves stable keys while publishing the approved nine-tool agentic flow", async () => {
   const source = await read("src/webmcp/tools/storefront.ts");
-  assert.equal(approvedTools.length, 8, "the published tool surface is eight tools");
-  assert.equal(source.match(/^export const \w+ = defineTool/gm)?.length, 8, "no tool is published outside the approved list");
+  assert.equal(approvedTools.length, 9, "the published tool surface is nine tools");
+  assert.equal(source.match(/^export const \w+ = defineTool/gm)?.length, 9, "no tool is published outside the approved list");
   for (const expected of approvedTools) {
     const definition = toolDefinition(source, expected.exportName);
     assert.match(definition, new RegExp(String.raw`stableKey:\s*"${escapeRegExp(expected.stableKey)}"`));
@@ -250,8 +257,18 @@ test("cart proposals use completed visible draft IDs, not product or offer ident
   // proposalId is required only for a single-card decision; accept_all and
   // reject_all answer the whole stack and name no card. The handler enforces
   // that, so it can say which of the two mistakes was made.
-  assert.match(inputSchema(resolve), /required:\s*\["decision",\s*"shopperConfirmation"\]/);
-  assert.match(inputSchema(resolve), /decision:\s*\{\s*type:\s*"string",\s*enum:\s*\["accept",\s*"reject",\s*"accept_all",\s*"reject_all",\s*"accept_ready"\]\s*\}/);
+  // shopperConfirmation left the schema's required list for one reason only:
+  // update_quantity changes the question a card asks rather than answering it,
+  // and demanding a quote of the shopper accepting a proposal they have not
+  // accepted would invite the agent to invent one. Every decision that IS an
+  // answer still refuses without their words — enforced in the execute body,
+  // which can say why, and in the visible handler as well.
+  assert.match(inputSchema(resolve), /required:\s*\["decision"\]/);
+  assert.match(resolve, /if \(input\.decision === "update_quantity"\)/);
+  assert.match(resolve, /shopperConfirmation must quote the shopper's own words/);
+  // update_quantity names its one card and carries a bounded quantity.
+  assert.match(inputSchema(resolve), /quantity:\s*\{\s*type:\s*"integer",\s*minimum:\s*1,\s*maximum:\s*99\s*\}/);
+  assert.match(inputSchema(resolve), /decision:\s*\{\s*type:\s*"string",\s*enum:\s*\["accept",\s*"reject",\s*"accept_all",\s*"reject_all",\s*"accept_ready",\s*"update_quantity"\]\s*\}/);
   assert.match(resolve, /requireIdentifierAlias\(\s*raw,\s*"proposalId",\s*"proposal_id"/);
   assert.doesNotMatch(source, /name:\s*"render_template_preview"/);
 });
@@ -425,7 +442,7 @@ test("registrar publishes one stable tool surface so a whole agent turn stays pl
   assert.ok(list, "expected a constant storefrontTools array");
   assert.deepEqual(
     list[1].split(",").map((entry) => entry.trim()).filter(Boolean),
-    ["askStorefront", "findPrints", "configurePrint", "revisePrints", "proposePrints", "addToCart", "resolveCartProposal", "manageCart"],
+    ["askStorefront", "findPrints", "configurePrint", "revisePrints", "proposePrints", "addToCart", "resolveCartProposal", "manageCart", "undoLastChange"],
   );
   assert.doesNotMatch(registrar, /canConfigurePrint|canAddToCart|state\.pendingProposal/);
   assert.match(registrar, /useEffect\([\s\S]*?\}, \[\]\)/);

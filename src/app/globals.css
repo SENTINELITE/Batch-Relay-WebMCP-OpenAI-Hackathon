@@ -48,6 +48,8 @@
   --animate-cart-ack: cart-ack 1100ms var(--ease-out-expo) forwards;
   --animate-cart-ack-badge: cart-ack-badge 1400ms var(--ease-out-expo) forwards;
 
+  --animate-agent-pulse: agent-pulse 900ms var(--ease-out-expo) both;
+
   --animate-proposal-in: proposal-in 220ms var(--ease-out-expo) both;
   --animate-proposal-accept: proposal-accept 260ms var(--ease-out-expo) forwards;
   --animate-proposal-reject: proposal-reject 180ms var(--ease-out-expo) forwards;
@@ -75,6 +77,18 @@
     18% { opacity: 1; transform: translateY(0); }
     72% { opacity: 1; transform: translateY(-2px); }
     100% { opacity: 0; transform: translateY(-9px); }
+  }
+
+  /* Where the agent just touched the workbench. The live preview repaints and
+     the proposal deck animates on their own; the slot table and the framing
+     controls do not, so an agent's crop change would otherwise land with no
+     motion at all. A ring rather than a fill: it must be findable out of the
+     corner of the eye without obscuring the print it is drawing attention to.
+     Runs once on a keyed element, so no timer is involved. */
+  @keyframes agent-pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--ring) 55%, transparent); }
+    35% { box-shadow: 0 0 0 4px color-mix(in oklab, var(--ring) 32%, transparent); }
+    100% { box-shadow: 0 0 0 8px transparent; }
   }
 
   /* A proposal card arrives from the left edge it is anchored to, so the

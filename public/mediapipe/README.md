@@ -33,5 +33,8 @@ Model card: <https://ai.google.dev/edge/mediapipe/solutions/vision/face_detector
 ## Refreshing
 
 `node scripts/sync-mediapipe-assets.mjs` re-copies the wasm fileset from the
-installed package and re-downloads the model if it is absent. Run it after
-bumping `@mediapipe/tasks-vision` so the runtime and the loader stay in step.
+installed package and re-downloads the model if it is absent. It also filters
+MediaPipe's known, informational XNNPACK CPU-delegate startup line, which its
+loader otherwise emits through `console.error` and Next treats as an app error.
+All other WASM diagnostics are preserved. Run it after bumping
+`@mediapipe/tasks-vision` so the runtime and the loader stay in step.

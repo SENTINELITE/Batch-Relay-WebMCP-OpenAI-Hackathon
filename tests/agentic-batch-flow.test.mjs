@@ -47,7 +47,7 @@ test("revise_prints repaints every visible surface before it answers", async () 
   // And all of it lands before the tool resolves.
   assert.match(revise, /await nextPaint\(\);/);
   assert.ok(
-    revise.indexOf("await nextPaint()") < revise.indexOf("respondToStorefrontWebMcpAction"),
+    revise.indexOf("await nextPaint()") < revise.indexOf("respondWithActivity"),
     "the repaint must be awaited before the response is sent",
   );
 });
@@ -242,7 +242,7 @@ test("a crop patch on the print already on screen never tears its composed previ
   // The repaint ordering the agent depends on survives.
   assert.match(configure, /await nextPaint\(\);/);
   assert.ok(
-    configure.indexOf("await nextPaint()") < configure.lastIndexOf("respondToStorefrontWebMcpAction"),
+    configure.indexOf("await nextPaint()") < configure.lastIndexOf("respondWithActivity"),
     "the repaint must be awaited before the response is sent",
   );
 });

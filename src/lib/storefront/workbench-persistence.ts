@@ -242,6 +242,99 @@ export function createWorkbenchWriter(
   };
 }
 
+/**
+ * How many changes back the workbench can be walked. Ten covers a demo's worth
+ * of agent actions without holding a serialized workbench per keystroke.
+ */
+export const WORKBENCH_HISTORY_LIMIT = 10;
+
+/** One pre-mutation snapshot, labelled with the change that followed it. */
+export type WorkbenchHistoryEntry = {
+  /** What was about to happen, e.g. "revise_prints framing across 5 drafts". */
+  label: string;
+  state: WorkbenchState;
+};
+
+export type WorkbenchUndo = {
+  /** The workbench as it stood before the undone changes. */
+  state: WorkbenchState;
+  /** The most recent change undone, for the line the shopper is shown. */
+  label: string;
+  /** Every change undone, newest first — longer than one only for multi-step. */
+  labels: string[];
+  /** How many changes were actually walked back, which may be fewer than asked. */
+  undoneCount: number;
+};
+
+/**
+ * A bounded stack of pre-mutation snapshots.
+ *
+ * Deliberately a ring rather than unbounded history: this is a browser tab's
+ * scratch space, each entry is a whole serialized workbench, and a shopper who
+ * wants to go back twenty changes wants a reload, not an undo.
+ *
+ * Snapshots are pushed *before* a change applies, so undoing one restores the
+ * state that change started from. Nothing here writes storage — the debounced
+ * writer already saves whatever the workbench currently holds, which after a
+ * restore is the restored state.
+ */
+export type WorkbenchHistory = {
+  /** Records the state a change is about to modify. */
+  push(label: string, state: WorkbenchState): void;
+  /** Walks back up to `steps` changes, or null when there is nothing to undo. */
+  undo(steps?: number): WorkbenchUndo | null;
+  /** How many changes can still be walked back. */
+  depth(): number;
+  /** The pending labels, newest first. Read-only; for describing the history. */
+  labels(): string[];
+  clear(): void;
+};
+
+export function createWorkbenchHistory(limit: number = WORKBENCH_HISTORY_LIMIT): WorkbenchHistory {
+  // Oldest first, so the newest entry is the last one — a plain array is the
+  // right shape at this size, and shift() past the limit is the whole ring.
+  const entries: WorkbenchHistoryEntry[] = [];
+  return {
+    push(label, state) {
+      if (limit <= 0) return;
+      entries.push({ label, state });
+      while (entries.length > limit) entries.shift();
+    },
+    undo(steps = 1) {
+      if (entries.length === 0) return null;
+      // Asking to go back further than the ring holds walks back as far as it
+      // can and says how far it got, rather than refusing a reachable undo.
+      const requested = Number.isInteger(steps) && steps > 0 ? steps : 1;
+      const undoneCount = Math.min(requested, entries.length);
+      const removed = entries.splice(entries.length - undoneCount, undoneCount);
+      const oldest = removed[0]!;
+      const labels = [...removed].reverse().map((entry) => entry.label);
+      return { state: oldest.state, label: labels[0]!, labels, undoneCount };
+    },
+    depth() {
+      return entries.length;
+    },
+    labels() {
+      return [...entries].reverse().map((entry) => entry.label);
+    },
+    clear() {
+      entries.length = 0;
+    },
+  };
+}
+
+/**
+ * Wraps a bare state in the snapshot envelope, so an undo goes back through the
+ * very same relink-and-apply path a reload restore uses. There is deliberately
+ * no second restore implementation to drift from the proven one.
+ */
+export function workbenchSnapshotFromState(
+  state: WorkbenchState,
+  now: () => string = () => new Date().toISOString(),
+): WorkbenchSnapshot {
+  return { ...state, version: WORKBENCH_SCHEMA_VERSION, savedAt: now() };
+}
+
 export type WorkbenchRestore = {
   drafts: PrintDraft[];
   cart: LocalCartItem[];

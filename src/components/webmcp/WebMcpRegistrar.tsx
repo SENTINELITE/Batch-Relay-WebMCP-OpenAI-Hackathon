@@ -12,6 +12,7 @@ import {
   proposePrints,
   resolveCartProposal,
   revisePrints,
+  undoLastChange,
 } from "../../webmcp/tools/storefront";
 
 /** Optional WebMCP telemetry key. Registration stays local when it is unset. */
@@ -37,6 +38,7 @@ const storefrontTools = [
   addToCart,
   resolveCartProposal,
   manageCart,
+  undoLastChange,
 ];
 
 /** Registers the storefront tool surface once for the visible client flow. */

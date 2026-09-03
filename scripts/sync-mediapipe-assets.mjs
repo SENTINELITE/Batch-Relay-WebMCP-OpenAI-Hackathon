@@ -18,11 +18,26 @@ const modelTarget = path.join(root, "public", "mediapipe", "blaze_face_short_ran
 const MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite";
 const MODEL_SHA256 = "b4578f35940bf5a1a655214a1cce5cab13eba73c1297cd78e1a04c2380b0152f";
+const WASM_ERROR_SINK = "var err = console.error.bind(console);";
+const XNNPACK_STARTUP_MESSAGE = "Created TensorFlow Lite XNNPACK delegate for CPU.";
+// MediaPipe's Emscripten loader writes this normal CPU-delegate startup line
+// through console.error. Next's development overlay treats it as an app error,
+// so silence that one known informational message while preserving every other
+// WASM diagnostic verbatim.
+const WASM_ERROR_SINK_WITH_XNNPACK_FILTER = `var err = function() {
+  if (arguments.length === 1 && typeof arguments[0] === "string" && arguments[0].includes("${XNNPACK_STARTUP_MESSAGE}")) return;
+  console.error.apply(console, arguments);
+};`;
 
 await mkdir(wasmTarget, { recursive: true });
 const names = await readdir(wasmSource);
 for (const name of names) {
-  await copyFile(path.join(wasmSource, name), path.join(wasmTarget, name));
+  const target = path.join(wasmTarget, name);
+  await copyFile(path.join(wasmSource, name), target);
+  if (!name.endsWith(".js")) continue;
+  const source = await readFile(target, "utf8");
+  if (!source.includes(WASM_ERROR_SINK)) continue;
+  await writeFile(target, source.replace(WASM_ERROR_SINK, WASM_ERROR_SINK_WITH_XNNPACK_FILTER));
 }
 console.log(`Copied ${names.length} wasm files from @mediapipe/tasks-vision.`);
 

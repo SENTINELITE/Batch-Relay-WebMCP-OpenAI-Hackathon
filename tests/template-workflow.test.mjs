@@ -551,9 +551,22 @@ test("template preview clears a drag when pointer capture is lost outside the sl
   assert.match(preview, /target\.closest\("\[data-template-framing-controls\]"\)/);
 });
 
+test("visible framing controls keep a named focal target while zoom changes", async () => {
+  const prepare = await read("src/components/storefront/prepare-step.tsx");
+  const storefront = await read("src/components/storefront/manual-storefront.tsx");
+  assert.match(prepare, /aria-label="Keep crop focus on"/);
+  assert.match(prepare, /Keep zoom focused on/);
+  assert.match(prepare, /onFramingFocusChange/);
+  assert.match(prepare, /onFramingZoomChange/);
+  assert.match(storefront, /function resolveVisibleFramingFocus/);
+  assert.match(storefront, /function applyVisibleFramingFocus\(preset: FocusPreset, zoom: number/);
+  assert.match(storefront, /slotTransformFromCropPatch\(initialBrowserPreviewTransform, result\.patch/);
+  assert.match(storefront, /onFramingZoomChange=\{\(zoom\) => applyVisibleFramingFocus\(framingFocus, zoom\)\}/);
+});
+
 test("a committed browser-preview slot transform updates the local draft without a removed render path", async () => {
   const source = await read("src/components/storefront/manual-storefront.tsx");
-  assert.match(source, /function updateBrowserPreviewTransform\(slotKey: string, transform: BrowserPreviewTransform\)[\s\S]*patchDraft\(selectedDraftId, \{ slotTransforms: next, proofState: "idle" \}\)/);
+  assert.match(source, /function updateBrowserPreviewTransform\(slotKey: string, transform: BrowserPreviewTransform\)[\s\S]*lastBrowserPreviewTransforms\.current\[slotKey\] \?\? transform[\s\S]*patchDraft\(selectedDraftId, \{ slotTransforms: next, proofState: "idle" \}\)/);
   assert.doesNotMatch(source, /invalidateTemplateRenderForBrowserPreviewChange|setTemplateRender/);
 });
 
