@@ -1,6 +1,7 @@
 # Demo script — Batch Relay WebMCP storefront
 
-Stage aid. Total runtime ~4.5 minutes: 30s pitch, ~3.5 min runbook, 20s close.
+Stage aid. Total runtime ~6 minutes: 30s pitch, ~5 min runbook, 20s close. Beat 6
+is the money sequence — cut Beat 3 or Beat 8 before you cut any of it.
 
 Before you start: dev server up on `http://localhost:3000`, agent connected to the
 page, folder of demo photos ready on the desktop, cart empty, no proposal cards stacked in the corner.
@@ -24,6 +25,13 @@ page, folder of demo photos ready on the desktop, cart empty, no proposal cards 
 > your words back. And it never takes the screen off you: ask for a second print
 > while you are customizing one by hand and that print gets built in the
 > background, with the card as its whole first appearance.
+>
+> That scales. Ask for a print of each of six photos and you get six cards in one
+> call, each carrying a **geometry** verdict — effective PPI, crop depth, trim
+> proximity, aspect — so the one worth a second look is the one wearing the
+> warning. Fix that one with your mouse, say *"frame the others like this,"* and
+> the agent reads your framing off the page and applies it to the rest. Then
+> *"accept the ready ones"* takes the five and leaves the flagged one standing.
 >
 > Same page, same pixels, for a human or an agent.
 
@@ -177,17 +185,87 @@ door: to accept by voice it has to quote you. One that tries to confirm its own
 proposal is refused. What it *can* do is keep asking: propose a second print and
 a second card stacks above the first, each waiting on me separately."
 
-*(Optional, if time: ask for two more off-screen prints in one breath — "add
-image 4 and image 9 as 5 by 7s." Two cards stack in the corner, newest nearest
-the corner, older ones collapsing to a compact row once the column gets deep.
+*(Leave that card's sibling behaviour for Beat 6, which stacks a whole deck at
+once. If you are cutting Beat 6 for time, do the short version here instead: "add
+image 4 and image 9 as 5 by 7s." Two cards stack, newest nearest the corner.
 Answer them together — **"Add them all"** — and `resolve_cart_proposal` fires
-once with `decision: "accept_all"` and your words in `shopperConfirmation`; each
-card affirms and flies toward the cart chip while the rest settle. Or click
-**Add to cart** on just one with the mouse — same outcome, different door.)*
+once with `decision: "accept_all"` and your words in `shopperConfirmation`. Or
+click **Add to cart** on just one with the mouse — same outcome, different door.)*
 
 ---
 
-### Beat 6 — Cart and demo checkout (~20s)
+### Beat 6 — The batch, the exception, and "do the rest like that" (~70s)
+
+*The money sequence. If you cut anything, do not cut this.*
+
+**Say:**
+> "Make a 5 by 7 of each of photos 10 through 15."
+
+**Screen:** the memory mate still does not move. Six cards deal into the
+bottom-left corner as one deck — top card full size, two peeking behind it, a
+`+3 more` badge on top. Every card carries its own live preview, a **Qty**, and
+a status chip: most read **✓ Ready**, and one reads **⚠ Needs review** with a
+line of plain English under it — *"At this crop the photo prints at about 210
+PPI, below the 300 PPI this size expects — it may look soft."*
+
+**Fires:** one `propose_prints` call — `productQuery: "5 by 7"`,
+`photoRefs: [10,11,12,13,14,15]`, `trayRevision: <current>`. It returns an
+ordered per-item result: each `photo_ref` with its `draft_id`, `proposal_id`,
+`status`, and a `review` verdict, plus a `review_summary` of
+`{ proposed: 6, ready: 5, needs_review: 1 }`. Every item reports
+`placed: "draft_rail"`.
+
+**Line for the room:** "Six prints, one call, and not one of them took my screen.
+The batch is background by definition — the cards *are* the review."
+
+**Then say:**
+> "Anything wrong with those?"
+
+**Screen:** nothing changes. The agent reads the verdicts it already has.
+
+**Say to the room while it answers:** "It is not guessing and it is not looking
+at pixels. That is geometry: the photo's pixels against the printed inches at
+the crop I asked for. No model, no face detection — arithmetic I can argue with."
+
+**Do:** click the flagged card's print in the rail, then **drag the framing with
+the mouse** until it looks right — pull the zoom back, recentre the subject. The
+chip on that card flips to **✓ Ready** as you release.
+
+**Say:**
+> "Frame the others like this."
+
+**Screen:** every other 5x7 card in the deck repaints — same zoom, same focus —
+*before* the agent finishes speaking. The deck re-chips itself.
+
+**Fires:** `ask_storefront` to read the framing you just committed (every draft
+publishes its crop in `set_crop` vocabulary, not just the selected one), then one
+`revise_prints` call — `draftIds: [...]`, `crop: { zoom, focusX, focusY }`. It
+returns per-draft `applied` / `skipped` results and repaints every affected
+preview and proposal card before it resolves.
+
+**Line for the room:** "I framed *one* print with my hands. The agent read that
+framing off the page in the same vocabulary it writes crops in, and applied it to
+five others. That round trip — my hands to its tools and back — is the whole
+thesis of this thing."
+
+**Say:**
+> "Accept the ready ones."
+
+**Screen:** the ready cards affirm and fly toward the cart chip one after
+another; the chip ticks up. Any card still flagged **stays standing** in the
+corner.
+
+**Fires:** `resolve_cart_proposal` with `decision: "accept_ready"` and your words
+verbatim in `shopperConfirmation`. It accepts every pending proposal whose
+verdict is `ready` and deliberately leaves each `needs_review` card waiting.
+
+**Line for the room:** "'The ready ones' is a real instruction, not a rounding of
+'all of them.' The flagged card is exactly the one I said I wanted to look at, so
+it is the one thing the agent is not allowed to answer for me."
+
+---
+
+### Beat 7 — Cart and demo checkout (~20s)
 
 **Say:**
 > "What's in my cart?"
@@ -208,7 +286,7 @@ URL that does not exist."
 
 ---
 
-### Beat 7 — Discovery, if you have room (~15s)
+### Beat 8 — Discovery, if you have room (~15s)
 
 **Say:**
 > "What other sizes do you print?"
@@ -227,7 +305,11 @@ requirements from the live catalog.
 | "The photo tray changed (visible revision N)" | You touched the tray mid-call. Say **"Check the tray again, then retry."** The agent re-runs `ask_storefront` and repeats `configure_print` with the fresh `trayRevision`. This is the guardrail working — call it out. |
 | The workbench moved when you expected it to stay | The draft only counts as *yours* once you have clicked it in the rail or edited it by hand. If the agent placed it and you only spoke, a new draft still takes the screen. Click the print you want to keep, then ask again — `configure_print` reports `placed: "draft_rail"` when it stays out of your way. |
 | A card appeared for the print you *were* looking at | The draft only counts as yours once you have selected it or it has held the screen for a few seconds. Click it in the draft rail and ask again — your own click makes it yours immediately. Answering the card is never wrong, just one extra beat. |
-| Cards piling up in the corner | Expected — proposals stack, and each one waits on you. Clear them in one go with **"Add them all"** or **"None of those"** (`resolve_cart_proposal` with `accept_all` / `reject_all`), or answer one at a time. Older cards collapse to a compact row; click one to open it back up. |
+| Cards piling up in the corner | Expected — proposals stack, and each one waits on you. Clear them in one go with **"Add them all"** or **"None of those"** (`resolve_cart_proposal` with `accept_all` / `reject_all`), take only the unflagged ones with **"Accept the ready ones"** (`accept_ready`), or answer one at a time. Past three, the rest are a `+N more` badge on the top card. |
+| Every card in the batch reads ⚠ Needs review | Usually one cause hitting all of them — small source files against a large print, or an orientation that fights the slot. Ask **"Why is that flagged?"**; each card's finding names the reason in words. It is never a block: **"Add them all"** still works. |
+| `accept_ready` errors with "no pending proposal comes back ready" | Every waiting card is flagged, so there is no subset to take. Read the findings out and answer the cards individually, or fix the framing first and ask again. |
+| "Frame the others like this" reframed nothing | The named drafts were multi-slot templates with no slot named, so `revise_prints` skipped them rather than guessing which image to move. Say which — **"do the same to the individual photo on each"** — and it resolves by role. Each skipped result already says this. |
+| The batch stole the screen | It should not — `propose_prints` never selects a draft. If the workbench moved, you had no draft of your own in front of you, which is the agent-driven case. Click a print in the rail to make it yours, then ask again. |
 | "Tool requires: draftId" | Should no longer happen: every ID input takes both spellings, so an agent copying `draft_id` or `proposal_id` straight out of a response is accepted. If you see it, the agent invented a field name — ask it to re-read `ask_storefront`. |
 | "The visible storefront is not ready to…" | The tool is there; the page is not ready yet — usually an empty tray or an incomplete draft. Drop photos in, or ask **"What's still missing on this draft?"** (`ask_storefront`) and fill the named slot. |
 | Product query resolves to nothing | Two live products matched, or zero. Say the exact size: **"the 8 by 10 print"** or **"the memory mate."** Or run `find_prints` first: "What can you print?" |
@@ -245,7 +327,13 @@ requirements from the live catalog.
 - **A CustomEvent bridge is the only wire.** Tools dispatch an action event and
   await a result event; the storefront component that the human is looking at is
   the thing that answers. Agent and human drive one identical state machine.
-- **One stable tool surface, readiness enforced in the handler.** All six tools
+- **Review is geometry, and it is honest about it.** `print-review.ts` is a pure
+  module with no model, no network call and no face detection: effective PPI from
+  the photo's pixels over the slot's printed inches at the current zoom, a crop
+  depth past 2.5x, a focus point inside the template's own important-content
+  inset, an aspect more than 2x from the slot's. A `needs_review` verdict is a
+  reason to look, never a refusal — both buttons stay live on every card.
+- **One stable tool surface, readiness enforced in the handler.** All eight tools
   register once and stay registered, so the agent can plan a whole turn against
   a tool list that never shifts underneath it. Calling one before the page is
   ready does not fail silently or vanish — the visible workbench answers with a

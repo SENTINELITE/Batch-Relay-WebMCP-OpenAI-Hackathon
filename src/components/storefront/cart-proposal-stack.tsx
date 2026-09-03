@@ -8,11 +8,17 @@ import {
   type CartProposal,
   type CartProposalStackEntry,
 } from "@/lib/storefront/local-cart";
+import type { PrintReview } from "@/lib/storefront/print-review";
 
 export type CartProposalStackProps = {
   entries: readonly CartProposalStackEntry[];
-  /** Aspect ratio and live template preview for one proposed draft. */
-  previewFor: (proposal: CartProposal) => { aspect: string; templatePreview: ReactNode | null };
+  /** Aspect ratio, live template preview, and review verdict for one proposed draft. */
+  previewFor: (proposal: CartProposal) => {
+    aspect: string;
+    templatePreview: ReactNode | null;
+    review: PrintReview;
+    foundInCatalog: boolean;
+  };
   onAccept: (proposal: CartProposal) => void;
   onReject: (proposal: CartProposal) => void;
 };
@@ -84,7 +90,7 @@ export function CartProposalStack({ entries, previewFor, onAccept, onReject }: C
         // Deeper cards are never seen, so their live previews are not mounted.
         if (depth >= CART_PROPOSAL_VISIBLE_DEPTH) return null;
         const onTop = depth === 0;
-        const { aspect, templatePreview } = previewFor(proposal);
+        const { aspect, templatePreview, review, foundInCatalog } = previewFor(proposal);
 
         return (
           <div
@@ -109,10 +115,12 @@ export function CartProposalStack({ entries, previewFor, onAccept, onReject }: C
               aspect={aspect}
               depth={depth}
               exit={exit}
+              foundInCatalog={foundInCatalog}
               moreCount={moreCount}
               onAccept={() => onAccept(proposal)}
               onReject={() => onReject(proposal)}
               proposal={proposal}
+              review={review}
               templatePreview={templatePreview}
             />
           </div>

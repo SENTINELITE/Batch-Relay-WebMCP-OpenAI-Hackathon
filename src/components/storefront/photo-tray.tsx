@@ -34,7 +34,7 @@ type TrayPhotoCardProps = {
 function TrayPhotoCard({ disabled, onSelect, ordinal, photo, selected }: TrayPhotoCardProps) {
   const { bodyProps, connect, connectHandle, handleProps, isDragging } = useDraggablePhoto(photo, disabled);
   return <li className="w-44 shrink-0">
-    <div className="relative">
+    <div className="group relative">
       <PrintFrame
         aspect="4 / 5"
         className={cn(
@@ -64,7 +64,7 @@ function TrayPhotoCard({ disabled, onSelect, ordinal, photo, selected }: TrayPho
       </PrintFrame>
       {disabled ? null : <button
         aria-label={`Drag image ${ordinal}, ${photo.filename}, onto a print slot`}
-        className="absolute -left-2 -top-2 grid size-6 cursor-grab touch-none place-items-center rounded-full border border-border bg-card text-muted-foreground shadow-warm transition-colors hover:text-foreground active:cursor-grabbing motion-reduce:transition-none"
+        className="pointer-events-none absolute -left-2 -top-2 grid size-6 cursor-grab touch-none place-items-center rounded-full border border-border bg-card text-muted-foreground opacity-0 shadow-warm transition-[color,opacity] hover:text-foreground group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus:pointer-events-auto focus:opacity-100 active:cursor-grabbing motion-reduce:transition-none"
         ref={connectHandle}
         type="button"
         {...handleProps}

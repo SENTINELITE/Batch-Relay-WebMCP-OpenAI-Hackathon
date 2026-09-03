@@ -9,7 +9,9 @@ import {
   configurePrint,
   findPrints,
   manageCart,
+  proposePrints,
   resolveCartProposal,
+  revisePrints,
 } from "../../webmcp/tools/storefront";
 
 /** Optional WebMCP telemetry key. Registration stays local when it is unset. */
@@ -30,6 +32,8 @@ const storefrontTools = [
   askStorefront,
   findPrints,
   configurePrint,
+  revisePrints,
+  proposePrints,
   addToCart,
   resolveCartProposal,
   manageCart,

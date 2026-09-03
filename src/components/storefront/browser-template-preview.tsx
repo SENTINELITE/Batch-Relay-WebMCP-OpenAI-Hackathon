@@ -42,6 +42,8 @@ type BrowserTemplatePreviewProps = {
   onPreviewChange?: (slotKey: string, transform: BrowserPreviewTransform) => void;
   onPreviewCommit?: (reason: PreviewCommitReason, slotKey: string, transform: BrowserPreviewTransform) => void;
   onPreviewPanLimitsChange?: (slotKey: string, limits: BrowserPreviewPanLimits) => void;
+  /** Proposal cards render a read-only preview and never register drop slots. */
+  dropEnabled?: boolean;
 };
 
 /** The canvas keeps `container-type: inline-size` so text layers can size in `cqw`. */
@@ -86,6 +88,7 @@ type SlotDropSurfaceProps = ComponentPropsWithoutRef<"div"> & {
   /** Null for a published asset layer, which no photograph may replace. */
   slotKey: string | null;
   isActive: boolean;
+  dropEnabled: boolean;
 };
 
 /**
@@ -95,8 +98,8 @@ type SlotDropSurfaceProps = ComponentPropsWithoutRef<"div"> & {
  * pointer-down pan, its activation click, and its pointer capture all continue
  * to run exactly as they did before.
  */
-function SlotDropSurface({ children, className, isActive, slotKey, ...rest }: SlotDropSurfaceProps) {
-  const { connect, isDragActive, isOver, settled } = usePhotoDropTarget({ kind: "template_slot", slotKey: slotKey ?? "" }, slotKey === null);
+function SlotDropSurface({ children, className, dropEnabled, isActive, slotKey, ...rest }: SlotDropSurfaceProps) {
+  const { connect, isDragActive, isOver, settled } = usePhotoDropTarget({ kind: "template_slot", slotKey: slotKey ?? "" }, !dropEnabled || slotKey === null);
   const dropRing = isOver || settled || isDragActive;
   return <div
     {...rest}
@@ -126,6 +129,7 @@ export function BrowserTemplatePreview({
   onPreviewChange,
   onPreviewCommit,
   onPreviewPanLimitsChange,
+  dropEnabled = true,
 }: BrowserTemplatePreviewProps) {
   const selectedSurface = document.output.surfaces.find((surface) => surface.id === selectedSurfaceID) ?? document.output.surfaces[0] ?? null;
   const canvas = useMemo(() => selectedSurface
@@ -349,7 +353,7 @@ export function BrowserTemplatePreview({
                 width: "100%",
               }
             : undefined;
-          if (layer.kind === "image") return <SlotDropSurface aria-label={isLocalSlot ? `Select ${localSlotKey} image slot` : undefined} className={cn("absolute", !source && "border border-dashed border-border-strong bg-foreground/5")} isActive={isActive} key={layer.id} slotKey={isLocalSlot ? localSlotKey! : null} onClick={isLocalSlot ? () => selectLocalSlot(localSlotKey!) : undefined} onKeyDown={isLocalSlot ? (event) => selectLocalSlotFromKeyboard(event, localSlotKey!) : undefined} onLostPointerCapture={isLocalSlot ? loseDrag : undefined} onPointerDown={isLocalSlot ? (event) => { event.stopPropagation(); selectLocalSlot(localSlotKey!); startDrag(event, localSlotKey!); } : undefined} role={isLocalSlot ? "button" : undefined} style={style} tabIndex={isLocalSlot ? 0 : undefined}>
+          if (layer.kind === "image") return <SlotDropSurface aria-label={isLocalSlot ? `Select ${localSlotKey} image slot` : undefined} className={cn("absolute", !source && "border border-dashed border-border-strong bg-foreground/5")} dropEnabled={dropEnabled} isActive={isActive} key={layer.id} slotKey={isLocalSlot ? localSlotKey! : null} onClick={isLocalSlot ? () => selectLocalSlot(localSlotKey!) : undefined} onKeyDown={isLocalSlot ? (event) => selectLocalSlotFromKeyboard(event, localSlotKey!) : undefined} onLostPointerCapture={isLocalSlot ? loseDrag : undefined} onPointerDown={isLocalSlot ? (event) => { event.stopPropagation(); selectLocalSlot(localSlotKey!); startDrag(event, localSlotKey!); } : undefined} role={isLocalSlot ? "button" : undefined} style={style} tabIndex={isLocalSlot ? 0 : undefined}>
             {source ? <img alt={layer.assetRef ? "Published template artwork" : `Local preview for ${localSlotKey} image slot`} className={cn("block select-none", isLocalSlot && "absolute max-w-none")} draggable={false} onLoad={isLocalSlot ? (event) => {
               const { naturalHeight: height, naturalWidth: width } = event.currentTarget;
               if (!localImage || width <= 0 || height <= 0) return;

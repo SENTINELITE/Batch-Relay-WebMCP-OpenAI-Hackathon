@@ -2,7 +2,6 @@
 
 import type { ReactNode } from "react";
 
-import { photoDropTargetClassName, usePhotoDropTarget } from "@/components/storefront/photo-drag";
 import { fieldControlClassName } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import type { TemplateContract } from "@/lib/storefront/client";
@@ -33,11 +32,8 @@ const selectClassName = cn(
   "appearance-none bg-[image:var(--select-chevron)] bg-[position:right_16px_center] bg-[length:18px_18px] bg-no-repeat pr-11",
 );
 
-/** A slot row that accepts the same drag the live preview accepts, so the two
- *  places a shopper can see a slot both answer to the photograph tray. */
 function ImageSlotRow({ children, slotKey }: { children: ReactNode; slotKey: string }) {
-  const { connect, isDragActive, isOver, settled } = usePhotoDropTarget({ kind: "template_slot", slotKey });
-  return <label className={cn(rowClassName, photoDropTargetClassName({ isDragActive, isOver, settled }))} ref={connect}>{children}</label>;
+  return <label className={rowClassName} data-slot-key={slotKey}>{children}</label>;
 }
 
 export function TemplateSlotAssignment({

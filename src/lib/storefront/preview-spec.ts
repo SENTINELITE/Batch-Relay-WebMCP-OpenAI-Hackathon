@@ -30,6 +30,8 @@ export type RenderTemplateSpecSlot = {
   semanticRole?: string;
   required?: boolean;
   requiredAspectRatio?: { width: number; height: number };
+  /** The published effective-PPI floor for this slot, when the spec declares one. */
+  minimumEffectivePpi?: number;
   maxLength?: number;
 };
 
@@ -372,6 +374,59 @@ export function specBrowserPreviewDocument({
     input_slots: inputSlots,
     assets: [...assets.values()],
   };
+}
+
+/**
+ * The published important-content inset, as a fraction of each axis.
+ *
+ * The print-review heuristics ask how close to the trim a framing has carried
+ * the subject, and a template that publishes `surfaceGeometry.importantContentArea`
+ * has already answered that in inches. Reading it here means the warning is
+ * grounded in the template's own safety geometry rather than a house number;
+ * `null` sends the caller to its documented default.
+ */
+export function specImportantContentMargin(
+  spec: RenderTemplateSpec,
+  surfaceID?: string,
+): { x: number; y: number } | null {
+  const surface = (surfaceID ? spec.surfaces.find((candidate) => candidate.id === surfaceID) : spec.surfaces[0])
+    ?? spec.surfaces[0];
+  if (!surface) return null;
+  const geometry = surface.surfaceGeometry as { outputBoundsIn?: { width?: number; height?: number }; importantContentArea?: { insetIn?: Record<string, unknown> } } | undefined;
+  const width = positive(geometry?.outputBoundsIn?.width) ?? positive(surface.widthIn);
+  const height = positive(geometry?.outputBoundsIn?.height) ?? positive(surface.heightIn);
+  if (!width || !height) return null;
+
+  const inset = geometry?.importantContentArea?.insetIn;
+  const edge = (name: string) => {
+    const value = inset?.[name];
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+  };
+  const horizontal = Math.max(edge("left") ?? 0, edge("right") ?? 0);
+  const vertical = Math.max(edge("top") ?? 0, edge("bottom") ?? 0);
+  if (horizontal > 0 || vertical > 0) return { x: horizontal / width, y: vertical / height };
+
+  // Older surfaces publish the same fact as one scalar under `safety`.
+  const safety = surface.safety as { importantContentInsetIn?: unknown } | undefined;
+  const scalar = positive(typeof safety?.importantContentInsetIn === "number" ? safety.importantContentInsetIn : null);
+  return scalar === null ? null : { x: scalar / width, y: scalar / height };
+}
+
+/**
+ * The strictest effective-PPI floor any image slot in the spec publishes.
+ *
+ * Taken across the whole spec rather than per slot: matching spec slot keys to
+ * contract keys needs a contract, and a template that expects 300 PPI of one
+ * image expects it of the others too. `null` means the spec declared none.
+ */
+export function specMinimumEffectivePpi(spec: RenderTemplateSpec): number | null {
+  const floors = (spec.slots ?? [])
+    .filter((slot) => slot.kind === "image")
+    .flatMap((slot) => {
+      const value = positive(slot.minimumEffectivePpi ?? null);
+      return value === null ? [] : [value];
+    });
+  return floors.length > 0 ? Math.min(...floors) : null;
 }
 
 /**

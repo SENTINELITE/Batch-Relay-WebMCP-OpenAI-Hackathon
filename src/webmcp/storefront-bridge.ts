@@ -28,6 +28,8 @@ export type StorefrontWebMcpAction =
   | "ask_storefront"
   | "find_prints"
   | "configure_print"
+  | "revise_prints"
+  | "propose_prints"
   | "add_to_cart"
   | "resolve_cart_proposal"
   | "manage_cart";

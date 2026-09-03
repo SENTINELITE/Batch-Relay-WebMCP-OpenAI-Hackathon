@@ -2,7 +2,9 @@ import { defineTool } from "@nekuda/webmcp-sdk";
 
 import {
   requireIdentifierAlias,
+  requireIdentifierListAlias,
   withResolvedIdentifierAliases,
+  withResolvedIdentifierListAliases,
 } from "../../lib/storefront/tool-input";
 import {
   getStorefrontWebMcpState,
@@ -68,8 +70,27 @@ type ResolveCartProposalInput = {
   proposalId?: string;
   /** Alias for proposalId, the name it is returned under. */
   proposal_id?: string;
-  decision: "accept" | "reject" | "accept_all" | "reject_all";
+  decision: "accept" | "reject" | "accept_all" | "reject_all" | "accept_ready";
   shopperConfirmation: string;
+};
+
+type RevisePrintsInput = {
+  draftIds?: string[];
+  /** Alias for draftIds, the name the IDs are returned under. */
+  draft_ids?: string[];
+  crop: DirectCrop;
+  slotSelector?: { role?: "individual" | "team"; slotKey?: string; label?: string };
+};
+
+type ProposePrintsInput = {
+  trayRevision: number;
+  productId?: string;
+  productQuery?: string;
+  photoRefs?: PhotoRef[];
+  /** Alias for photoRefs, the name the references are returned under. */
+  photo_refs?: PhotoRef[];
+  quantity?: number;
+  orientation?: "portrait" | "landscape";
 };
 
 type ManageCartInput = {
@@ -252,13 +273,13 @@ export const resolveCartProposal = defineTool<ResolveCartProposalInput>({
   name: "resolve_cart_proposal",
   title: "Resolve a pending cart proposal",
   description:
-    "Use exclusively to relay the shopper's own explicit decision about the picture-in-picture proposal cards stacked in the corner, spoken by them after those cards appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Use decision accept or reject with the proposalId of one card — either proposalId or proposal_id is accepted, so the ID can be copied straight out of the response it came from — and that card alone is resolved while the rest keep waiting. When the shopper answers the whole stack at once, in words like add them all or none of those, use decision accept_all or reject_all and leave proposalId out; their words still go in shopperConfirmation and apply to the batch. Acts exactly as the visible buttons would, and returns every proposal it resolved plus the resulting cart state.",
+    "Use exclusively to relay the shopper's own explicit decision about the picture-in-picture proposal cards stacked in the corner, spoken by them after those cards appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Use decision accept or reject with the proposalId of one card — either proposalId or proposal_id is accepted, so the ID can be copied straight out of the response it came from — and that card alone is resolved while the rest keep waiting. When the shopper answers the whole stack at once, in words like add them all or none of those, use decision accept_all or reject_all and leave proposalId out; their words still go in shopperConfirmation and apply to the batch. When they answer only the unflagged ones, in words like accept the ready ones, use decision accept_ready, which accepts every pending card whose review verdict is ready and deliberately leaves each needs_review card standing for them to look at. Acts exactly as the visible buttons would, and returns every proposal it resolved plus the resulting cart state.",
   inputSchema: {
     type: "object",
     properties: {
       proposalId: { type: "string", minLength: 1 },
       proposal_id: { type: "string", minLength: 1 },
-      decision: { type: "string", enum: ["accept", "reject", "accept_all", "reject_all"] },
+      decision: { type: "string", enum: ["accept", "reject", "accept_all", "reject_all", "accept_ready"] },
       shopperConfirmation: { type: "string", minLength: 1 },
     },
     required: ["decision", "shopperConfirmation"],
@@ -284,10 +305,127 @@ export const resolveCartProposal = defineTool<ResolveCartProposalInput>({
         raw,
         "proposalId",
         "proposal_id",
-        `resolve_cart_proposal with decision ${input.decision} needs the ID of the one card being answered; use accept_all or reject_all for the whole stack.`,
+        `resolve_cart_proposal with decision ${input.decision} needs the ID of the one card being answered; use accept_all or reject_all for the whole stack, or accept_ready for every card the review already calls ready.`,
       );
     }
     return requestStorefrontWebMcpAction("resolve_cart_proposal", withResolvedIdentifierAliases(raw, [["proposalId", "proposal_id"]]));
+  },
+});
+
+export const revisePrints = defineTool<RevisePrintsInput>({
+  stableKey: "storefront.revise_prints",
+  name: "revise_prints",
+  title: "Apply one approved framing to other prints",
+  description:
+    "Propagate a framing the shopper has already approved onto other prints, for a request like frame the others like this. Applies one crop patch — the same zoom, focus and offset vocabulary configure_print's set_crop takes and ask_storefront reports per draft — to every draft named in draftIds, aiming at each draft's only image slot unless slotSelector names a role such as individual or team, a published slotKey, or a label; every affected preview and proposal card repaints before this returns. Returns a per-draft result saying applied or skipped with the reason, and never adds anything to the demo cart, answers a proposal, or moves the shopper to another print.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      draftIds: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+      draft_ids: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+      crop: {
+        type: "object",
+        properties: {
+          zoom: { type: "number", minimum: 1, maximum: 4 },
+          focusX: { type: "number", minimum: 0, maximum: 100 },
+          focusY: { type: "number", minimum: 0, maximum: 100 },
+          offsetX: { type: "number", minimum: -100, maximum: 100 },
+          offsetY: { type: "number", minimum: -100, maximum: 100 },
+        },
+        minProperties: 1,
+        additionalProperties: false,
+      },
+      slotSelector: {
+        type: "object",
+        properties: {
+          role: { type: "string", enum: ["individual", "team"] },
+          slotKey: { type: "string", minLength: 1 },
+          label: { type: "string", minLength: 1 },
+        },
+        minProperties: 1,
+        additionalProperties: false,
+      },
+    },
+    required: ["crop"],
+    anyOf: [{ required: ["draftIds"] }, { required: ["draft_ids"] }],
+    additionalProperties: false,
+  },
+  annotations: { untrustedContentHint: true },
+  async execute(input) {
+    const raw = input as unknown as Record<string, unknown>;
+    // Named here rather than left to the schema, so a missing list is refused
+    // in words that give both spellings instead of "Tool requires: draftIds".
+    requireIdentifierListAlias(
+      raw,
+      "draftIds",
+      "draft_ids",
+      "revise_prints needs the IDs of the visible drafts to reframe.",
+    );
+    if (!input.crop || typeof input.crop !== "object" || Object.keys(input.crop).length === 0) {
+      throw new Error("revise_prints needs at least one crop value to propagate: zoom, focusX, focusY, offsetX, or offsetY.");
+    }
+    return requestStorefrontWebMcpAction("revise_prints", withResolvedIdentifierListAliases(raw, [["draftIds", "draft_ids"]]));
+  },
+});
+
+export const proposePrints = defineTool<ProposePrintsInput>({
+  stableKey: "storefront.propose_prints",
+  name: "propose_prints",
+  title: "Stage one print per photograph",
+  description:
+    "Stage one print per photograph in a single call, for a request like make a 5x7 of each of photos 10 through 15. Creates a draft for every reference in photoRefs against one product, prefilling any template roles the shopper has already chosen, and stacks a picture-in-picture proposal card for each — always in the background, so a shopper customizing a print by hand keeps the screen and never has it taken from them. Returns an ordered per-item result carrying photo_ref, draft_id, proposal_id, status and a geometry review verdict, reporting a photograph that could not be staged in place rather than abandoning the rest of the batch. Nothing enters the demo cart until the SHOPPER answers each card, so stop afterwards and tell them the deck is waiting.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      trayRevision: { type: "integer", minimum: 0 },
+      productId: { type: "string", minLength: 1 },
+      productQuery: { type: "string", minLength: 1 },
+      photoRefs: {
+        type: "array",
+        minItems: 1,
+        items: {
+          oneOf: [
+            { type: "string", minLength: 1 },
+            { type: "integer", minimum: 1 },
+          ],
+        },
+      },
+      photo_refs: {
+        type: "array",
+        minItems: 1,
+        items: {
+          oneOf: [
+            { type: "string", minLength: 1 },
+            { type: "integer", minimum: 1 },
+          ],
+        },
+      },
+      quantity: { type: "integer", minimum: 1, maximum: 99, default: 1 },
+      orientation: { type: "string", enum: ["portrait", "landscape"] },
+    },
+    required: ["trayRevision"],
+    anyOf: [{ required: ["photoRefs"] }, { required: ["photo_refs"] }],
+    additionalProperties: false,
+  },
+  annotations: { untrustedContentHint: true },
+  async execute(input) {
+    const state = getStorefrontWebMcpState();
+    requireVisibleCapability(
+      state.canConfigurePrint && state.photoCount > 0,
+      "stage prints from the visible photo tray",
+    );
+    requireCurrentTrayRevision(input.trayRevision);
+    const raw = input as unknown as Record<string, unknown>;
+    requireIdentifierListAlias(
+      raw,
+      "photoRefs",
+      "photo_refs",
+      "propose_prints needs the tray photographs to make one print from each.",
+    );
+    if (!input.productId && !input.productQuery) {
+      throw new Error("propose_prints needs one product for the whole batch: pass productId, or productQuery to name it the way the shopper did.");
+    }
+    return requestStorefrontWebMcpAction("propose_prints", withResolvedIdentifierListAliases(raw, [["photoRefs", "photo_refs"]]));
   },
 });
 

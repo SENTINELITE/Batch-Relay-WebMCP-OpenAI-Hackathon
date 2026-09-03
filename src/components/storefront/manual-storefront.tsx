@@ -58,7 +58,18 @@ import {
   type CartProposalStackEntry,
   type LocalCartItem,
 } from "@/lib/storefront/local-cart";
-import { readIdentifierAlias, requireIdentifierAlias } from "@/lib/storefront/tool-input";
+import {
+  readIdentifierAlias,
+  requireIdentifierAlias,
+  requireIdentifierListAlias,
+} from "@/lib/storefront/tool-input";
+import {
+  printReviewWire,
+  reviewCounts,
+  reviewPrint,
+  type PrintReview,
+  type ReviewSlot,
+} from "@/lib/storefront/print-review";
 import {
   agentDraftPlacement,
   emptyShopperViewContext,
@@ -75,7 +86,12 @@ import {
   type BrowserPreviewTransform,
 } from "@/lib/storefront/browser-preview";
 import { fallbackBrowserPreviewDocument } from "@/lib/storefront/preview-fallback";
-import { publicTemplateAssetURL, specBrowserPreviewDocument } from "@/lib/storefront/preview-spec";
+import {
+  publicTemplateAssetURL,
+  specBrowserPreviewDocument,
+  specImportantContentMargin,
+  specMinimumEffectivePpi,
+} from "@/lib/storefront/preview-spec";
 import { bundledTemplateSpec } from "@/lib/storefront/template-specs";
 import {
   deriveImageSlotAliases,
@@ -285,6 +301,13 @@ export function ManualStorefront() {
   // draft being selected and never refetches artwork the workbench already has.
   const [previewDocuments, setPreviewDocuments] = useState<Record<string, BrowserPreviewDocument>>({});
   const previewDocumentsRef = useRef<Record<string, BrowserPreviewDocument>>({});
+  // Pixel dimensions of each tray photograph, decoded lazily. The review
+  // heuristics need them to say anything honest about effective PPI.
+  const [, setImageDimensions] = useState<Record<string, { width: number; height: number }>>({});
+  const imageDimensionsRef = useRef<Record<string, { width: number; height: number }>>({});
+  // Which drafts were made behind the shopper's screen, so a proposal card can
+  // say the print was found in the catalog rather than chosen on screen.
+  const backgroundDraftIds = useRef<Set<string>>(new Set());
   // Which tray photograph the shopper last chose for each semantic role. It
   // lives for the session only and is never persisted or sent anywhere.
   const photoRoleMemory = useRef<PhotoRoleMemory>(emptyPhotoRoleMemory);
@@ -417,6 +440,27 @@ export function ManualStorefront() {
     return () => { cancelled = true; };
   }, [catalog, templates]);
 
+  // Decoded pixel dimensions for each tray photograph, which is the one fact
+  // the resolution review needs and the tray itself does not carry. Decoded
+  // once per photo, off the render path, and never sent anywhere.
+  useEffect(() => {
+    let live = true;
+    for (const photo of photoLibrary.photos) {
+      if (imageDimensionsRef.current[photo.id]) continue;
+      void createImageBitmap(photo.file).then((bitmap) => {
+        const size = { width: bitmap.width, height: bitmap.height };
+        bitmap.close();
+        if (!live || imageDimensionsRef.current[photo.id]) return;
+        imageDimensionsRef.current = { ...imageDimensionsRef.current, [photo.id]: size };
+        setImageDimensions(imageDimensionsRef.current);
+      }).catch(() => {
+        // A photograph this browser cannot decode simply yields no resolution
+        // finding, rather than a warning invented from nothing.
+      });
+    }
+    return () => { live = false; };
+  }, [photoLibrary.photos]);
+
   useEffect(() => { photoLibraryRef.current = photoLibrary; }, [photoLibrary]);
   useEffect(() => { draftsRef.current = drafts; }, [drafts]);
   useEffect(() => { browserPreviewDocumentRef.current = browserPreviewDocument; }, [browserPreviewDocument]);
@@ -498,6 +542,10 @@ export function ManualStorefront() {
       photoLibrary.photos,
     );
     return {
+      // The verdict is computed from the proposal's own draft snapshot, so a
+      // card reframed by revise_prints re-chips itself along with its preview.
+      review: reviewForDraft(proposal.draft),
+      foundInCatalog: backgroundDraftIds.current.has(proposal.draftId),
       aspect: product?.physical_output
         ? `${product.physical_output.width} / ${product.physical_output.height}`
         : "4 / 5",
@@ -506,6 +554,7 @@ export function ManualStorefront() {
           activeImageSlotKey={null}
           assetURLs={proposalPreviewAssetURLs}
           document={proposalPreviewDocument}
+          dropEnabled={false}
           localImageSlots={proposalPreviewImageSlots}
           onActiveImageSlotChange={() => undefined}
           onSurfaceChange={() => undefined}
@@ -1092,6 +1141,83 @@ export function ManualStorefront() {
     return photoLibrary.photos.find((candidate) => candidate.id === photoId)?.previewURL ?? null;
   }
 
+  /**
+   * The image slots of any draft, on screen or not, with everything needed to
+   * aim a crop at one and to judge it.
+   *
+   * Read from that draft's *own* resolved artwork rather than the workbench's,
+   * so a print waiting in the draft rail describes itself truthfully. The slot
+   * boxes are the published printed sizes in inches, which is what makes an
+   * effective-PPI figure a fact rather than an estimate.
+   */
+  function draftImageSlotFacts(draft: PrintDraft) {
+    if (!draft.template) return [];
+    const document = previewDocumentsRef.current[previewDocumentKey(draft.template.id, draft.template.outputId)] ?? null;
+    const boxes = browserPreviewSlotBoxes(document);
+    const keys = [...new Set([
+      ...(document?.input_slots ?? []).map((slot) => slot.slot_key),
+      ...Object.keys(boxes),
+      ...Object.keys(draft.slotAssignments),
+      ...Object.keys(draft.slotTransforms),
+    ])];
+    const slots = keys.map((key) => ({ key }));
+    const aliases = deriveImageSlotAliases(slots, boxes);
+    const roles = photoRolesBySlotKey(keys.map((key) => ({ key, aliases: aliases[key], box: boxes[key] ?? null })));
+    return keys.map((key) => ({
+      key,
+      aliases: aliases[key] ?? [],
+      role: roles[key] ?? null,
+      box: boxes[key] ?? null,
+      photoId: draft.slotAssignments[key] ?? null,
+      crop: cropPatchFromSlotTransform(draft.slotTransforms[key] ?? initialBrowserPreviewTransform),
+    }));
+  }
+
+  /**
+   * A draft reduced to the geometry the review reads. A direct print has no
+   * published slots, so the printed product itself is the one slot.
+   */
+  function draftReviewSlots(draft: PrintDraft): ReviewSlot[] {
+    const product = productForDraft(draft);
+    const spec = draft.template ? bundledTemplateSpec(draft.template.id) : null;
+    const publishedPpi = spec ? specMinimumEffectivePpi(spec) : null;
+    const publishedMargin = spec ? specImportantContentMargin(spec) : null;
+
+    if (!draft.template) {
+      const photoId = draft.photoIds[0] ?? null;
+      const focus = directCropFocus(draft.directCrop);
+      const output = product?.physical_output ?? null;
+      return [{
+        slotKey: null,
+        label: product?.name ?? null,
+        printedSizeIn: output ? { width: output.width, height: output.height } : null,
+        photoPixels: photoId ? imageDimensionsRef.current[photoId] ?? null : null,
+        minimumEffectivePpi: null,
+        requiredAspectRatio: output ? { width: output.width, height: output.height } : null,
+        importantContentMargin: null,
+        crop: { zoom: draft.directCrop.zoom, focusX: focus.focusX, focusY: focus.focusY },
+      }];
+    }
+
+    return draftImageSlotFacts(draft)
+      .filter((slot) => slot.photoId)
+      .map((slot) => ({
+        slotKey: slot.key,
+        label: slot.aliases[0] ?? null,
+        printedSizeIn: slot.box,
+        photoPixels: slot.photoId ? imageDimensionsRef.current[slot.photoId] ?? null : null,
+        minimumEffectivePpi: publishedPpi,
+        requiredAspectRatio: slot.box,
+        importantContentMargin: publishedMargin,
+        crop: { zoom: slot.crop.zoom, focusX: slot.crop.focusX, focusY: slot.crop.focusY },
+      }));
+  }
+
+  /** The geometry verdict for one draft, computed fresh from visible state. */
+  function reviewForDraft(draft: PrintDraft): PrintReview {
+    return reviewPrint(draftReviewSlots(draft));
+  }
+
   function addableProductForDraft(draft: PrintDraft, verb: "adding" | "proposing"): CatalogProduct {
     const product = productForDraft(draft);
     if (!product) throw new Error("That visible draft no longer has its returned catalog product.");
@@ -1236,7 +1362,38 @@ export function ManualStorefront() {
             state: {
               tray: { revision: photoLibrary.revision, photos: photoLibrary.photos.map((photo, index) => ({ photo_id: photo.id, position: index + 1, filename: photo.filename })) },
               selection: { product_id: selectedProductId, template_id: selectedTemplate?.id ?? null, output_id: templateOutput?.id ?? null, active_draft_id: selectedDraftId, preview_source: browserPreviewDocument ? browserPreviewDocument.preview_source ?? "published" : null },
-              drafts: drafts.map((draft) => ({ draft_id: draft.id, product_id: draft.productId, product_revision: draft.productRevision, photo_ids: draft.photoIds, template: draft.template ?? null, proof_state: draft.proofState })),
+              // Every draft, not only the selected one, reports its framing in
+              // the set_crop vocabulary revise_prints and configure_print
+              // accept. A shopper's hand adjustment commits into the draft on
+              // mouse release, so this is readable the moment they let go —
+              // which is what makes "frame the others like this" answerable.
+              drafts: drafts.map((draft) => {
+                const review = reviewForDraft(draft);
+                return {
+                  draft_id: draft.id,
+                  product_id: draft.productId,
+                  product_revision: draft.productRevision,
+                  product_name: productForDraft(draft)?.name ?? null,
+                  photo_ids: draft.photoIds,
+                  template: draft.template ?? null,
+                  proof_state: draft.proofState,
+                  on_screen: draft.id === selectedDraftId,
+                  placed: backgroundDraftIds.current.has(draft.id) ? "draft_rail" : "on_screen",
+                  image_slots: draftImageSlotFacts(draft).map((slot) => ({
+                    slot_key: slot.key,
+                    aliases: slot.aliases,
+                    role: slot.role,
+                    assigned_photo_id: slot.photoId,
+                    crop: slot.crop,
+                  })),
+                  direct_crop: draft.template ? null : visibleDirectCrop(draft),
+                  // What adding this draft would do to the cart, and whether it
+                  // is already spoken for by a card or a line.
+                  pending_proposal_id: pendingProposals.find((proposal) => proposal.draftId === draft.id)?.id ?? null,
+                  cart_quantity: cart.filter((item) => item.draftId === draft.id).reduce((total, item) => total + item.quantity, 0),
+                  review: printReviewWire(review),
+                };
+              }),
               template_slots: visibleTemplateSlots.map((slot) => ({
                 key: slot.key,
                 kind: slot.kind,
@@ -1263,14 +1420,22 @@ export function ManualStorefront() {
               cart_items: localCartWireItems(cart),
               // Every card still waiting, oldest first, because several can be
               // stacked at once and each awaits its own answer.
-              pending_proposals: cartProposalWireItems(pendingProposals),
+              pending_proposals: cartProposalWireItems(pendingProposals).map((item, index) => ({
+                ...item,
+                // The card's own chip, in words, so "accept the ready ones" can
+                // be planned from this list without re-deriving anything.
+                review: printReviewWire(reviewForDraft(pendingProposals[index]!.draft)),
+                found_in_catalog: backgroundDraftIds.current.has(item.draft_id),
+              })),
               pending_proposal_count: pendingProposals.length,
+              // How the deck breaks down, which is what accept_ready acts on.
+              proposal_review_summary: reviewCounts(pendingProposals.map((proposal) => reviewForDraft(proposal.draft))),
               last_proposal_outcome: lastProposalOutcome
                 ? { proposal_id: lastProposalOutcome.proposalId, draft_id: lastProposalOutcome.draftId, product_name: lastProposalOutcome.productName, quantity: lastProposalOutcome.quantity, decision: lastProposalOutcome.decision }
                 : null,
             },
             guidance: pendingProposals.length > 0
-              ? `${pendingProposals.length} proposal card${pendingProposals.length === 1 ? " is" : "s are"} waiting; ask the shopper to accept or reject ${pendingProposals.length === 1 ? "it" : "them"}, then call resolve_cart_proposal with their answer — one proposalId at a time, or accept_all or reject_all when they answer the whole stack at once.`
+              ? `${pendingProposals.length} proposal card${pendingProposals.length === 1 ? " is" : "s are"} waiting; ask the shopper to accept or reject ${pendingProposals.length === 1 ? "it" : "them"}, then call resolve_cart_proposal with their answer — one proposalId at a time, accept_all or reject_all when they answer the whole stack at once, or accept_ready when they take only the cards the review calls ready. Say which cards are flagged and why before asking: proposal_review_summary counts them and each card's review carries the reason in words.`
               : selectedDraftId
                 ? "Complete the active draft's visible slots, then add it to the demo cart. Adding the draft the shopper is watching goes straight in; adding any other draft asks them with the proposal card first."
                 : "Configure a print from visible tray photos to create a draft.",
@@ -1339,6 +1504,10 @@ export function ManualStorefront() {
           // the draft rail and the proposal card is their whole view of it.
           const placement: DraftPlacement = agentDraftPlacement(shopperViewRef.current, selectedDraftId, draft.id);
           const onScreen = placement === "on_screen";
+          // Remembered so a proposal card for this draft can say the print was
+          // found in the catalog rather than chosen on screen.
+          if (onScreen) backgroundDraftIds.current.delete(draft.id);
+          else backgroundDraftIds.current.add(draft.id);
           if (onScreen) {
             setSelectedDraftId(draft.id);
             // An agent put this draft on screen. Revising the draft the shopper
@@ -1567,6 +1736,10 @@ export function ManualStorefront() {
               };
             }) ?? [],
             direct_crop: visibleDirectCrop(finalDraft),
+            // Geometry only — resolution, zoom, trim proximity and aspect. A
+            // needs_review verdict is a reason to show the shopper, never a
+            // refusal to proceed.
+            review: printReviewWire(reviewForDraft(finalDraft)),
             default_photo_from: roleDefault ? prefillProvenance(roleDefault.role) : null,
             missing_requirements: missingRequirements,
             missing: missingDetail,
@@ -1574,6 +1747,291 @@ export function ManualStorefront() {
             nextStep: product.template_requirement === "required"
               ? missingRequirements.length === 0 ? "ready_for_proof_or_cart" : "ask_shopper_for_missing_slots"
               : "prepare_visible_crop",
+          } });
+          return;
+        }
+        if (request.action === "revise_prints") {
+          // The whole point of the tool: a framing the shopper approved on one
+          // print, applied to the others through the same patch path
+          // configure_print's set_crop uses, so there is no second crop
+          // vocabulary to drift from the visible one.
+          const requestedIds = requireIdentifierListAlias(
+            request.input,
+            "draftIds",
+            "draft_ids",
+            "revise_prints requires the IDs of the visible drafts to reframe.",
+          );
+          const crop = request.input.crop && typeof request.input.crop === "object"
+            ? request.input.crop as Record<string, unknown>
+            : null;
+          const cropValue = (key: string) => typeof crop?.[key] === "number" ? crop[key] as number : undefined;
+          const cropPatch = {
+            zoom: cropValue("zoom"),
+            focusX: cropValue("focusX"),
+            focusY: cropValue("focusY"),
+            offsetX: cropValue("offsetX"),
+            offsetY: cropValue("offsetY"),
+          };
+          if (Object.values(cropPatch).every((value) => value === undefined)) {
+            throw new Error("revise_prints needs at least one crop value to propagate: zoom, focusX, focusY, offsetX, or offsetY.");
+          }
+          const selector = request.input.slotSelector && typeof request.input.slotSelector === "object"
+            ? request.input.slotSelector as Record<string, unknown>
+            : {};
+          const wantedRole = selector.role === "individual" || selector.role === "team" ? selector.role : null;
+          const wantedSlotKey = typeof selector.slotKey === "string" ? selector.slotKey : undefined;
+          const wantedLabel = typeof selector.label === "string" ? selector.label : undefined;
+
+          const revised = new Map<string, PrintDraft>();
+          const reviseResults = requestedIds.map((rawId) => {
+            const draftId = typeof rawId === "string" ? rawId : String(rawId);
+            const draft = draftsRef.current.find((candidate) => candidate.id === draftId);
+            if (!draft) {
+              return { draft_id: draftId, status: "skipped", reason: "no_such_visible_draft", slot_key: null, crop: null, review: null };
+            }
+            // A direct print has no published slots: the print itself is the
+            // frame, so the crop lands on exactly the values the prepare-step
+            // sliders and configure_print's directCrop already write.
+            if (!draft.template) {
+              const nextCrop = {
+                zoom: cropPatch.zoom ?? draft.directCrop.zoom,
+                focusX: cropPatch.focusX ?? draft.directCrop.focusX,
+                focusY: cropPatch.focusY ?? draft.directCrop.focusY,
+                offsetX: cropPatch.offsetX ?? draft.directCrop.offsetX,
+                offsetY: cropPatch.offsetY ?? draft.directCrop.offsetY,
+              };
+              patchDraft(draft.id, { directCrop: nextCrop });
+              if (draft.id === selectedDraftId) {
+                setCropZoom(nextCrop.zoom); setCropX(nextCrop.focusX); setCropY(nextCrop.focusY);
+              }
+              const next = patchPrintDraft(draft, { directCrop: nextCrop });
+              revised.set(draft.id, next);
+              return {
+                draft_id: draft.id,
+                status: "applied",
+                reason: null,
+                slot_key: null,
+                crop: visibleDirectCrop(next),
+                review: printReviewWire(reviewForDraft(next)),
+              };
+            }
+
+            const facts = draftImageSlotFacts(draft);
+            if (facts.length === 0) {
+              return { draft_id: draft.id, status: "skipped", reason: "no_image_slot_resolved_for_this_draft", slot_key: null, crop: null, review: null };
+            }
+            let slotKey: string | null = null;
+            let skipReason: string | null = null;
+            if (wantedSlotKey || wantedLabel) {
+              const resolution = resolveSlotPatchTarget(
+                facts.map((fact) => ({ key: fact.key, suggested_label: null })),
+                { slotKey: wantedSlotKey, label: wantedLabel },
+                Object.fromEntries(facts.map((fact) => [fact.key, fact.aliases])),
+              );
+              if (resolution.kind === "resolved") slotKey = resolution.slot.key;
+              else skipReason = resolution.reason === "ambiguous_alias" ? "ambiguous_slot_alias" : "no_matching_slot";
+            } else if (wantedRole) {
+              const matching = facts.filter((fact) => fact.role === wantedRole);
+              if (matching.length === 1) slotKey = matching[0]!.key;
+              else skipReason = matching.length === 0 ? "no_matching_slot" : "ambiguous_slot_role";
+            } else if (facts.length === 1) {
+              slotKey = facts[0]!.key;
+            } else {
+              // Refusing to guess: naming the roles it does have turns this
+              // into a retry the agent can make rather than a dead end.
+              skipReason = `this draft has ${facts.length} image slots (${facts.map((fact) => fact.aliases[0] ?? fact.key).join(", ")}); name one with slotSelector`;
+            }
+            if (!slotKey) {
+              return { draft_id: draft.id, status: "skipped", reason: skipReason ?? "no_matching_slot", slot_key: null, crop: null, review: null };
+            }
+            const transforms = {
+              ...draft.slotTransforms,
+              [slotKey]: slotTransformFromCropPatch(draft.slotTransforms[slotKey] ?? initialBrowserPreviewTransform, cropPatch),
+            };
+            patchDraft(draft.id, { slotTransforms: transforms, proofState: "idle" });
+            // The workbench preview repaints only if this is the draft on it.
+            if (draft.id === selectedDraftId) {
+              lastBrowserPreviewTransforms.current = transforms;
+              setSlotTransforms(transforms);
+            }
+            const next = patchPrintDraft(draft, { slotTransforms: transforms, proofState: "idle" });
+            revised.set(draft.id, next);
+            return {
+              draft_id: draft.id,
+              status: "applied",
+              reason: null,
+              slot_key: slotKey,
+              crop: cropPatchFromSlotTransform(transforms[slotKey]!),
+              review: printReviewWire(reviewForDraft(next)),
+            };
+          });
+
+          // A card in the deck paints a snapshot of the draft it proposed, so a
+          // reframed draft has to be written back into its standing card or the
+          // shopper would be answering a picture of the old framing.
+          if (revised.size > 0) {
+            setProposalStack((entries) => entries.map((entry) => {
+              const next = entry.exit ? null : revised.get(entry.proposal.draftId);
+              return next ? { ...entry, proposal: { ...entry.proposal, draft: next } } : entry;
+            }));
+          }
+          const applied = reviseResults.filter((result) => result.status === "applied").length;
+          const skipped = reviseResults.length - applied;
+          setNotice({ tone: "info", message: applied > 0
+            ? `Applied the same framing to ${applied} print${applied === 1 ? "" : "s"}${skipped > 0 ? `; ${skipped} could not take it.` : "."}`
+            : "No visible draft could take that framing." });
+          // Every repaint — workbench preview and proposal cards — lands before
+          // the agent hears back, so it never reports a change nobody can see.
+          await nextPaint();
+          respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+            status: applied > 0 ? "revised" : "nothing_revised",
+            applied_count: applied,
+            skipped_count: skipped,
+            results: reviseResults,
+            guidance: applied > 0
+              ? `${applied} print${applied === 1 ? " now carries" : "s now carry"} that framing, and every affected preview and proposal card has repainted.${skipped > 0 ? ` ${skipped} was left alone — each says why in its own result.` : ""} Nothing was added to the demo cart and no proposal was answered.`
+              : "Nothing was reframed; each result says why. Nothing was added to the demo cart.",
+            nextStep: "tell_the_shopper_what_changed",
+          } });
+          return;
+        }
+        if (request.action === "propose_prints") {
+          if (request.input.trayRevision !== photoLibrary.revision) throw new Error(`The photo tray changed; use visible tray revision ${photoLibrary.revision}.`);
+          const refs = requireIdentifierListAlias(
+            request.input,
+            "photoRefs",
+            "photo_refs",
+            "propose_prints requires the tray photographs to make one print from each.",
+          );
+          const batchProductId = typeof request.input.productId === "string" ? request.input.productId : null;
+          const batchProductQuery = typeof request.input.productQuery === "string" ? request.input.productQuery.trim().toLowerCase() : "";
+          const batchMatches = batchProductId
+            ? catalog.filter((candidate) => candidate.id === batchProductId)
+            : batchProductQuery ? naturalProductMatches(catalog, batchProductQuery) : [];
+          if (batchMatches.length !== 1) throw new Error(batchMatches.length === 0
+            ? "No live print matches that product reference."
+            : "That natural product reference matches more than one live print; use the canonical product ID.");
+          const batchProduct = batchMatches[0]!;
+          const batchQuantity = Number(request.input.quantity ?? 1);
+          if (!Number.isInteger(batchQuantity) || batchQuantity < 1 || batchQuantity > 99) {
+            throw new Error("quantity must be a whole number from 1 through 99, and applies to each print in the batch.");
+          }
+          const batchOrientation = request.input.orientation === "portrait" || request.input.orientation === "landscape"
+            ? request.input.orientation
+            : undefined;
+
+          const createdDrafts: PrintDraft[] = [];
+          const batchResults: Array<Record<string, unknown>> = [];
+          for (const [index, reference] of refs.entries()) {
+            const photoRef = typeof reference === "string" || typeof reference === "number" ? reference : String(reference);
+            const position = index + 1;
+            try {
+              const found = resolvePhotoReference(photoLibrary.photos, photoRef as string | number);
+              if (found.kind !== "resolved") {
+                batchResults.push({
+                  position, photo_ref: photoRef, draft_id: null, proposal_id: null,
+                  status: "skipped",
+                  reason: found.kind === "ambiguous"
+                    ? `${photoRef} matches multiple tray photographs; use the returned photo ID.`
+                    : `${photoRef} is not in the current photo tray.`,
+                  review: null,
+                });
+                continue;
+              }
+              const photo = found.photo;
+              let draft = createPrintDraft(batchProduct, [photo.id]);
+              if (batchProduct.template_requirement !== "unsupported") {
+                // Resolved as a pure read, exactly as a background configure_print
+                // does, so nothing the shopper is looking at moves.
+                const offScreen = await resolveTemplateOffScreen(batchProduct, draft, { orientation: batchOrientation });
+                if (!offScreen) {
+                  batchResults.push({
+                    position, photo_ref: photoRef, draft_id: null, proposal_id: null,
+                    status: "failed",
+                    reason: "No active server template has a compatible published output for this product and orientation.",
+                    review: null,
+                  });
+                  continue;
+                }
+                // This photograph is the reason the print exists, so it takes
+                // the individual slot; the shopper's remembered role choices
+                // fill whatever else the layout still needs.
+                const batchRoles = imageSlotRoles(offScreen.contract.slots, browserPreviewSlotBoxes(offScreen.document));
+                const batchImageSlots = offScreen.contract.slots.filter((slot) => slot.kind === "image");
+                const primarySlot = batchImageSlots.find((slot) => batchRoles[slot.key] === "individual")
+                  ?? (batchImageSlots.length === 1 ? batchImageSlots[0] : null);
+                const batchAssignments = { ...offScreen.assignments };
+                if (primarySlot) batchAssignments[primarySlot.key] = photo.id;
+                draft = patchPrintDraft(draft, {
+                  template: offScreen.template,
+                  templateContractKnown: true,
+                  requiredSlotKeys: effectiveRequiredTemplateSlotKeys(batchProduct, offScreen.contract.slots),
+                  slotAssignments: batchAssignments,
+                });
+              }
+              createdDrafts.push(draft);
+              // Batch prints are background by definition: they never take the
+              // screen, so their card is the shopper's first look at each one.
+              backgroundDraftIds.current.add(draft.id);
+              const staged = proposeDraft(draft, batchQuantity);
+              batchResults.push({
+                position,
+                photo_ref: photoRef,
+                photo_id: photo.id,
+                draft_id: draft.id,
+                proposal_id: staged.proposal.id,
+                status: staged.duplicate ? "already_proposed" : "proposed",
+                duplicate_of_pending_proposal: staged.duplicate,
+                placed: "draft_rail",
+                reason: null,
+                review: printReviewWire(reviewForDraft(draft)),
+              });
+            } catch (error) {
+              // One photograph that cannot be staged is reported in place; the
+              // rest of the batch still gets made.
+              batchResults.push({
+                position, photo_ref: photoRef,
+                draft_id: createdDrafts[createdDrafts.length - 1]?.id ?? null,
+                proposal_id: null,
+                status: "failed",
+                reason: responseMessage(error),
+                review: null,
+              });
+            }
+          }
+          if (createdDrafts.length > 0) setDrafts((items) => [...items, ...createdDrafts]);
+          const proposedCount = batchResults.filter((result) => result.status === "proposed" || result.status === "already_proposed").length;
+          const reviews = batchResults.flatMap((result) => {
+            const review = result.review as { verdict?: string } | null;
+            return review?.verdict ? [review.verdict] : [];
+          });
+          const summary = {
+            proposed: proposedCount,
+            ready: reviews.filter((verdict) => verdict === "ready").length,
+            needs_review: reviews.filter((verdict) => verdict === "needs_review").length,
+          };
+          const stackCount = pendingProposals.length + batchResults.filter((result) => result.status === "proposed").length;
+          setNotice({ tone: "info", message: proposedCount > 0
+            ? `Proposed ${proposedCount} × ${batchProduct.name}. Accept or reject each preview card.`
+            : `No print could be staged for ${batchProduct.name}.` });
+          // Every card must be on screen before the agent hears back.
+          await nextPaint();
+          respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+            status: proposedCount > 0 ? "awaiting_shopper_confirmation" : "nothing_proposed",
+            product: { id: batchProduct.id, revision: batchProduct.revision, name: batchProduct.name },
+            quantity_each: batchQuantity,
+            // Ordered exactly as the photographs were named, so "the third one"
+            // means the same thing to the shopper and to you.
+            results: batchResults,
+            proposed_count: proposedCount,
+            review_summary: summary,
+            pending_proposal_count: stackCount,
+            decided_by: "shopper",
+            placement_guidance: "Every print in this batch was made in the draft rail and none of them took the screen. Do not tell the shopper they are looking at any of these; the proposal cards are their first and only look at each one.",
+            guidance: proposedCount > 0
+              ? `Nothing has been added to the demo cart. ${proposedCount} card${proposedCount === 1 ? " is" : "s are"} now stacked in the corner, each carrying its own live preview and awaiting the SHOPPER's own answer.${summary.needs_review > 0 ? ` ${summary.needs_review} of them ${summary.needs_review === 1 ? "is" : "are"} flagged needs_review — say which and read the finding out, because that is the one worth their attention.` : " All of them come back ready."} Tell them the deck is waiting and stop. Do not call resolve_cart_proposal until they have said what they want, and then quote their words.`
+              : "Nothing was staged and nothing was added; each result says why.",
+            nextStep: "await_shopper_decision",
           } });
           return;
         }
@@ -1627,6 +2085,7 @@ export function ManualStorefront() {
               item_id: added.id,
               product_name: added.productName,
               quantity: added.quantity,
+              review: printReviewWire(reviewForDraft(draft)),
               decided_by: "shopper_visible_context",
               guidance: `${requestedQuantity} × ${added.productName} went straight into the demo cart, with no proposal card: the shopper is looking at this draft's own live preview, so they already saw the print they asked you to add. Its matching cart line now has quantity ${added.quantity}. The masthead cart chip flashed the new count. Tell them it is in the cart. Nothing was ordered or charged.`,
               nextStep: "confirm_the_add_in_words",
@@ -1647,6 +2106,8 @@ export function ManualStorefront() {
             draft_id: proposal.draftId,
             product_name: proposal.productName,
             quantity: proposal.quantity,
+            review: printReviewWire(reviewForDraft(draft)),
+            found_in_catalog: backgroundDraftIds.current.has(draft.id),
             decided_by: "shopper",
             duplicate_of_pending_proposal: duplicate,
             pending_proposal_count: stackCount,
@@ -1662,12 +2123,16 @@ export function ManualStorefront() {
         if (request.action === "resolve_cart_proposal") {
           const proposalId = readIdentifierAlias(request.input, "proposalId", "proposal_id");
           const requestedDecision = request.input.decision;
-          const bulk = requestedDecision === "accept_all" || requestedDecision === "reject_all";
-          const decision = requestedDecision === "accept_all" ? "accept"
+          // accept_ready answers a subset of the stack rather than one card or
+          // all of them: it is still the shopper's decision, just a narrower
+          // one, so it takes no proposalId and still demands their words.
+          const readyOnly = requestedDecision === "accept_ready";
+          const bulk = requestedDecision === "accept_all" || requestedDecision === "reject_all" || readyOnly;
+          const decision = requestedDecision === "accept_all" || readyOnly ? "accept"
             : requestedDecision === "reject_all" ? "reject"
               : requestedDecision;
           if (decision !== "accept" && decision !== "reject") {
-            throw new Error("decision must be accept, reject, accept_all, or reject_all.");
+            throw new Error("decision must be accept, reject, accept_all, reject_all, or accept_ready.");
           }
           // The confirmation is the shopper's own sentence. Requiring it here as
           // well as in the tool means a proposal can only be answered by
@@ -1682,7 +2147,16 @@ export function ManualStorefront() {
           // accept_all and reject_all are the shopper answering the whole
           // stack in one sentence; every other decision names one card.
           let targets: CartProposal[];
-          if (bulk) {
+          if (readyOnly) {
+            // The flagged cards deliberately keep standing. "Accept the ready
+            // ones" is an instruction about the ready ones only, and a
+            // needs_review card is exactly the one the shopper meant to look at
+            // themselves, so answering it here would be answering for them.
+            targets = pendingProposals.filter((proposal) => reviewForDraft(proposal.draft).verdict === "ready");
+            if (targets.length === 0) {
+              throw new Error("No pending proposal comes back ready: every card waiting is flagged needs_review, so accept_ready would answer nothing. Read the findings to the shopper and ask about those cards one at a time.");
+            }
+          } else if (bulk) {
             targets = pendingProposals;
           } else {
             const target = pendingProposals.find((candidate) => candidate.id === proposalId);
@@ -1698,7 +2172,7 @@ export function ManualStorefront() {
           await nextPaint();
           respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
             decision: decision === "accept" ? "accepted" : "rejected",
-            scope: bulk ? "all_pending" : "one_proposal",
+            scope: readyOnly ? "ready_pending" : bulk ? "all_pending" : "one_proposal",
             resolved: targets.map((proposal) => ({
               proposal_id: proposal.id,
               draft_id: proposal.draftId,
@@ -1715,7 +2189,7 @@ export function ManualStorefront() {
             cart_line_count: nextCart.length,
             items: localCartWireItems(nextCart),
             guidance: remaining > 0
-              ? `${remaining} proposal card${remaining === 1 ? " is" : "s are"} still waiting on the shopper. Do not answer ${remaining === 1 ? "it" : "them"} yourself.`
+              ? `${remaining} proposal card${remaining === 1 ? " is" : "s are"} still waiting on the shopper.${readyOnly ? ` ${remaining === 1 ? "It is" : "They are"} the flagged one${remaining === 1 ? "" : "s"}, left standing on purpose — read the finding out and ask about ${remaining === 1 ? "it" : "each"} separately.` : ""} Do not answer ${remaining === 1 ? "it" : "them"} yourself.`
               : "Every proposal card has been answered; none are waiting.",
           } });
           return;

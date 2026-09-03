@@ -68,3 +68,64 @@ export function withResolvedIdentifierAliases(
   }
   return resolved;
 }
+
+/**
+ * The same forgiveness for the *lists* of identifiers the batch tools take.
+ *
+ * `revise_prints` names several drafts at once and `propose_prints` names
+ * several photographs, and both are copied out of responses that spell them
+ * `draft_id` and `photo_id`. An agent that reaches for `draft_ids` after
+ * reading a list of `draft_id`s is doing the obvious thing, so both spellings
+ * read the same list.
+ */
+function readList(input: Record<string, unknown>, key: string): unknown[] | null {
+  const value = input[key];
+  return Array.isArray(value) && value.length > 0 ? value : null;
+}
+
+/** The list given under either spelling, or null when neither carries one. */
+export function readIdentifierListAlias(
+  input: Record<string, unknown>,
+  camelCase: string,
+  snakeCase: string,
+): unknown[] | null {
+  const camelValue = readList(input, camelCase);
+  const snakeValue = readList(input, snakeCase);
+  if (camelValue && snakeValue && JSON.stringify(camelValue) !== JSON.stringify(snakeValue)) {
+    throw new Error(
+      `${camelCase} and ${snakeCase} are the same field and were given different lists; provide exactly one.`,
+    );
+  }
+  return camelValue ?? snakeValue;
+}
+
+/** The same, for a list the call cannot proceed without. */
+export function requireIdentifierListAlias(
+  input: Record<string, unknown>,
+  camelCase: string,
+  snakeCase: string,
+  describe: string,
+): unknown[] {
+  const value = readIdentifierListAlias(input, camelCase, snakeCase);
+  if (!value) {
+    throw new Error(
+      `${describe} Pass it as ${camelCase} (or ${snakeCase}, the name it is returned under).`,
+    );
+  }
+  return value;
+}
+
+/** The input forwarded to the workbench with each aliased list resolved. */
+export function withResolvedIdentifierListAliases(
+  input: Record<string, unknown>,
+  aliases: readonly (readonly [camelCase: string, snakeCase: string])[],
+): Record<string, unknown> {
+  const resolved: Record<string, unknown> = { ...input };
+  for (const [camelCase, snakeCase] of aliases) {
+    const value = readIdentifierListAlias(input, camelCase, snakeCase);
+    delete resolved[snakeCase];
+    if (value === null) delete resolved[camelCase];
+    else resolved[camelCase] = value;
+  }
+  return resolved;
+}

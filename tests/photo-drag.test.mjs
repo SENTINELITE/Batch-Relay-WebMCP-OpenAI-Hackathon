@@ -53,6 +53,18 @@ test("a slot accepts a drop without taking over the pointer gestures it already 
   assert.match(preview, /No local photo assigned to \$\{localSlotKey\}/);
 });
 
+test("only the live template canvas registers each slot as a drop target", async () => {
+  const [preview, assignment, storefront] = await Promise.all([
+    read("src/components/storefront/browser-template-preview.tsx"),
+    read("src/components/storefront/template-slot-assignment.tsx"),
+    read("src/components/storefront/manual-storefront.tsx"),
+  ]);
+  assert.match(preview, /dropEnabled = true/);
+  assert.match(preview, /!dropEnabled \|\| slotKey === null/);
+  assert.doesNotMatch(assignment, /usePhotoDropTarget|photoDropTargetClassName/);
+  assert.match(storefront, /<BrowserTemplatePreview[\s\S]*?dropEnabled=\{false\}/);
+});
+
 test("a tray thumbnail stays clickable, and keyboard dragging gets its own handle", async () => {
   const tray = await read("src/components/storefront/photo-tray.tsx");
   // Pointer activation only on the body: its click still selects the photograph.
@@ -62,6 +74,8 @@ test("a tray thumbnail stays clickable, and keyboard dragging gets its own handl
   // Space on the thumbnail must keep selecting, so keyboard drag lives here.
   assert.match(tray, /aria-label=\{`Drag image \$\{ordinal\}, \$\{photo\.filename\}, onto a print slot`\}/);
   assert.match(tray, /ref=\{connectHandle\}[\s\S]{0,200}?\{\.\.\.handleProps\}/);
+  assert.match(tray, /group-hover:opacity-100/);
+  assert.match(tray, /group-focus-within:opacity-100/);
 });
 
 test("the drag context measures live, announces in words, and lifts an overlay", async () => {

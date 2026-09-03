@@ -120,8 +120,22 @@ const approvedTools = [
     exportName: "resolveCartProposal",
     stableKey: "storefront.resolve_cart_proposal",
     name: "resolve_cart_proposal",
-    description: "Use exclusively to relay the shopper's own explicit decision about the picture-in-picture proposal cards stacked in the corner, spoken by them after those cards appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Use decision accept or reject with the proposalId of one card — either proposalId or proposal_id is accepted, so the ID can be copied straight out of the response it came from — and that card alone is resolved while the rest keep waiting. When the shopper answers the whole stack at once, in words like add them all or none of those, use decision accept_all or reject_all and leave proposalId out; their words still go in shopperConfirmation and apply to the batch. Acts exactly as the visible buttons would, and returns every proposal it resolved plus the resulting cart state.",
+    description: "Use exclusively to relay the shopper's own explicit decision about the picture-in-picture proposal cards stacked in the corner, spoken by them after those cards appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Use decision accept or reject with the proposalId of one card — either proposalId or proposal_id is accepted, so the ID can be copied straight out of the response it came from — and that card alone is resolved while the rest keep waiting. When the shopper answers the whole stack at once, in words like add them all or none of those, use decision accept_all or reject_all and leave proposalId out; their words still go in shopperConfirmation and apply to the batch. When they answer only the unflagged ones, in words like accept the ready ones, use decision accept_ready, which accepts every pending card whose review verdict is ready and deliberately leaves each needs_review card standing for them to look at. Acts exactly as the visible buttons would, and returns every proposal it resolved plus the resulting cart state.",
     fields: ["proposalId", "proposal_id", "decision", "shopperConfirmation"],
+  },
+  {
+    exportName: "revisePrints",
+    stableKey: "storefront.revise_prints",
+    name: "revise_prints",
+    description: "Propagate a framing the shopper has already approved onto other prints, for a request like frame the others like this. Applies one crop patch — the same zoom, focus and offset vocabulary configure_print's set_crop takes and ask_storefront reports per draft — to every draft named in draftIds, aiming at each draft's only image slot unless slotSelector names a role such as individual or team, a published slotKey, or a label; every affected preview and proposal card repaints before this returns. Returns a per-draft result saying applied or skipped with the reason, and never adds anything to the demo cart, answers a proposal, or moves the shopper to another print.",
+    fields: ["draftIds", "draft_ids", "crop", "slotSelector"],
+  },
+  {
+    exportName: "proposePrints",
+    stableKey: "storefront.propose_prints",
+    name: "propose_prints",
+    description: "Stage one print per photograph in a single call, for a request like make a 5x7 of each of photos 10 through 15. Creates a draft for every reference in photoRefs against one product, prefilling any template roles the shopper has already chosen, and stacks a picture-in-picture proposal card for each — always in the background, so a shopper customizing a print by hand keeps the screen and never has it taken from them. Returns an ordered per-item result carrying photo_ref, draft_id, proposal_id, status and a geometry review verdict, reporting a photograph that could not be staged in place rather than abandoning the rest of the batch. Nothing enters the demo cart until the SHOPPER answers each card, so stop afterwards and tell them the deck is waiting.",
+    fields: ["trayRevision", "productId", "productQuery", "photoRefs", "photo_refs", "quantity", "orientation"],
   },
   {
     exportName: "manageCart",
@@ -132,8 +146,10 @@ const approvedTools = [
   },
 ];
 
-test("WebMCP preserves stable keys while publishing the approved six-tool agentic flow", async () => {
+test("WebMCP preserves stable keys while publishing the approved eight-tool agentic flow", async () => {
   const source = await read("src/webmcp/tools/storefront.ts");
+  assert.equal(approvedTools.length, 8, "the published tool surface is eight tools");
+  assert.equal(source.match(/^export const \w+ = defineTool/gm)?.length, 8, "no tool is published outside the approved list");
   for (const expected of approvedTools) {
     const definition = toolDefinition(source, expected.exportName);
     assert.match(definition, new RegExp(String.raw`stableKey:\s*"${escapeRegExp(expected.stableKey)}"`));
@@ -186,7 +202,7 @@ test("cart proposals use completed visible draft IDs, not product or offer ident
   // reject_all answer the whole stack and name no card. The handler enforces
   // that, so it can say which of the two mistakes was made.
   assert.match(inputSchema(resolve), /required:\s*\["decision",\s*"shopperConfirmation"\]/);
-  assert.match(inputSchema(resolve), /decision:\s*\{\s*type:\s*"string",\s*enum:\s*\["accept",\s*"reject",\s*"accept_all",\s*"reject_all"\]\s*\}/);
+  assert.match(inputSchema(resolve), /decision:\s*\{\s*type:\s*"string",\s*enum:\s*\["accept",\s*"reject",\s*"accept_all",\s*"reject_all",\s*"accept_ready"\]\s*\}/);
   assert.match(resolve, /requireIdentifierAlias\(\s*raw,\s*"proposalId",\s*"proposal_id"/);
   assert.doesNotMatch(source, /name:\s*"render_template_preview"/);
 });
@@ -360,7 +376,7 @@ test("registrar publishes one stable tool surface so a whole agent turn stays pl
   assert.ok(list, "expected a constant storefrontTools array");
   assert.deepEqual(
     list[1].split(",").map((entry) => entry.trim()).filter(Boolean),
-    ["askStorefront", "findPrints", "configurePrint", "addToCart", "resolveCartProposal", "manageCart"],
+    ["askStorefront", "findPrints", "configurePrint", "revisePrints", "proposePrints", "addToCart", "resolveCartProposal", "manageCart"],
   );
   assert.doesNotMatch(registrar, /canConfigurePrint|canAddToCart|state\.pendingProposal/);
   assert.match(registrar, /useEffect\([\s\S]*?\}, \[\]\)/);
@@ -512,7 +528,7 @@ test("the proposal card paints the proposed draft itself, not whatever is select
   assert.match(binding, /previewImageSlots\(\s*proposal\.draft\.slotAssignments,\s*proposal\.draft\.slotTransforms,\s*photoLibrary\.photos,?\s*\)/);
   // Every card is bound the same way, one per proposal.
   assert.match(source, /previewFor=\{proposalPreviewBinding\}/);
-  assert.match(stack, /const \{ aspect, templatePreview \} = previewFor\(proposal\)/);
+  assert.match(stack, /const \{ aspect, templatePreview, review, foundInCatalog \} = previewFor\(proposal\)/);
   assert.doesNotMatch(stack, /selectedDraftId|browserPreviewDocument/);
 });
 
