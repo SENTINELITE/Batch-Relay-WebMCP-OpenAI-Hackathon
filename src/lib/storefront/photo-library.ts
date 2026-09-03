@@ -11,6 +11,21 @@ export type BrowserPhoto = {
   previewURL: string;
   mimeType: "image/jpeg" | "image/png";
   byteSize: number;
+  /**
+   * A key that names *this photograph* rather than this import of it.
+   *
+   * `id` is random per import, so nothing written down in one page session can
+   * find the same photograph again after a reload. Filename, byte size and last
+   * modified time are all carried by `File`, cost nothing to read, and together
+   * identify a file on disk closely enough to re-link a saved draft to it.
+   * Content hashing would be exact and far too slow for a folder of 200 photos.
+   *
+   * Absent when two photographs in one import are indistinguishable even after
+   * their folder paths are taken into account. Such a photograph still works
+   * everywhere else; it simply cannot be re-linked, and callers must say so
+   * rather than guess.
+   */
+  stableKey?: string;
 };
 
 export type PhotoTarget = {
@@ -184,6 +199,67 @@ export type CreateBrowserPhotosOptions = {
 
 const opaquePhotoID = (): string => `photo_${crypto.randomUUID()}`;
 
+type StableKeyFile = Pick<File, "name" | "size"> & { lastModified?: number };
+
+/**
+ * The identity key for one file on disk. `relativePath` is the tie-breaker used
+ * only when the plain key is not unique, so the ordinary case stays stable even
+ * if the same folder is later opened through a different picker.
+ */
+export function photoStableKey(file: StableKeyFile, relativePath?: string): string {
+  const lastModified = typeof file.lastModified === "number" && Number.isFinite(file.lastModified)
+    ? file.lastModified
+    : 0;
+  return JSON.stringify([file.name, file.size, lastModified, relativePath ?? null]);
+}
+
+const tally = (keys: readonly string[]): Map<string, number> => {
+  const counts = new Map<string, number>();
+  for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
+  return counts;
+};
+
+/**
+ * Fills in `stableKey` for a freshly imported batch.
+ *
+ * Order-independent by construction: uniqueness is decided over the whole batch
+ * rather than as photographs stream past, so importing the same folder twice
+ * assigns the same keys. Photographs that collide even on their folder path are
+ * left without a key rather than sharing one, because a shared key would re-link
+ * a saved draft to the wrong picture.
+ */
+export function assignPhotoStableKeys(photos: BrowserPhoto[]): BrowserPhoto[] {
+  const baseKeys = photos.map((photo) => photoStableKey(photo.file));
+  const baseCounts = tally(baseKeys);
+  const contested = photos.flatMap((photo, index) =>
+    baseCounts.get(baseKeys[index]!) === 1 ? [] : [index]);
+  const pathKeys = new Map(contested.map((index) =>
+    [index, photoStableKey(photos[index]!.file, photos[index]!.relativePath ?? "")]));
+  const pathCounts = tally([...pathKeys.values()]);
+  for (const [index, photo] of photos.entries()) {
+    if (baseCounts.get(baseKeys[index]!) === 1) {
+      photo.stableKey = baseKeys[index];
+      continue;
+    }
+    const pathKey = pathKeys.get(index)!;
+    photo.stableKey = pathCounts.get(pathKey) === 1 ? pathKey : undefined;
+  }
+  return photos;
+}
+
+/**
+ * Stable key to current photo id, for the one pass that re-links a restored
+ * workbench. A key held by more than one photograph in the tray resolves to
+ * nothing: two candidates is not an answer.
+ */
+export function photoIdsByStableKey(
+  photos: readonly Pick<BrowserPhoto, "id" | "stableKey">[],
+): Record<string, string> {
+  const counts = tally(photos.flatMap((photo) => photo.stableKey ? [photo.stableKey] : []));
+  return Object.fromEntries(photos.flatMap((photo) =>
+    photo.stableKey && counts.get(photo.stableKey) === 1 ? [[photo.stableKey, photo.id]] : []));
+}
+
 export function createBrowserPhotos(files: Iterable<File>, options: CreateBrowserPhotosOptions = {}): PhotoImportResult {
   const idFactory = options.idFactory ?? opaquePhotoID;
   const createObjectURL = options.createObjectURL ?? ((file: File) => URL.createObjectURL(file));
@@ -215,7 +291,7 @@ export function createBrowserPhotos(files: Iterable<File>, options: CreateBrowse
       byteSize: file.size,
     });
   }
-  return { photos, rejected };
+  return { photos: assignPhotoStableKeys(photos), rejected };
 }
 
 /** Injectable revoker keeps cleanup explicit and testable. */

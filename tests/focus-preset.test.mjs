@@ -10,6 +10,8 @@ import {
 import {
   defaultCropForSubject,
   focusForSubject,
+  projectBoxIntoFrame,
+  sourceWindowForCrop,
   subjectRegionFromFaces,
 } from "../src/lib/storefront/face-geometry.ts";
 
@@ -66,6 +68,28 @@ test("an explicit zoom is honoured and the focus is recomputed for THAT zoom", (
   // its own, which is the whole reason the focus is recomputed.
   const auto = defaultCropForSubject(subjectRegionFromFaces([PORTRAIT_FACE]), TARGET_ASPECT, SOURCE_ASPECT);
   assert.notEqual(auto.zoom, 3);
+});
+
+test("a requested subject width computes the zoom and reports the achieved frame width", () => {
+  const result = resolveFocusPreset({ ...base, subjectWidthPercent: 50 });
+  assert.equal(result.focusApplied, "faces");
+  assert.equal(result.requestedSubjectWidthPercent, 50);
+  assert.equal(result.achievedSubjectWidthPercent, 50);
+  assert.equal(result.subjectWidthClamped, false);
+
+  const window = sourceWindowForCrop({
+    sourceAspectRatio: SOURCE_ASPECT,
+    targetAspectRatio: TARGET_ASPECT,
+    zoom: result.patch.zoom,
+    focusX: result.patch.focusX,
+    focusY: result.patch.focusY,
+  });
+  const projected = projectBoxIntoFrame(PORTRAIT_FACE, window);
+  assert.ok(Math.abs(projected.width - 0.5) < 0.001);
+  assert.throws(
+    () => resolveFocusPreset({ ...base, patch: { zoom: 2 }, subjectWidthPercent: 50 }),
+    /either zoom or subjectWidthPercent/,
+  );
 });
 
 test("an explicit focus value wins over the computed one, on that axis only", () => {

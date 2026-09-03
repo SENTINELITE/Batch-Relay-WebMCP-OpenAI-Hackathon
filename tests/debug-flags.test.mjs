@@ -83,7 +83,10 @@ test("the badge tells found-none apart from not-looked-yet", () => {
 });
 
 test("the tray draws no debug chrome unless it is handed the data", async () => {
-  const source = await read("src/components/storefront/photo-tray.tsx");
+  const [source, preview] = await Promise.all([
+    read("src/components/storefront/photo-tray.tsx"),
+    read("src/components/storefront/browser-template-preview.tsx"),
+  ]);
   // Every debug element in the tray hangs off the optional prop, so a tray
   // rendered without it is the tray as it always was.
   assert.match(source, /faceDebug\?: FaceDebugMap/);
@@ -91,6 +94,10 @@ test("the tray draws no debug chrome unless it is handed the data", async () => 
   assert.match(source, /pointer-events-none absolute inset-0/);
   // The overlay visualizes; it never asks for detection.
   assert.doesNotMatch(source, /detectFaces/);
+  // The same gated result is projected through the live crop in a template slot.
+  assert.match(preview, /faceDebug\?: FaceDebugMap/);
+  assert.match(preview, /browserPreviewCropRect/);
+  assert.match(preview, /<TemplateFaceDebugLayer/);
 });
 
 test("the overlay is gated in the storefront by the shared helper alone", async () => {
@@ -99,4 +106,34 @@ test("the overlay is gated in the storefront by the shared helper alone", async 
   assert.match(source, /faceDebug=\{faceDebugOn \? buildFaceDebugMap\(\) : undefined\}/);
   // No second, weaker gate anywhere near the overlay.
   assert.doesNotMatch(source, /faceDebug[A-Za-z]*\s*=\s*true/);
+});
+
+test("the workbench reset flag answers anywhere the demo is given, unlike the debug overlays", async () => {
+  const { workbenchResetRequested } = await import("../src/lib/storefront/debug-flags.ts");
+  for (const location of [
+    { hostname: "localhost", search: "?reset=workbench" },
+    { hostname: "demo.example.com", search: "?reset=workbench" },
+    { hostname: "demo.example.com", search: "?debug=faces&reset=workbench" },
+    { hostname: "demo.example.com", hash: "#reset=workbench" },
+  ]) assert.equal(workbenchResetRequested(location), true, JSON.stringify(location));
+  for (const location of [
+    null,
+    { hostname: "localhost" },
+    { hostname: "localhost", search: "?reset=faces" },
+    { hostname: "localhost", search: "?debug=workbench" },
+    { hostname: "localhost", search: "?workbench=reset" },
+  ]) assert.equal(workbenchResetRequested(location), false, JSON.stringify(location));
+  // A reset request is not a debug request, and vice versa.
+  assert.equal(faceDebugEnabled({ hostname: "localhost", search: "?reset=workbench" }), false);
+  assert.equal(workbenchResetRequested({ hostname: "localhost", search: "?debug=faces" }), false);
+});
+
+test("the storefront wipes only its own namespace and tidies the URL behind it", async () => {
+  const source = await read("src/components/storefront/manual-storefront.tsx");
+  assert.match(source, /workbenchResetRequested\(window\.location\)/);
+  assert.match(source, /clearWorkbenchSnapshot\(savedWorkbench\.storage\)/);
+  assert.match(source, /history\.replaceState\(null, "", urlWithoutWorkbenchReset\(window\.location\.href\)\)/);
+  // The remembered photo folder is a separate, deliberate convenience: a reset
+  // must not cost the presenter the folder permission they already granted.
+  assert.doesNotMatch(source, /reset[\s\S]{0,400}rememberPhotoFolderHandle/);
 });

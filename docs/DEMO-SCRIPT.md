@@ -341,7 +341,9 @@ agent can look up sizes while the shopper keeps working by hand.
 | Product query resolves to nothing | Two live products matched, or zero. Say the exact size: **"the 8 by 10 print"** or **"the memory mate."** Or run `find_prints` first: "What can you print?" |
 | Photo reference ambiguous | Duplicate filenames fail closed by design. Use the ordinal: **"image 5,"** not the filename. |
 | Agent drifts or hallucinates state | Say **"Ask the storefront what's on screen."** One `ask_storefront` call re-grounds it. |
-| Everything is stuck | Reload the page. Photos and drafts are browser-local; re-drop the folder and resume from Beat 2. |
+| Everything is stuck | Reload the page. **Your work survives it.** Drafts, slot assignments, framing, the demo cart and any waiting cards are saved to this browser and come back re-linked once the remembered folder finishes re-importing — about a second. Keep talking through it. |
+| After a reload it says *"…N photographs could not be re-linked"* | Those pictures came in through the file picker rather than the remembered folder, so the browser cannot find them again. The drafts survived; the affected slots are simply empty and say what they need. Re-choose the folder and the drafts re-link themselves, or drop the missing photo back in and assign it. |
+| Everything is stuck **and the reload did not help** | Add `?reset=workbench` to the URL. It wipes the saved workbench for this browser and starts you on an empty storefront — the tray, the remembered folder permission and the API are untouched. Resume from Beat 2. |
 
 ---
 

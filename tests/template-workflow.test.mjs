@@ -12,6 +12,8 @@ import {
   clampBrowserPreviewTransform,
   minimumBrowserPreviewPanLimit,
 } from "../src/lib/storefront/browser-preview.ts";
+import { browserPreviewCropRect } from "../src/lib/storefront/browser-preview-crop.ts";
+import { defaultCropForSubject } from "../src/lib/storefront/face-geometry.ts";
 import {
   cropPatchFromSlotTransform,
   describeMissingRequirements,
@@ -236,6 +238,30 @@ test("approved focus and offset crop inputs map into the shared preview framing 
   assert.deepEqual(directCropFocus({ focusX: 50, focusY: 50, offsetX: 20, offsetY: -20 }), {
     focusX: 40, focusY: 60,
   });
+
+  // A face near the source's upper-left must land in the middle of a tall slot
+  // after its focus is converted to the preview's source-relative translation.
+  const source = { width: 3000, height: 2000 };
+  const targetAspectRatio = 5 / 7;
+  const subject = { x: 0.1, y: 0.3, width: 0.1, height: 0.15 };
+  const faceCrop = defaultCropForSubject(subject, targetAspectRatio, source.width / source.height);
+  assert.ok(faceCrop);
+  const transform = slotTransformFromCropPatch(
+    { zoom: 1, offsetX: 0, offsetY: 0 },
+    faceCrop,
+    { sourceAspectRatio: source.width / source.height, targetAspectRatio },
+  );
+  const crop = browserPreviewCropRect(source, targetAspectRatio, transform);
+  const projectedCenterX = ((subject.x + subject.width / 2) * source.width - crop.left) / crop.width;
+  const projectedCenterY = ((subject.y + subject.height / 2) * source.height - crop.top) / crop.height;
+  assert.ok(Math.abs(projectedCenterX - 0.5) < 1e-9);
+  assert.ok(Math.abs(projectedCenterY - 0.5) < 1e-9);
+  const publishedFaceCrop = cropPatchFromSlotTransform(transform, {
+    sourceAspectRatio: source.width / source.height,
+    targetAspectRatio,
+  });
+  assert.ok(Math.abs(publishedFaceCrop.focusX - faceCrop.focusX) < 1e-9);
+  assert.ok(Math.abs(publishedFaceCrop.focusY - faceCrop.focusY) < 1e-9);
 });
 
 test("cart quantities merge only exact finished-print configurations", () => {

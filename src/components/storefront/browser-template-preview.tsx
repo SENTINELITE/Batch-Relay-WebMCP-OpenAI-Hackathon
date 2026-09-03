@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, ty
 import { photoDropTargetClassName, usePhotoDropTarget } from "@/components/storefront/photo-drag";
 import { Notice, PrintFrame, SelectField } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { faceDebugBadge, type FaceDebugEntry, type FaceDebugMap } from "@/lib/storefront/debug-flags";
 import {
   browserPreviewCanvas,
   browserPreviewLayerPosition,
@@ -20,10 +21,12 @@ import {
   type BrowserPreviewPanLimits,
   type BrowserPreviewTransform,
 } from "@/lib/storefront/browser-preview";
+import { browserPreviewCropRect } from "@/lib/storefront/browser-preview-crop";
 
 type PreviewCommitReason = "pointer_release" | "slider_release";
 
 export type LocalBrowserPreviewImage = {
+  photoId?: string;
   source: string;
   transform?: BrowserPreviewTransform;
 };
@@ -44,6 +47,8 @@ type BrowserTemplatePreviewProps = {
   onPreviewPanLimitsChange?: (slotKey: string, limits: BrowserPreviewPanLimits) => void;
   /** Proposal cards render a read-only preview and never register drop slots. */
   dropEnabled?: boolean;
+  /** Localhost-only detector output, keyed by the assigned tray photo id. */
+  faceDebug?: FaceDebugMap;
 };
 
 /** The canvas keeps `container-type: inline-size` so text layers can size in `cqw`. */
@@ -82,6 +87,40 @@ function EmptyImageSlot({ label }: { label: string }) {
     </svg>
     <span className="text-[12px] font-semibold leading-tight text-foreground/70">Missing {label}</span>
     <span className="text-[11px] leading-tight">Drag an image here</span>
+  </span>;
+}
+
+function faceRectInCrop(
+  box: { x: number; y: number; width: number; height: number },
+  source: { width: number; height: number },
+  targetAspectRatio: number,
+  transform: BrowserPreviewTransform,
+) {
+  const crop = browserPreviewCropRect(source, targetAspectRatio, transform);
+  return {
+    left: ((box.x * source.width - crop.left) / crop.width) * 100,
+    top: ((box.y * source.height - crop.top) / crop.height) * 100,
+    width: (box.width * source.width / crop.width) * 100,
+    height: (box.height * source.height / crop.height) * 100,
+  };
+}
+
+function TemplateFaceDebugLayer({ entry, source, targetAspectRatio, transform }: {
+  entry: FaceDebugEntry;
+  source: { width: number; height: number };
+  targetAspectRatio: number;
+  transform: BrowserPreviewTransform;
+}) {
+  const styleFor = (box: { x: number; y: number; width: number; height: number }) => {
+    const rect = faceRectInCrop(box, source, targetAspectRatio, transform);
+    return { left: `${rect.left}%`, top: `${rect.top}%`, width: `${rect.width}%`, height: `${rect.height}%` };
+  };
+  return <span aria-hidden="true" className="pointer-events-none absolute inset-0 z-[2] block overflow-hidden" data-face-debug={entry.state}>
+    {entry.subject ? <span className="absolute block border border-dotted border-[#39ff14]" style={styleFor(entry.subject)} /> : null}
+    {entry.faces.map((face, index) => <span className="absolute block border-2 border-dashed border-[#ff00c8]" key={index} style={styleFor(face)}>
+      <span className="absolute left-0 top-0 bg-black/70 px-0.5 font-mono text-[9px] leading-[1.2] text-[#ff00c8]">{face.confidence.toFixed(2)}</span>
+    </span>)}
+    <span className="absolute bottom-1 right-1 rounded bg-black/75 px-1 py-px font-mono text-[10px] leading-[1.4] text-[#ff00c8]">{faceDebugBadge(entry)}</span>
   </span>;
 }
 
@@ -150,6 +189,7 @@ export function BrowserTemplatePreview({
   onPreviewCommit,
   onPreviewPanLimitsChange,
   dropEnabled = true,
+  faceDebug,
 }: BrowserTemplatePreviewProps) {
   const selectedSurface = document.output.surfaces.find((surface) => surface.id === selectedSurfaceID) ?? document.output.surfaces[0] ?? null;
   const canvas = useMemo(() => selectedSurface
@@ -394,6 +434,9 @@ export function BrowserTemplatePreview({
                 ? sizes
                 : { ...sizes, [localImage.source]: { width, height } });
             } : undefined} src={source} style={localImageStyle ?? { height: "100%", objectFit: layer.fitMode === "contain" ? "contain" : "cover", transformOrigin: "center", width: "100%" }} /> : isLocalSlot ? <EmptyImageSlot label={layer.inputSlotLabel ?? "image"} /> : <span className="flex h-full items-center justify-center p-1.5 text-center text-[13px] leading-[1.3] text-muted-foreground">Published image content is unavailable.</span>}
+            {isLocalSlot && localImage?.photoId && sourceSize && transform && faceDebug?.[localImage.photoId]
+              ? <TemplateFaceDebugLayer entry={faceDebug[localImage.photoId]!} source={sourceSize} targetAspectRatio={slotAspectRatio} transform={transform} />
+              : null}
           </SlotDropSurface>;
           if (layer.kind === "shape") return <div aria-hidden key={layer.id} style={{ ...style, background: shapeBackground(layer) }} />;
           const value = textLayerValue(layer, textValues);

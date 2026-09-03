@@ -14,6 +14,7 @@ import { type TemplateState } from "@/lib/storefront/customization";
 import {
   faceFacts,
   readFocusPreset,
+  readSubjectWidthPercent,
   resolveFocusPreset,
   type CropPatchValues,
   type FocusPresetResult,
@@ -79,7 +80,18 @@ import {
   type ReviewSlot,
 } from "@/lib/storefront/print-review";
 import { detectFaces, faceDetectionAvailable, type FaceBox } from "@/lib/storefront/face-detection";
-import { faceDebugEnabled, type FaceDebugEntry, type FaceDebugMap } from "@/lib/storefront/debug-flags";
+import { faceDebugEnabled, workbenchResetRequested, type FaceDebugEntry, type FaceDebugMap } from "@/lib/storefront/debug-flags";
+import {
+  clearWorkbenchSnapshot,
+  createWorkbenchWriter,
+  readWorkbenchSnapshot,
+  relinkWorkbenchSnapshot,
+  restoreNotice,
+  workbenchState,
+  type WorkbenchSnapshot,
+  type WorkbenchStorage,
+  type WorkbenchWriter,
+} from "@/lib/storefront/workbench-persistence";
 import {
   agentDraftPlacement,
   emptyShopperViewContext,
@@ -125,9 +137,11 @@ import {
 } from "@/lib/storefront/photo-role-defaults";
 import {
   emptyPhotoLibrary,
+  photoIdsByStableKey,
   photoLibraryReducer,
   resolvePhotoReference,
   revokePhotoObjectURLs,
+  type BrowserPhoto,
   type PhotoLibraryAction,
   type PhotoTarget,
 } from "@/lib/storefront/photo-library";
@@ -280,10 +294,10 @@ function previewImageSlots(
   assignments: Record<string, string>,
   transforms: Record<string, BrowserPreviewTransform>,
   photos: { id: string; previewURL: string }[],
-): Record<string, { source: string; transform: BrowserPreviewTransform }> {
+): Record<string, { photoId: string; source: string; transform: BrowserPreviewTransform }> {
   return Object.fromEntries(Object.entries(assignments).flatMap(([slotKey, photoId]) => {
     const photo = photos.find((candidate) => candidate.id === photoId);
-    return photo ? [[slotKey, { source: photo.previewURL, transform: transforms[slotKey] ?? initialBrowserPreviewTransform }]] : [];
+    return photo ? [[slotKey, { photoId, source: photo.previewURL, transform: transforms[slotKey] ?? initialBrowserPreviewTransform }]] : [];
   }));
 }
 
@@ -338,6 +352,57 @@ function subscribeToNothing(): () => void {
 /** Whether the developer face overlay may run here. Never true on the server. */
 function readFaceDebugFlag(): boolean {
   return typeof window === "undefined" ? false : faceDebugEnabled(window.location);
+}
+
+/**
+ * This browser's local storage, or nothing. Absent on the server, and absent in
+ * the browsers and privacy modes that make touching it throw; in both cases the
+ * workbench simply stays in memory exactly as it did before.
+ */
+function browserWorkbenchStorage(): WorkbenchStorage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How long a restore waits for the remembered folder to re-import before giving
+ * up on its photographs. The handle read, the permission check and the folder
+ * walk are all async, so a snapshot that restored immediately would drop every
+ * photo reference a fraction of a second before the pictures arrived.
+ */
+const WORKBENCH_RELINK_WAIT_MS = 4000;
+
+/**
+ * Everything the shopper could have *changed* since a restore, as one string.
+ *
+ * `updatedAt` is deliberately excluded. Restoring the view writes a draft's own
+ * saved assignments straight back onto it, which bumps the timestamp without
+ * altering a single value; counting that as the shopper's own edit would make
+ * the workbench give up on re-linking the moment it finished restoring.
+ */
+const workbenchSignature = (
+  drafts: readonly PrintDraft[],
+  cart: readonly LocalCartItem[],
+  proposals: readonly CartProposal[],
+) => {
+  const settled = (draft: PrintDraft) => ({ ...draft, updatedAt: "" });
+  return JSON.stringify([
+    drafts.map(settled),
+    cart.map((item) => ({ ...item, draft: settled(item.draft), thumbnailURL: null })),
+    proposals.map((proposal) => ({ ...proposal, draft: settled(proposal.draft), thumbnailURL: null })),
+  ]);
+};
+
+/** Removes `reset=workbench` so the next reload does not wipe the fresh start. */
+function urlWithoutWorkbenchReset(href: string): string {
+  const url = new URL(href);
+  url.searchParams.delete("reset");
+  if (workbenchResetRequested({ hash: url.hash })) url.hash = "";
+  return `${url.pathname}${url.search}${url.hash}`;
 }
 
 export function ManualStorefront() {
@@ -442,6 +507,53 @@ export function ManualStorefront() {
   // with the proposal card for any other. A ref, not state: nothing renders
   // from it, and add_to_cart must read the value as of the moment it is called.
   const shopperViewRef = useRef<ShopperViewContext>(emptyShopperViewContext);
+  // ── Saved workbench ──────────────────────────────────────────────────────
+  // The debounced write-through, created once after mount because it needs a
+  // storage this component has no opinion about while rendering on the server.
+  const workbenchWriter = useRef<WorkbenchWriter | null>(null);
+  // The snapshot read at mount, held until the tray import lands. Nulled the
+  // moment the shopper's own work makes a further re-link pass unwelcome.
+  const pendingRestore = useRef<WorkbenchSnapshot | null>(null);
+  // What the workbench looked like immediately after the restore, so a later
+  // re-link pass can tell "untouched" from "the shopper has moved on".
+  const restoreSignature = useRef<string | null>(null);
+  // Stable keys a restored draft named that the tray did not hold at the time.
+  const unlinkedPhotoKeys = useRef<string[]>([]);
+  // The step, product and draft the shopper had in front of them, replayed once
+  // the catalog is back — a draft alone cannot repaint the workbench.
+  const pendingViewRestore = useRef<{ draftId: string | null; productKey: string | null; step: ActiveStep } | null>(null);
+  /**
+   * The saved workbench as it stood when this page opened, read once during the
+   * first render rather than in an effect. Whether there is anything to restore
+   * decides the initial `restoreState`, and deciding it after the first paint
+   * would mean an extra render before the workbench could even start waiting.
+   * On the server there is no storage and therefore nothing to restore.
+   */
+  const [savedWorkbench] = useState<{
+    storage: WorkbenchStorage | null;
+    snapshot: WorkbenchSnapshot | null;
+    reset: boolean;
+  }>(() => {
+    const storage = browserWorkbenchStorage();
+    if (!storage) return { storage: null, snapshot: null, reset: false };
+    if (workbenchResetRequested(window.location)) return { storage, snapshot: null, reset: true };
+    return { storage, snapshot: readWorkbenchSnapshot(storage), reset: false };
+  });
+  const [restoreState, setRestoreState] = useState<"waiting" | "done">(
+    savedWorkbench.snapshot ? "waiting" : "done",
+  );
+  // Bumped by every restore pass, so a late re-link repaints the visible step
+  // as well as the drafts behind it.
+  const [viewRestoreRevision, setViewRestoreRevision] = useState(0);
+  // The one quiet line a restore is allowed to say, held until the workbench has
+  // finished repainting: loading a product clears the notice area, so saying it
+  // any earlier means saying it to a shopper who never sees it.
+  const restoreMessage = useRef<string | null>(null);
+  const [relinkWaitExpired, setRelinkWaitExpired] = useState(false);
+  // Role memory lives in a ref because nothing renders from it, so the saved
+  // workbench needs its own signal that it changed.
+  const [roleMemoryRevision, setRoleMemoryRevision] = useState(0);
+  const cartRef = useRef(cart);
 
   /** Files a resolved preview document under its published output, so any other
    *  surface — notably the proposal card — can paint from it directly. */
@@ -486,6 +598,197 @@ export function ManualStorefront() {
   function noteShopperLookingAtSelectedDraft() {
     if (selectedDraftId) noteVisibleDraft(selectedDraftId, "shopper");
   }
+
+  /**
+   * The single writer for the role memory ref.
+   *
+   * The `remember*` helpers return the identical object when nothing changed,
+   * so this only nudges a render — and therefore a save — when a role actually
+   * moved to a different photograph.
+   */
+  function rememberRoles(next: PhotoRoleMemory) {
+    if (next === photoRoleMemory.current) return;
+    photoRoleMemory.current = next;
+    setRoleMemoryRevision((revision) => revision + 1);
+  }
+
+  /**
+   * Puts a saved workbench back, bound to the tray as it stands right now.
+   *
+   * Idempotent by design: running it again with a fuller tray simply re-links
+   * more of the same snapshot, which is what the late pass below relies on.
+   */
+  function applyWorkbenchRestore(snapshot: WorkbenchSnapshot, photos: readonly BrowserPhoto[]) {
+    const restore = relinkWorkbenchSnapshot(snapshot, photos);
+    setDrafts(restore.drafts);
+    draftsRef.current = restore.drafts;
+    setCart(restore.cart);
+    cartRef.current = restore.cart;
+    commitProposalStack(() => restore.proposals.map((proposal) => ({ proposal, exit: null })));
+    rememberRoles(restore.roleMemory);
+    backgroundDraftIds.current = new Set(restore.backgroundDraftIds);
+    setSelectedDraftId(restore.selectedDraftId);
+    setCropZoom(restore.directCrop.zoom);
+    setCropX(restore.directCrop.focusX);
+    setCropY(restore.directCrop.focusY);
+    restoreSignature.current = workbenchSignature(restore.drafts, restore.cart, restore.proposals);
+    unlinkedPhotoKeys.current = restore.unlinkedPhotoKeys;
+    pendingViewRestore.current = {
+      draftId: restore.selectedDraftId,
+      productKey: restore.selectedProductKey,
+      step: restore.step,
+    };
+    setViewRestoreRevision((revision) => revision + 1);
+    restoreMessage.current = restoreNotice(restore);
+    if (restoreMessage.current) setNotice({ tone: "info", message: restoreMessage.current });
+  }
+
+  /**
+   * Repaints the step the shopper was on. The drafts alone are not the
+   * workbench: a template draft needs its published contract and artwork loaded
+   * again before the prepare step can show anything, and that is a fetch.
+   */
+  async function applyWorkbenchViewRestore(request: NonNullable<typeof pendingViewRestore.current>) {
+    if (request.step !== "prepare" || !request.productKey) return;
+    const product = catalog.find((candidate) => productSelectionKey(candidate) === request.productKey);
+    if (!product) return;
+    const draft = draftsRef.current.find((candidate) => candidate.id === request.draftId) ?? null;
+    selectProduct(product, false, true);
+    if (!draft) return;
+    // The shopper put this draft on screen before the reload, and putting it
+    // back is not an agent placing it.
+    noteVisibleDraft(draft.id, "shopper");
+    setCropZoom(draft.directCrop.zoom);
+    setCropX(draft.directCrop.focusX);
+    setCropY(draft.directCrop.focusY);
+    if (draft.photoIds[0]) dispatchPhotoLibrary({ type: "select", photoId: draft.photoIds[0] });
+    if (!draft.template) return;
+    await chooseTemplate(draft.template.id, product, draft.template.outputId, undefined, draft.id);
+    // The saved draft has the last word over anything the reload prefilled: a
+    // role default arriving on top of a restore would silently re-fill a slot
+    // whose photograph the shopper had deliberately cleared.
+    setTemplateAssignments(draft.slotAssignments);
+    setTemplateInputs(draft.textValues);
+    setSlotTransforms(draft.slotTransforms);
+    lastBrowserPreviewTransforms.current = draft.slotTransforms;
+    patchDraft(draft.id, {
+      slotAssignments: draft.slotAssignments,
+      slotTransforms: draft.slotTransforms,
+      textValues: draft.textValues,
+    });
+  }
+
+  // Creating the writer, wiping a reset namespace and tidying the URL are all
+  // side effects; whether there is anything to restore was already decided
+  // before the first paint, so nothing here has to set state to say so.
+  useEffect(() => {
+    if (!savedWorkbench.storage) return;
+    workbenchWriter.current = createWorkbenchWriter(savedWorkbench.storage);
+    if (savedWorkbench.reset) {
+      clearWorkbenchSnapshot(savedWorkbench.storage);
+      window.history.replaceState(null, "", urlWithoutWorkbenchReset(window.location.href));
+      return;
+    }
+    if (!savedWorkbench.snapshot) return;
+    pendingRestore.current = savedWorkbench.snapshot;
+    const timer = setTimeout(() => setRelinkWaitExpired(true), WORKBENCH_RELINK_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [savedWorkbench]);
+
+  // Restore as soon as the tray import lands. A snapshot with no photo
+  // references has nothing to wait for; one whose folder never comes back
+  // restores photo-independently when the wait expires, and says so.
+  useEffect(() => {
+    if (restoreState !== "waiting") return;
+    const snapshot = pendingRestore.current;
+    if (!snapshot) {
+      setRestoreState("done");
+      return;
+    }
+    const referencesPhotos = Object.keys(snapshot.photoKeys).length > 0;
+    if (referencesPhotos && photoLibrary.photos.length === 0 && !relinkWaitExpired) return;
+    applyWorkbenchRestore(snapshot, photoLibrary.photos);
+    setRestoreState("done");
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- applyWorkbenchRestore is a stable component-body helper reading refs.
+  }, [photoLibrary.photos, relinkWaitExpired, restoreState]);
+
+  // A folder chosen by hand after the wait expired still deserves its drafts
+  // back. Only while the restored workbench is exactly as the restore left it:
+  // once the shopper has changed anything, re-applying a snapshot would undo
+  // their work, so the snapshot is dropped instead.
+  useEffect(() => {
+    const snapshot = pendingRestore.current;
+    if (restoreState !== "done" || !snapshot) return;
+    if (unlinkedPhotoKeys.current.length === 0 || photoLibrary.photos.length === 0) return;
+    const current = workbenchSignature(draftsRef.current, cartRef.current, pendingCartProposals(proposalStackRef.current));
+    if (current !== restoreSignature.current) {
+      pendingRestore.current = null;
+      return;
+    }
+    const available = photoIdsByStableKey(photoLibrary.photos);
+    if (!unlinkedPhotoKeys.current.some((key) => available[key])) return;
+    applyWorkbenchRestore(snapshot, photoLibrary.photos);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- applyWorkbenchRestore is a stable component-body helper reading refs.
+  }, [photoLibrary.photos, restoreState]);
+
+  // The view restore waits for the catalog, which is a separate fetch: a
+  // product key names nothing until the returned products are back.
+  useEffect(() => {
+    const request = pendingViewRestore.current;
+    if (restoreState !== "done" || !request || catalog.length === 0) return;
+    pendingViewRestore.current = null;
+    void applyWorkbenchViewRestore(request).catch(() => {
+      // A template whose artwork will not load leaves the shopper on the
+      // catalog step with every draft intact, rather than on a blank bench.
+      setStep("catalog");
+    }).finally(() => {
+      if (restoreMessage.current) setNotice({ tone: "info", message: restoreMessage.current });
+      restoreMessage.current = null;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- applyWorkbenchViewRestore is a stable component-body helper reading refs.
+  }, [catalog, restoreState, viewRestoreRevision]);
+
+  // The write-through. Every lifecycle path — accepting or rejecting a card,
+  // deleting a draft, clearing or checking out the cart — changes one of these
+  // values, so none of them needs a save of its own.
+  useEffect(() => {
+    if (restoreState !== "done") return;
+    // A restore that could not find its photographs must not overwrite the
+    // snapshot that still knows where they were. Until the shopper changes
+    // something — at which point their work is what matters — the saved
+    // workbench stays as it was, so choosing the folder on the next reload
+    // still brings every draft back fully linked. Read from the rendered
+    // values rather than the mirroring refs, which lag by one commit.
+    const untouchedAfterPartialRestore = Boolean(pendingRestore.current)
+      && unlinkedPhotoKeys.current.length > 0
+      && workbenchSignature(drafts, cart, pendingCartProposals(proposalStack)) === restoreSignature.current;
+    if (untouchedAfterPartialRestore) return;
+    workbenchWriter.current?.save(workbenchState({
+      photos: photoLibrary.photos,
+      drafts,
+      cart,
+      proposals: pendingCartProposals(proposalStack),
+      roleMemory: photoRoleMemory.current,
+      backgroundDraftIds: backgroundDraftIds.current,
+      selectedDraftId,
+      selectedProductKey,
+      step,
+      directCrop: { zoom: cropZoom, focusX: cropX, focusY: cropY },
+    }));
+  }, [cart, cropX, cropY, cropZoom, drafts, photoLibrary.photos, proposalStack, restoreState, roleMemoryRevision, selectedDraftId, selectedProductKey, step]);
+
+  // A queued write must not be lost to the tab closing or to a hot reload
+  // unmounting this component mid-debounce.
+  useEffect(() => {
+    const flush = () => workbenchWriter.current?.flush();
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
+  }, []);
+
+  useEffect(() => { cartRef.current = cart; }, [cart]);
 
   useEffect(() => {
     let live = true;
@@ -797,7 +1100,7 @@ export function ManualStorefront() {
     // A direct print has no slots, so its printed shape names the role the
     // visible tray selection stands for.
     if (action.type === "select" && action.photoId && selectedProduct && customization === "direct") {
-      photoRoleMemory.current = rememberDirectPhoto(photoRoleMemory.current, selectedProduct.physical_output, action.photoId);
+      rememberRoles(rememberDirectPhoto(photoRoleMemory.current, selectedProduct.physical_output, action.photoId));
     }
     if (action.type === "select" || action.type === "remove") {
       setManagedAsset(null);
@@ -852,7 +1155,7 @@ export function ManualStorefront() {
         dispatchPhotoLibrary({ type: "select", photoId });
         setNotice({ tone: "info", message: `Started this print with your ${prefillProvenance(roleDefault.role)} photograph. Choose another tray photo to change it.` });
       } else if (product.template_requirement === "unsupported") {
-        photoRoleMemory.current = rememberDirectPhoto(photoRoleMemory.current, product.physical_output, photoId);
+        rememberRoles(rememberDirectPhoto(photoRoleMemory.current, product.physical_output, photoId));
       }
       if (product.template_requirement !== "unsupported") {
         void chooseRememberedOrFirstCompatibleTemplate(product, draft).then((template) => {
@@ -1499,7 +1802,7 @@ export function ManualStorefront() {
     setActiveImageSlotKey(photoId ? slotKey : null);
     // A deliberate choice always wins over a carried-over default, and becomes
     // the photograph remembered for that role.
-    photoRoleMemory.current = rememberPhotoRole(photoRoleMemory.current, visibleSlotRoles[slotKey] ?? null, photoId);
+    rememberRoles(rememberPhotoRole(photoRoleMemory.current, visibleSlotRoles[slotKey] ?? null, photoId));
     setPrefilledSlots((slots) => {
       if (!(slotKey in slots)) return slots;
       const next = { ...slots };
@@ -1587,6 +1890,10 @@ export function ManualStorefront() {
     return box && box.height > 0 ? box.width / box.height : null;
   }
 
+  function slotCropGeometry(photoId: string | null, box: { width: number; height: number } | null | undefined) {
+    return { sourceAspectRatio: photoAspectRatio(photoId), targetAspectRatio: boxAspectRatio(box) };
+  }
+
   /**
    * One crop patch's `focusOn` turned into numbers, or honestly refused.
    *
@@ -1599,6 +1906,7 @@ export function ManualStorefront() {
     targetAspectRatio: number | null;
     preset: ReturnType<typeof readFocusPreset>;
     patch: CropPatchValues;
+    subjectWidthPercent?: number | null;
   }): Promise<FocusPresetResult> {
     const faces = options.preset === "faces" ? await awaitFacesForPhoto(options.photoId) : (
       options.photoId
@@ -1608,6 +1916,7 @@ export function ManualStorefront() {
     return resolveFocusPreset({
       preset: options.preset,
       patch: options.patch,
+      subjectWidthPercent: options.subjectWidthPercent,
       faces,
       detectionAvailable: faceDetectionAvailable(),
       targetAspectRatio: options.targetAspectRatio,
@@ -1626,6 +1935,9 @@ export function ManualStorefront() {
       faces_detected: result.facesDetected,
       subject_region: result.subjectRegion,
       explicit_overrides: result.explicitOverrides,
+      requested_subject_width_percent: result.requestedSubjectWidthPercent,
+      achieved_subject_width_percent: result.achievedSubjectWidthPercent,
+      subject_width_clamped: result.subjectWidthClamped,
     };
   }
 
@@ -1647,7 +1959,11 @@ export function ManualStorefront() {
     if (!subject || !target || !source) return initialBrowserPreviewTransform;
     const crop = defaultCropForSubject(subject, target, source);
     return crop
-      ? slotTransformFromCropPatch(initialBrowserPreviewTransform, { zoom: crop.zoom, focusX: crop.focusX, focusY: crop.focusY })
+      ? slotTransformFromCropPatch(
+        initialBrowserPreviewTransform,
+        { zoom: crop.zoom, focusX: crop.focusX, focusY: crop.focusY },
+        { sourceAspectRatio: source, targetAspectRatio: target },
+      )
       : initialBrowserPreviewTransform;
   }
 
@@ -1719,7 +2035,10 @@ export function ManualStorefront() {
       role: roles[key] ?? null,
       box: boxes[key] ?? null,
       photoId: draft.slotAssignments[key] ?? null,
-      crop: cropPatchFromSlotTransform(draft.slotTransforms[key] ?? initialBrowserPreviewTransform),
+      crop: cropPatchFromSlotTransform(
+        draft.slotTransforms[key] ?? initialBrowserPreviewTransform,
+        slotCropGeometry(draft.slotAssignments[key] ?? null, boxes[key] ?? null),
+      ),
       // What the detector has to say about the assigned photograph, so an agent
       // can aim its own focus point — or know there is nothing to aim at.
       faceFacts: publishedFaceFacts(draft.slotAssignments[key] ?? null),
@@ -2003,7 +2322,10 @@ export function ManualStorefront() {
                 // The set_crop values that reproduce the visible framing, so a
                 // relative crop request can be computed rather than guessed.
                 crop: slot.kind === "image"
-                  ? cropPatchFromSlotTransform(slotTransforms[slot.key] ?? initialBrowserPreviewTransform)
+                  ? cropPatchFromSlotTransform(
+                    slotTransforms[slot.key] ?? initialBrowserPreviewTransform,
+                    slotCropGeometry(templateAssignments[slot.key] ?? null, browserPreviewSlotBoxes(browserPreviewDocument)[slot.key] ?? null),
+                  )
                   : null,
                 ...(slot.kind === "image"
                   ? publishedFaceFacts(templateAssignments[slot.key] ?? null)
@@ -2190,6 +2512,7 @@ export function ManualStorefront() {
               photoId: photoIds[0] ?? draft.photoIds[0] ?? null,
               targetAspectRatio: boxAspectRatio(product.physical_output),
               preset: readFocusPreset(directCrop),
+              subjectWidthPercent: readSubjectWidthPercent(directCrop),
               patch: {
                 zoom: typeof directCrop.zoom === "number" ? directCrop.zoom : undefined,
                 focusX: typeof directCrop.focusX === "number" ? directCrop.focusX : undefined,
@@ -2258,7 +2581,7 @@ export function ManualStorefront() {
           if (!templateForPatch) {
             // A direct print's photograph is the whole print, so the printed
             // shape records which role that photograph now stands for.
-            photoRoleMemory.current = rememberDirectPhoto(photoRoleMemory.current, product.physical_output, photoIds[0]);
+            rememberRoles(rememberDirectPhoto(photoRoleMemory.current, product.physical_output, photoIds[0]));
           }
           // The prefills that were applied belong to whichever path resolved the
           // template: the workbench's own load, or the off-screen read.
@@ -2354,6 +2677,7 @@ export function ManualStorefront() {
                   photoId: assignments[slot.key] ?? null,
                   targetAspectRatio: boxAspectRatio(patchBoxes[slot.key] ?? null),
                   preset: readFocusPreset(patch),
+                  subjectWidthPercent: readSubjectWidthPercent(patch),
                   patch: {
                     zoom: typeof patch.zoom === "number" ? patch.zoom : undefined,
                     focusX: typeof patch.focusX === "number" ? patch.focusX : undefined,
@@ -2368,13 +2692,17 @@ export function ManualStorefront() {
                   // from the flat frame so a previous pan cannot add itself in.
                   resolvedFocus.focusApplied === "faces" ? initialBrowserPreviewTransform : transforms[slot.key] ?? initialBrowserPreviewTransform,
                   resolvedFocus.patch,
+                  {
+                    sourceAspectRatio: photoAspectRatio(assignments[slot.key] ?? null),
+                    targetAspectRatio: boxAspectRatio(patchBoxes[slot.key] ?? null),
+                  },
                 );
               } else throw new Error("Unknown slot patch operation.");
             }
             // An explicit patch is the shopper's own instruction: it overrides a
             // carried-over default and becomes the photograph remembered for
             // that role.
-            photoRoleMemory.current = rememberSlotAssignments(photoRoleMemory.current, explicitAssignments, patchRoles);
+            rememberRoles(rememberSlotAssignments(photoRoleMemory.current, explicitAssignments, patchRoles));
             appliedPrefills = appliedPrefills.filter((prefill) => assignments[prefill.slotKey] === prefill.photoId);
             if (onScreen) {
               setPrefilledSlots(Object.fromEntries(appliedPrefills.map((prefill) => [prefill.slotKey, prefill.role])));
@@ -2454,7 +2782,10 @@ export function ManualStorefront() {
                 prefilled_from: prefill && prefill.photoId === assignedPhotoId ? prefillProvenance(prefill.role) : null,
                 // The set_crop values that reproduce this slot's framing, so a
                 // relative crop change can be computed from what is visible.
-                crop: cropPatchFromSlotTransform(finalDraft.slotTransforms[slot.key] ?? initialBrowserPreviewTransform),
+                crop: cropPatchFromSlotTransform(
+                  finalDraft.slotTransforms[slot.key] ?? initialBrowserPreviewTransform,
+                  slotCropGeometry(assignedPhotoId, contractSlotBoxes(responseContract, responseDocument)[slot.key] ?? null),
+                ),
                 // The detector's own facts about the assigned photograph.
                 ...publishedFaceFacts(assignedPhotoId),
                 // What a focusOn on this slot actually did, if one was asked
@@ -2509,8 +2840,9 @@ export function ManualStorefront() {
           // faces too" carries no numbers at all, because each print's faces
           // are somewhere different.
           const cropPreset = readFocusPreset(crop);
-          if (!cropPreset && Object.values(cropPatch).every((value) => value === undefined)) {
-            throw new Error("revise_prints needs at least one crop value to propagate: focusOn, zoom, focusX, focusY, offsetX, or offsetY.");
+          const subjectWidthPercent = readSubjectWidthPercent(crop);
+          if (!cropPreset && subjectWidthPercent === null && Object.values(cropPatch).every((value) => value === undefined)) {
+            throw new Error("revise_prints needs at least one crop value to propagate: focusOn, subjectWidthPercent, zoom, focusX, focusY, offsetX, or offsetY.");
           }
           const selector = request.input.slotSelector && typeof request.input.slotSelector === "object"
             ? request.input.slotSelector as Record<string, unknown>
@@ -2550,6 +2882,7 @@ export function ManualStorefront() {
                 photoId: draft.photoIds[0] ?? null,
                 targetAspectRatio: boxAspectRatio(productForDraft(draft)?.physical_output ?? null),
                 preset: cropPreset,
+                subjectWidthPercent,
                 patch: cropPatch,
               });
               const patch = resolvedFocus.patch;
@@ -2610,6 +2943,7 @@ export function ManualStorefront() {
               photoId: targetFact?.photoId ?? null,
               targetAspectRatio: boxAspectRatio(targetFact?.box ?? null),
               preset: cropPreset,
+              subjectWidthPercent,
               patch: cropPatch,
             });
             const transforms = {
@@ -2617,6 +2951,10 @@ export function ManualStorefront() {
               [slotKey]: slotTransformFromCropPatch(
                 resolvedFocus.focusApplied === "faces" ? initialBrowserPreviewTransform : draft.slotTransforms[slotKey] ?? initialBrowserPreviewTransform,
                 resolvedFocus.patch,
+                {
+                  sourceAspectRatio: photoAspectRatio(targetFact?.photoId ?? null),
+                  targetAspectRatio: boxAspectRatio(targetFact?.box ?? null),
+                },
               ),
             };
             patchDraft(draft.id, { slotTransforms: transforms, proofState: "idle" });
@@ -2632,7 +2970,10 @@ export function ManualStorefront() {
               status: "applied",
               reason: null,
               slot_key: slotKey,
-              crop: cropPatchFromSlotTransform(transforms[slotKey]!),
+              crop: cropPatchFromSlotTransform(
+                transforms[slotKey]!,
+                slotCropGeometry(targetFact?.photoId ?? null, targetFact?.box ?? null),
+              ),
               review: printReviewWire(reviewForDraft(next)),
               focus: cropPreset ? focusWire(resolvedFocus) : null,
             };
@@ -2853,7 +3194,7 @@ export function ManualStorefront() {
                 ),
               });
             } else {
-              photoRoleMemory.current = rememberDirectPhoto(photoRoleMemory.current, batchProduct.physical_output, photo.id);
+              rememberRoles(rememberDirectPhoto(photoRoleMemory.current, batchProduct.physical_output, photo.id));
               // The whole photograph is the print: the same face-centred start,
               // expressed in the direct-crop vocabulary.
               const subject = subjectRegionFromFaces(photoFacesRef.current[photo.id] ?? null);
@@ -3168,7 +3509,7 @@ export function ManualStorefront() {
         activeImageSlotKey={activeImageSlotKey}
         activeSlotPanLimits={activeSlotPanLimits}
         activeSlotTransform={activeSlotTransform}
-        browserPreview={browserPreviewDocument ? <BrowserTemplatePreview activeImageSlotKey={activeImageSlotKey} assetURLs={browserPreviewAssetURLs} document={browserPreviewDocument} key={selectedBrowserPreviewSurfaceID} localImageSlots={browserPreviewImageSlots} onActiveImageSlotChange={(slotKey) => { setActiveImageSlotKey(slotKey); setActiveSlotPanLimits({ x: 0, y: 0 }); }} onPreviewChange={(slotKey, transform) => changeBrowserPreviewTransform(slotKey, transform)} onPreviewCommit={(_, slotKey, transform) => updateBrowserPreviewTransform(slotKey, transform)} onPreviewPanLimitsChange={(slotKey, limits) => { if (slotKey === activeImageSlotKey) setActiveSlotPanLimits(limits); }} onSurfaceChange={setSelectedBrowserPreviewSurfaceID} selectedSurfaceID={selectedBrowserPreviewSurfaceID} serverProof={null} textValues={templateInputs} /> : null}
+        browserPreview={browserPreviewDocument ? <BrowserTemplatePreview activeImageSlotKey={activeImageSlotKey} assetURLs={browserPreviewAssetURLs} document={browserPreviewDocument} faceDebug={faceDebugOn ? buildFaceDebugMap() : undefined} key={selectedBrowserPreviewSurfaceID} localImageSlots={browserPreviewImageSlots} onActiveImageSlotChange={(slotKey) => { setActiveImageSlotKey(slotKey); setActiveSlotPanLimits({ x: 0, y: 0 }); }} onPreviewChange={(slotKey, transform) => changeBrowserPreviewTransform(slotKey, transform)} onPreviewCommit={(_, slotKey, transform) => updateBrowserPreviewTransform(slotKey, transform)} onPreviewPanLimitsChange={(slotKey, limits) => { if (slotKey === activeImageSlotKey) setActiveSlotPanLimits(limits); }} onSurfaceChange={setSelectedBrowserPreviewSurfaceID} selectedSurfaceID={selectedBrowserPreviewSurfaceID} serverProof={null} textValues={templateInputs} /> : null}
         crop={crop}
         cropX={cropX}
         cropY={cropY}

@@ -217,6 +217,55 @@ export function focusFromPreviewOffset(offset: number): number {
   return clamp(50 - offset / 2, 0, 100);
 }
 
+export type SlotCropGeometry = {
+  sourceAspectRatio: number | null;
+  targetAspectRatio: number | null;
+};
+
+/**
+ * Maps crop focus onto the preview's actual translation unit: a percentage of
+ * the full source image. The older geometry-free mapping treated the focus as
+ * if every crop had the same amount of overflow, which pushed edge faces all
+ * the way to the pan limit after zooming.
+ */
+function geometricPreviewOffset(
+  focus: number,
+  sourceAspectRatio: number,
+  targetAspectRatio: number,
+  zoom: number,
+  axis: "x" | "y",
+): number {
+  const wider = sourceAspectRatio > targetAspectRatio;
+  const baseVisible = axis === "x"
+    ? (wider ? targetAspectRatio / sourceAspectRatio : 1)
+    : (wider ? 1 : sourceAspectRatio / targetAspectRatio);
+  const visible = clamp(baseVisible / zoom, 0, 1);
+  return (1 - visible) * (50 - clamp(focus, 0, 100));
+}
+
+function geometricFocusFromPreviewOffset(
+  offset: number,
+  sourceAspectRatio: number,
+  targetAspectRatio: number,
+  zoom: number,
+  axis: "x" | "y",
+): number {
+  const wider = sourceAspectRatio > targetAspectRatio;
+  const baseVisible = axis === "x"
+    ? (wider ? targetAspectRatio / sourceAspectRatio : 1)
+    : (wider ? 1 : sourceAspectRatio / targetAspectRatio);
+  const slack = 1 - clamp(baseVisible / zoom, 0, 1);
+  return slack <= 0 ? 50 : clamp(50 - offset / slack, 0, 100);
+}
+
+function validCropGeometry(geometry: SlotCropGeometry | undefined): geometry is { sourceAspectRatio: number; targetAspectRatio: number } {
+  return Boolean(
+    geometry &&
+    typeof geometry.sourceAspectRatio === "number" && Number.isFinite(geometry.sourceAspectRatio) && geometry.sourceAspectRatio > 0 &&
+    typeof geometry.targetAspectRatio === "number" && Number.isFinite(geometry.targetAspectRatio) && geometry.targetAspectRatio > 0,
+  );
+}
+
 /**
  * The exact set_crop patch that reproduces a framing. Focus carries the whole
  * translation, so no residual offset delta remains; publishing this beside each
@@ -224,11 +273,17 @@ export function focusFromPreviewOffset(offset: number): number {
  */
 export function cropPatchFromSlotTransform(
   transform: { zoom: number; offsetX: number; offsetY: number },
+  geometry?: SlotCropGeometry,
 ): { zoom: number; focusX: number; focusY: number; offsetX: number; offsetY: number } {
+  const zoom = clamp(transform.zoom, 1, 4);
   return {
-    zoom: clamp(transform.zoom, 1, 4),
-    focusX: focusFromPreviewOffset(transform.offsetX),
-    focusY: focusFromPreviewOffset(transform.offsetY),
+    zoom,
+    focusX: validCropGeometry(geometry)
+      ? geometricFocusFromPreviewOffset(transform.offsetX, geometry.sourceAspectRatio, geometry.targetAspectRatio, zoom, "x")
+      : focusFromPreviewOffset(transform.offsetX),
+    focusY: validCropGeometry(geometry)
+      ? geometricFocusFromPreviewOffset(transform.offsetY, geometry.sourceAspectRatio, geometry.targetAspectRatio, zoom, "y")
+      : focusFromPreviewOffset(transform.offsetY),
     offsetX: 0,
     offsetY: 0,
   };
@@ -238,11 +293,16 @@ export function cropPatchFromSlotTransform(
 export function slotTransformFromCropPatch(
   current: { zoom: number; offsetX: number; offsetY: number },
   patch: { zoom?: number; focusX?: number; focusY?: number; offsetX?: number; offsetY?: number },
+  geometry?: SlotCropGeometry,
 ): { zoom: number; offsetX: number; offsetY: number } {
+  const zoom = clamp(typeof patch.zoom === "number" ? patch.zoom : current.zoom, 1, 4);
+  const focusOffset = (focus: number, axis: "x" | "y") => validCropGeometry(geometry)
+    ? geometricPreviewOffset(focus, geometry.sourceAspectRatio, geometry.targetAspectRatio, zoom, axis)
+    : previewOffsetFromFocus(focus);
   return {
-    zoom: clamp(typeof patch.zoom === "number" ? patch.zoom : current.zoom, 1, 4),
-    offsetX: clamp((typeof patch.offsetX === "number" ? patch.offsetX : 0) + (typeof patch.focusX === "number" ? previewOffsetFromFocus(patch.focusX) : current.offsetX), -100, 100),
-    offsetY: clamp((typeof patch.offsetY === "number" ? patch.offsetY : 0) + (typeof patch.focusY === "number" ? previewOffsetFromFocus(patch.focusY) : current.offsetY), -100, 100),
+    zoom,
+    offsetX: clamp((typeof patch.offsetX === "number" ? patch.offsetX : 0) + (typeof patch.focusX === "number" ? focusOffset(patch.focusX, "x") : current.offsetX), -100, 100),
+    offsetY: clamp((typeof patch.offsetY === "number" ? patch.offsetY : 0) + (typeof patch.focusY === "number" ? focusOffset(patch.focusY, "y") : current.offsetY), -100, 100),
   };
 }
 

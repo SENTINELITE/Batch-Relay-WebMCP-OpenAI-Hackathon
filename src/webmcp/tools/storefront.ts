@@ -46,6 +46,8 @@ type SlotPatch = {
   offsetY?: number;
   focusOn?: FocusOn;
   focus_on?: FocusOn;
+  subjectWidthPercent?: number;
+  subject_width_percent?: number;
 };
 
 type DirectCrop = {
@@ -56,6 +58,8 @@ type DirectCrop = {
   offsetY?: number;
   focusOn?: FocusOn;
   focus_on?: FocusOn;
+  subjectWidthPercent?: number;
+  subject_width_percent?: number;
 };
 
 type ConfigurePrintInput = {
@@ -200,7 +204,7 @@ export const configurePrint = defineTool<ConfigurePrintInput>({
   name: "configure_print",
   title: "Configure a print from the photo tray",
   description:
-    "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. A set_crop patch or directCrop may also carry focusOn faces, which centers the crop on the faces this browser detected in that photograph — combine it with a zoom for a request like zoom right in on her face — and every response reports faces_detected, subject_region and a focus_applied of faces, no_faces_detected, faces_not_ready, detection_unavailable or explicit, so never tell the shopper a crop is centered on a face unless focus_applied came back faces. It never takes the screen away from a shopper who is customizing a print by hand: a new draft made while they are working on another one waits in the draft rail instead, and the response says which happened with placed on_screen or draft_rail and a matching visible flag. Narrate that honestly — when a draft was placed in the draft rail, do not tell the shopper they are looking at it; adding it will show them a proposal card carrying its own live preview. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
+    "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. A set_crop patch or directCrop may carry focusOn faces with either zoom or subjectWidthPercent, such as 50 to make the detected subject fill half the crop width; do not send both. Every response reports faces_detected, subject_region, the requested and achieved subject width, and a focus_applied of faces, no_faces_detected, faces_not_ready, detection_unavailable or explicit, so never tell the shopper a crop is centered on a face unless focus_applied came back faces. It never takes the screen away from a shopper who is customizing a print by hand: a new draft made while they are working on another one waits in the draft rail instead, and the response says which happened with placed on_screen or draft_rail and a matching visible flag. Narrate that honestly — when a draft was placed in the draft rail, do not tell the shopper they are looking at it; adding it will show them a proposal card carrying its own live preview. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
   inputSchema: {
     type: "object",
     properties: {
@@ -244,6 +248,8 @@ export const configurePrint = defineTool<ConfigurePrintInput>({
             offsetY: { type: "number", minimum: -100, maximum: 100 },
             focusOn: { type: "string", enum: ["faces", "center"] },
             focus_on: { type: "string", enum: ["faces", "center"] },
+            subjectWidthPercent: { type: "number", exclusiveMinimum: 0, maximum: 100 },
+            subject_width_percent: { type: "number", exclusiveMinimum: 0, maximum: 100 },
           },
           required: ["operation"],
           oneOf: [{ required: ["slotKey"] }, { required: ["label"] }],
@@ -260,6 +266,8 @@ export const configurePrint = defineTool<ConfigurePrintInput>({
           offsetY: { type: "number", minimum: -100, maximum: 100 },
           focusOn: { type: "string", enum: ["faces", "center"] },
           focus_on: { type: "string", enum: ["faces", "center"] },
+          subjectWidthPercent: { type: "number", exclusiveMinimum: 0, maximum: 100 },
+          subject_width_percent: { type: "number", exclusiveMinimum: 0, maximum: 100 },
         },
         minProperties: 1,
         additionalProperties: false,
@@ -363,7 +371,7 @@ export const revisePrints = defineTool<RevisePrintsInput>({
   name: "revise_prints",
   title: "Apply one approved framing to other prints",
   description:
-    "Propagate a framing the shopper has already approved onto other prints, for a request like frame the others like this. Applies one crop patch — the same zoom, focus and offset vocabulary configure_print's set_crop takes and ask_storefront reports per draft — to every draft named in draftIds, aiming at each draft's only image slot unless slotSelector names a role such as individual or team, a published slotKey, or a label; every affected preview and proposal card repaints before this returns. The crop may carry focusOn faces instead of, or alongside, coordinates, which centers each print on the faces detected in its own photograph, and each result reports focus_applied so face-centering is only ever narrated when the response confirms it. Returns a per-draft result saying applied or skipped with the reason, and never adds anything to the demo cart, answers a proposal, or moves the shopper to another print.",
+    "Propagate a framing the shopper has already approved onto other prints, for a request like frame the others like this. Applies one crop patch — the same zoom, focus and offset vocabulary configure_print's set_crop takes and ask_storefront reports per draft — to every draft named in draftIds, aiming at each draft's only image slot unless slotSelector names a role such as individual or team, a published slotKey, or a label; every affected preview and proposal card repaints before this returns. The crop may carry focusOn faces with either zoom or subjectWidthPercent, such as 50 to make each detected subject fill half its crop width; do not send both. Each result reports focus_applied plus the requested and achieved subject width, so face-centering is only ever narrated when the response confirms it. Returns a per-draft result saying applied or skipped with the reason, and never adds anything to the demo cart, answers a proposal, or moves the shopper to another print.",
   inputSchema: {
     type: "object",
     properties: {
@@ -379,6 +387,8 @@ export const revisePrints = defineTool<RevisePrintsInput>({
           offsetY: { type: "number", minimum: -100, maximum: 100 },
           focusOn: { type: "string", enum: ["faces", "center"] },
           focus_on: { type: "string", enum: ["faces", "center"] },
+          subjectWidthPercent: { type: "number", exclusiveMinimum: 0, maximum: 100 },
+          subject_width_percent: { type: "number", exclusiveMinimum: 0, maximum: 100 },
         },
         minProperties: 1,
         additionalProperties: false,

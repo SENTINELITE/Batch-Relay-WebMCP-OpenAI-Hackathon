@@ -25,12 +25,12 @@ test("revise_prints reframes through the same patch path set_crop uses, never a 
   // values first — it never grows arithmetic of its own — and a resolved
   // face focus is absolute, so it starts from the flat frame rather than
   // adding itself to whatever pan was already there.
-  assert.match(revise, /slotTransformFromCropPatch\(\s*resolvedFocus\.focusApplied === "faces" \? initialBrowserPreviewTransform : draft\.slotTransforms\[slotKey\] \?\? initialBrowserPreviewTransform,\s*resolvedFocus\.patch,\s*\)/);
+  assert.match(revise, /slotTransformFromCropPatch\(\s*resolvedFocus\.focusApplied === "faces" \? initialBrowserPreviewTransform : draft\.slotTransforms\[slotKey\] \?\? initialBrowserPreviewTransform,\s*resolvedFocus\.patch,\s*\{\s*sourceAspectRatio: photoAspectRatio/);
   assert.match(revise, /patchDraft\(draft\.id, \{ slotTransforms: transforms, proofState: "idle" \}\)/);
   assert.match(revise, /patchDraft\(draft\.id, \{ directCrop: nextCrop \}\)/);
   // The reported crop is read back out of the committed transform, so the
   // response cannot claim a framing the draft did not take.
-  assert.match(revise, /cropPatchFromSlotTransform\(transforms\[slotKey\]!\)/);
+  assert.match(revise, /cropPatchFromSlotTransform\(\s*transforms\[slotKey\]!,\s*slotCropGeometry/);
 });
 
 test("revise_prints repaints every visible surface before it answers", async () => {

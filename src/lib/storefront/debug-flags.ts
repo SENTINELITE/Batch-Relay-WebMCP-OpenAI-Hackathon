@@ -32,12 +32,30 @@ export function isDebugHost(hostname: string | null | undefined): boolean {
   return typeof hostname === "string" && DEBUG_HOSTNAMES.includes(hostname.toLowerCase());
 }
 
-function flagRequested(fragment: string | null | undefined, flag: string): boolean {
+function flagRequested(fragment: string | null | undefined, parameter: string, flag: string): boolean {
   if (typeof fragment !== "string" || fragment.length === 0) return false;
   // A hash reads as a query string once its marker is gone, which is what makes
   // `#debug=faces` work without a second parser.
   const params = new URLSearchParams(fragment.replace(/^[?#]/, ""));
-  return params.getAll("debug").some((value) => value.split(",").some((entry) => entry.trim() === flag));
+  return params.getAll(parameter).some((value) => value.split(",").some((entry) => entry.trim() === flag));
+}
+
+/** The `reset` value that wipes the saved workbench. */
+export const WORKBENCH_RESET_FLAG = "workbench";
+
+/**
+ * The presenter's panic button, `?reset=workbench`.
+ *
+ * Deliberately *not* host-gated, unlike the debug overlays above. Those reveal
+ * developer chrome, so they are confined to loopback; this one only discards
+ * this browser's own scratch workbench, which is a thing its owner is always
+ * entitled to do — and the moment it is needed is the moment the demo is being
+ * given from somewhere other than localhost.
+ */
+export function workbenchResetRequested(location: DebugLocation | null | undefined): boolean {
+  if (!location) return false;
+  return flagRequested(location.search, "reset", WORKBENCH_RESET_FLAG)
+    || flagRequested(location.hash, "reset", WORKBENCH_RESET_FLAG);
 }
 
 /**
@@ -46,7 +64,8 @@ function flagRequested(fragment: string | null | undefined, flag: string): boole
  */
 export function faceDebugRequested(location: DebugLocation | null | undefined): boolean {
   if (!location) return false;
-  return flagRequested(location.search, FACE_DEBUG_FLAG) || flagRequested(location.hash, FACE_DEBUG_FLAG);
+  return flagRequested(location.search, "debug", FACE_DEBUG_FLAG)
+    || flagRequested(location.hash, "debug", FACE_DEBUG_FLAG);
 }
 
 /**

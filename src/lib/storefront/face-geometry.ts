@@ -220,6 +220,32 @@ export type SubjectCrop = {
 };
 
 /**
+ * Frame a subject so its detected region occupies a requested share of the
+ * printed width. The zoom is still constrained to the storefront's 1x-4x
+ * contract; callers can compare the resulting width with their request when a
+ * very small or already-large face makes the exact percentage impossible.
+ */
+export function cropForSubjectWidth(
+  subject: SubjectRegion | null,
+  targetAspectRatio: number,
+  sourceAspectRatio: number,
+  subjectWidthPercent: number,
+): SubjectCrop | null {
+  if (!subject) return null;
+  const target = finite(targetAspectRatio);
+  const source = finite(sourceAspectRatio);
+  const requested = finite(subjectWidthPercent);
+  if (!target || !source || target <= 0 || source <= 0 || requested === null || requested <= 0 || requested > 100) return null;
+  if (subject.width <= 0 || subject.height <= 0) return null;
+
+  const baseWidth = source > target ? target / source : 1;
+  const wantedWindowWidth = subject.width / (requested / 100);
+  const zoom = clamp(baseWidth / wantedWindowWidth, 1, 4);
+  const focus = focusForSubject(subject, target, source, zoom);
+  return focus ? { zoom, ...focus } : null;
+}
+
+/**
  * The focus point that centres a subject at a zoom somebody else chose.
  *
  * `defaultCropForSubject` picks its own zoom; this is the same arithmetic with

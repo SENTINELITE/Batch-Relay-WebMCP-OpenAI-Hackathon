@@ -2,10 +2,11 @@
 
 /* eslint-disable @next/next/no-img-element -- local object URLs are browser-only preview state. */
 
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Button, Chip, PrintFrame } from "@/components/ui";
-import { directCropFocus } from "@/lib/storefront/print-drafts";
+import { initialBrowserPreviewTransform } from "@/lib/storefront/browser-preview";
+import { directCropFocus, slotTransformFromCropPatch, type PrintDraft } from "@/lib/storefront/print-drafts";
 import type { CartProposal } from "@/lib/storefront/local-cart";
 import { printReviewSummary, type PrintReview } from "@/lib/storefront/print-review";
 
@@ -45,6 +46,53 @@ const exitAnimation: Record<"accept" | "reject", string> = {
   reject: "animate-proposal-reject",
 };
 
+function ratioFromCSSAspect(aspect: string): number {
+  const [width, height] = aspect.split("/").map(Number);
+  return Number.isFinite(width) && Number.isFinite(height) && height > 0 ? width / height : 4 / 5;
+}
+
+/** The direct-print crop, using the same source-relative translation as the crop contract. */
+function DirectProposalThumbnail({ aspect, draft, productName, source }: {
+  aspect: string;
+  draft: PrintDraft;
+  productName: string;
+  source: string;
+}) {
+  const [sourceSize, setSourceSize] = useState<{ width: number; height: number } | null>(null);
+  const targetAspectRatio = ratioFromCSSAspect(aspect);
+  const focus = directCropFocus(draft.directCrop);
+  const sourceAspectRatio = sourceSize ? sourceSize.width / sourceSize.height : null;
+  const transform = slotTransformFromCropPatch(
+    initialBrowserPreviewTransform,
+    { zoom: draft.directCrop.zoom, focusX: focus.focusX, focusY: focus.focusY },
+    { sourceAspectRatio, targetAspectRatio },
+  );
+  const coveredWidth = sourceAspectRatio && sourceAspectRatio > targetAspectRatio ? sourceAspectRatio / targetAspectRatio : 1;
+  const coveredHeight = sourceAspectRatio && sourceAspectRatio <= targetAspectRatio ? targetAspectRatio / sourceAspectRatio : 1;
+
+  return <PrintFrame aspect={aspect} innerClassName="relative">
+    <img
+      alt={`Preview of ${productName}`}
+      className="absolute block max-w-none select-none"
+      draggable={false}
+      onLoad={(event) => {
+        const { naturalHeight: height, naturalWidth: width } = event.currentTarget;
+        if (width > 0 && height > 0) setSourceSize((current) => current?.width === width && current.height === height ? current : { width, height });
+      }}
+      src={source}
+      style={{
+        height: `${coveredHeight * transform.zoom * 100}%`,
+        left: "50%",
+        objectFit: "fill",
+        top: "50%",
+        transform: `translate(-50%, -50%) translate(${transform.offsetX}%, ${transform.offsetY}%)`,
+        transformOrigin: "center",
+        width: `${coveredWidth * transform.zoom * 100}%`,
+      }}
+    />
+  </PrintFrame>;
+}
+
 /**
  * One floating picture-in-picture proposal, a card in the bottom-left deck.
  *
@@ -73,7 +121,6 @@ export function CartProposalCard({
   onNext,
 }: CartProposalCardProps) {
   const needsReview = review.verdict === "needs_review";
-  const focus = directCropFocus(proposal.draft.directCrop);
   const onTop = depth === 0;
   // The exit plays on the card itself, inside the stack's depth transform, so a
   // resolved card can fly out while the one behind it scales up into its place.
@@ -81,20 +128,9 @@ export function CartProposalCard({
     ? `${exitAnimation[exit]} motion-reduce:animate-none motion-reduce:opacity-0`
     : animateArrival ? "animate-proposal-in motion-reduce:animate-none" : "";
 
-  const thumbnail = <PrintFrame aspect={aspect}>
-    {proposal.thumbnailURL
-      ? <img
-        alt={`Preview of ${proposal.productName}`}
-        className="block h-full w-full object-cover"
-        draggable={false}
-        src={proposal.thumbnailURL}
-        style={{
-          objectPosition: `${focus.focusX}% ${focus.focusY}%`,
-          transform: `scale(${proposal.draft.directCrop.zoom})`,
-        }}
-      />
-      : <span aria-hidden className="block h-full w-full bg-surface-warm" />}
-  </PrintFrame>;
+  const thumbnail = proposal.thumbnailURL
+    ? <DirectProposalThumbnail aspect={aspect} draft={proposal.draft} productName={proposal.productName} source={proposal.thumbnailURL} />
+    : <PrintFrame aspect={aspect}><span aria-hidden className="block h-full w-full bg-surface-warm" /></PrintFrame>;
 
   return (
     <aside

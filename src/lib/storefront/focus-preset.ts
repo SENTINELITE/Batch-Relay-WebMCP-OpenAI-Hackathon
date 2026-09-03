@@ -19,8 +19,10 @@
  */
 import {
   confidentFaces,
+  cropForSubjectWidth,
   defaultCropForSubject,
   focusForSubject,
+  sourceWindowForCrop,
   subjectRegionFromFaces,
   type FaceBox,
   type SubjectRegion,
@@ -57,6 +59,8 @@ export type FocusPresetInput = {
   preset: FocusPreset | null;
   /** The explicit crop values from the same patch. These always win. */
   patch: CropPatchValues;
+  /** Desired detected-subject width in the printed frame, from 1 to 100. */
+  subjectWidthPercent?: number | null;
   /**
    * The faces known for the photograph this crop lands on. An empty array means
    * detection finished and found none; `null` means it has not finished, which
@@ -82,6 +86,9 @@ export type FocusPresetResult = {
   subjectRegion: SubjectRegion | null;
   /** Values the caller supplied that overrode a computed one. */
   explicitOverrides: Array<"zoom" | "focusX" | "focusY">;
+  requestedSubjectWidthPercent: number | null;
+  achievedSubjectWidthPercent: number | null;
+  subjectWidthClamped: boolean;
   /** One sentence an agent can narrate without overstating what happened. */
   note: string;
 };
@@ -108,6 +115,12 @@ export function readFocusPreset(patch: Record<string, unknown> | null | undefine
   return raw === "faces" || raw === "center" ? raw : null;
 }
 
+/** The subject-width intent, accepting the snake_case spelling too. */
+export function readSubjectWidthPercent(patch: Record<string, unknown> | null | undefined): number | null {
+  const raw = patch?.subjectWidthPercent ?? patch?.subject_width_percent;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+}
+
 function aspect(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
@@ -124,6 +137,9 @@ function fallback(
     facesDetected,
     subjectRegion,
     explicitOverrides: [],
+    requestedSubjectWidthPercent: input.subjectWidthPercent ?? null,
+    achievedSubjectWidthPercent: null,
+    subjectWidthClamped: false,
     note: NOTES[focusApplied],
   };
 }
@@ -137,6 +153,16 @@ function fallback(
  * photograph, which on a standing portrait is a torso.
  */
 export function resolveFocusPreset(input: FocusPresetInput): FocusPresetResult {
+  const requestedWidth = input.subjectWidthPercent ?? null;
+  if (requestedWidth !== null && (!Number.isFinite(requestedWidth) || requestedWidth <= 0 || requestedWidth > 100)) {
+    throw new Error("subjectWidthPercent must be between 1 and 100.");
+  }
+  if (requestedWidth !== null && input.preset !== "faces") {
+    throw new Error("subjectWidthPercent requires focusOn faces.");
+  }
+  if (requestedWidth !== null && typeof input.patch.zoom === "number") {
+    throw new Error("Use either zoom or subjectWidthPercent, not both.");
+  }
   const known = input.faces === null ? null : confidentFaces(input.faces).length;
   if (!input.preset) return fallback(input, "explicit", known, subjectRegionFromFaces(input.faces ?? []));
   if (input.preset === "center") {
@@ -149,6 +175,9 @@ export function resolveFocusPreset(input: FocusPresetInput): FocusPresetResult {
       facesDetected: known,
       subjectRegion: subjectRegionFromFaces(input.faces ?? []),
       explicitOverrides,
+      requestedSubjectWidthPercent: null,
+      achievedSubjectWidthPercent: null,
+      subjectWidthClamped: false,
       note: NOTES.center,
     };
   }
@@ -166,7 +195,9 @@ export function resolveFocusPreset(input: FocusPresetInput): FocusPresetResult {
 
   const explicitZoom = typeof input.patch.zoom === "number" ? input.patch.zoom : null;
   const computed = explicitZoom === null
-    ? defaultCropForSubject(subject, target, source)
+    ? requestedWidth === null
+      ? defaultCropForSubject(subject, target, source)
+      : cropForSubjectWidth(subject, target, source, requestedWidth)
     : (() => {
       const focus = focusForSubject(subject, target, source, explicitZoom);
       return focus ? { zoom: explicitZoom, ...focus } : null;
@@ -177,6 +208,25 @@ export function resolveFocusPreset(input: FocusPresetInput): FocusPresetResult {
   if (explicitZoom !== null) explicitOverrides.push("zoom");
   if (typeof input.patch.focusX === "number") explicitOverrides.push("focusX");
   if (typeof input.patch.focusY === "number") explicitOverrides.push("focusY");
+
+  const window = requestedWidth === null ? null : sourceWindowForCrop({
+    sourceAspectRatio: source,
+    targetAspectRatio: target,
+    zoom: computed.zoom,
+    focusX: computed.focusX,
+    focusY: computed.focusY,
+  });
+  const achievedWidth = window && window.width > 0
+    ? Math.round((subject.width / window.width) * 1000) / 10
+    : null;
+  const widthClamped = requestedWidth !== null
+    && achievedWidth !== null
+    && Math.abs(achievedWidth - requestedWidth) >= 0.1;
+  const widthNote = requestedWidth === null || achievedWidth === null
+    ? ""
+    : widthClamped
+      ? ` Requested ${requestedWidth}% of the crop width; the 1x-4x zoom limit yields about ${achievedWidth}%.`
+      : ` The detected subject fills about ${achievedWidth}% of the crop width.`;
 
   return {
     patch: {
@@ -189,9 +239,12 @@ export function resolveFocusPreset(input: FocusPresetInput): FocusPresetResult {
     facesDetected: known ?? 0,
     subjectRegion: subject,
     explicitOverrides,
+    requestedSubjectWidthPercent: requestedWidth,
+    achievedSubjectWidthPercent: achievedWidth,
+    subjectWidthClamped: widthClamped,
     note: explicitOverrides.some((value) => value === "focusX" || value === "focusY")
-      ? `${NOTES.faces} An explicit ${explicitOverrides.filter((value) => value !== "zoom").join(" and ")} overrode the computed value on that axis.`
-      : NOTES.faces,
+      ? `${NOTES.faces} An explicit ${explicitOverrides.filter((value) => value !== "zoom").join(" and ")} overrode the computed value on that axis.${widthNote}`
+      : `${NOTES.faces}${widthNote}`,
   };
 }
 

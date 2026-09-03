@@ -86,3 +86,18 @@ test("removing a photo removes only its preparations and exposes URL cleanup", (
   revokePhotoObjectURLs([first, second], (url) => revoked.push(url));
   assert.deepEqual(revoked, ["blob:photo_a", "blob:photo_b"]);
 });
+
+test("every imported photograph carries a key that names the file rather than the import", async () => {
+  const { photoStableKey } = await import("../src/lib/storefront/photo-library.ts");
+  const source = [
+    { name: "athlete.jpg", type: "image/jpeg", size: 2048, lastModified: 1700000000000, webkitRelativePath: "game/athlete.jpg" },
+    { name: "team.png", type: "image/png", size: 4096, lastModified: 1700000000001, webkitRelativePath: "game/team.png" },
+  ];
+  const first = createBrowserPhotos(source, { idFactory: () => `photo_${Math.random()}`, createObjectURL: () => "blob:x" });
+  const second = createBrowserPhotos(source, { idFactory: () => `photo_${Math.random()}`, createObjectURL: () => "blob:x" });
+  // New ids each import; the same keys each import. That gap is exactly what a
+  // saved workbench crosses when the remembered folder re-imports after a reload.
+  assert.notDeepEqual(first.photos.map((entry) => entry.id), second.photos.map((entry) => entry.id));
+  assert.deepEqual(first.photos.map((entry) => entry.stableKey), second.photos.map((entry) => entry.stableKey));
+  assert.equal(first.photos[0].stableKey, photoStableKey(source[0]));
+});

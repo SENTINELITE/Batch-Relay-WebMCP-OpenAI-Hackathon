@@ -1,4 +1,4 @@
-import { clampBrowserPreviewTransform, type BrowserPreviewTransform } from "./browser-preview";
+import { clampBrowserPreviewTransform, type BrowserPreviewTransform } from "./browser-preview.ts";
 
 export type BrowserPreviewCrop = {
   left: number;
