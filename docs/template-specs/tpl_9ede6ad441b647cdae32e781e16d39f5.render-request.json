@@ -1,0 +1,164 @@
+{
+  "schemaVersion": "batchrelay.render-request/v3",
+  "template": {
+    "schemaVersion": "batchrelay.render-template/v6",
+    "templateEngineVersion": "0.11.0",
+    "templateId": "tpl_9ede6ad441b647cdae32e781e16d39f5",
+    "revisionId": "rev_ce369fb614514a24a59972a5b8ec3dd2",
+    "revisionNumber": 1,
+    "name": "Modern Vintage",
+    "createdAt": "2026-08-11T03:06:59.355Z",
+    "updatedAt": "2026-09-01T05:47:51.228Z",
+    "units": "inches",
+    "origin": "top-left",
+    "safeAreaIn": 0.25,
+    "slots": [
+      {
+        "key": "athlete.portrait.5x7",
+        "semanticRole": "athlete.portrait",
+        "kind": "image",
+        "label": "Athlete portrait (5x7)",
+        "required": false,
+        "requiredAspectRatio": { "width": 5, "height": 7 },
+        "fitPolicy": "exact",
+        "minimumEffectivePpi": 300
+      },
+      {
+        "key": "athlete.portrait.10x8",
+        "semanticRole": "athlete.portrait",
+        "kind": "image",
+        "label": "athlete.portrait",
+        "required": false,
+        "requiredAspectRatio": { "width": 10, "height": 8 },
+        "fitPolicy": "exact",
+        "minimumEffectivePpi": 300
+      }
+    ],
+    "surfaces": [
+      {
+        "id": "memory-mate-8x10-portrait",
+        "widthIn": 8,
+        "heightIn": 10,
+        "safety": {
+          "policy": "photographic-print/v1",
+          "expectedTrimIn": { "left": 0.08, "right": 0.08, "top": 0.1, "bottom": 0.1 },
+          "importantContentInsetIn": 0.25
+        },
+        "variants": [
+          {
+            "id": "a",
+            "name": "Variant A",
+            "layers": [
+              {
+                "id": "bg_memory-mate-8x10-portrait_a_base",
+                "name": "Background base color",
+                "kind": "shape",
+                "frame": {
+                  "anchor": "tl",
+                  "offsetIn": { "x": 0, "y": 0 },
+                  "sizeIn": { "width": 8, "height": 10 }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "fills": [{ "kind": "solid", "color": "#ffede1" }]
+              },
+              {
+                "id": "bg_memory-mate-8x10-portrait_a_tint",
+                "name": "Background tint",
+                "kind": "shape",
+                "frame": {
+                  "anchor": "tl",
+                  "offsetIn": { "x": 0, "y": 0 },
+                  "sizeIn": { "width": 8, "height": 10 }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "fills": [{ "kind": "solid", "color": "#17110c", "opacity": 0.55 }]
+              },
+              {
+                "id": "bg_memory-mate-8x10-portrait_a_pattern",
+                "name": "Background pattern",
+                "kind": "image",
+                "frame": {
+                  "anchor": "tl",
+                  "offsetIn": { "x": 0, "y": 0 },
+                  "sizeIn": { "width": 8, "height": 10 }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "source": { "kind": "templateAsset", "assetRef": "builtin:pattern/grain/v1" },
+                "fit": { "mode": "contain" },
+                "orientationPolicy": "auto",
+                "orientationAnchor": "bottom-center"
+              },
+              {
+                "id": "n_1c8755c5-ebdb-4cd8-a2bc-1b81d5213913",
+                "name": "Individual portrait",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": { "x": -1.623, "y": -1.822 },
+                  "sizeIn": { "width": 4.003, "height": 5.604 }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "image",
+                "source": { "kind": "binding", "key": "athlete.portrait.5x7" },
+                "fit": { "mode": "exact" },
+                "orientationPolicy": "keep-upright",
+                "cornerRadiusIn": 0.06,
+                "orientationAnchor": "bottom-center"
+              },
+              {
+                "id": "n_6ca10bb7-5a87-4a5e-bb28-27118ca09820",
+                "name": "Individual portrait",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": { "x": 0, "y": 2.799 },
+                  "sizeIn": { "width": 4.185, "height": 3.348 }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "image",
+                "source": { "kind": "binding", "key": "athlete.portrait.10x8" },
+                "fit": { "mode": "exact" },
+                "orientationPolicy": "keep-upright",
+                "cornerRadiusIn": 0.06,
+                "orientationAnchor": "bottom-center"
+              }
+            ]
+          }
+        ],
+        "surfaceGeometry": {
+          "outputBoundsIn": { "width": 8, "height": 10 },
+          "finishedArea": {
+            "kind": "rectangle",
+            "insetIn": { "left": 0, "top": 0, "right": 0, "bottom": 0 }
+          },
+          "importantContentArea": {
+            "kind": "rectangle",
+            "insetIn": { "left": 0.25, "top": 0.25, "right": 0.25, "bottom": 0.25 }
+          }
+        }
+      }
+    ]
+  },
+  "bindings": {
+    "schemaVersion": "batchrelay.render-bindings/v2",
+    "recordId": "browser-preview-record",
+    "text": {},
+    "images": {
+      "athlete.portrait.5x7": { "assetRef": "local:athlete.portrait.5x7" },
+      "athlete.portrait.10x8": { "assetRef": "local:athlete.portrait.10x8" }
+    }
+  },
+  "surfaceId": "memory-mate-8x10-portrait",
+  "variantId": "a",
+  "dpi": 300,
+  "format": "jpeg",
+  "quality": 92
+}

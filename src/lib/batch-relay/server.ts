@@ -196,22 +196,6 @@ export async function managedAssetJSON(request: Request): Promise<string> {
   return text;
 }
 
-export function orderAuthorization(body: string): "anonymous" | "studio" {
-  const parsed = JSON.parse(body) as { order?: { items?: Array<{ assets?: Array<{ asset_id?: unknown; template_render_id?: unknown }> }> } };
-  for (const item of parsed.order?.items ?? []) {
-    for (const asset of item.assets ?? []) {
-      // Template render assets are necessarily studio-owned. For a managed
-      // asset_id, prefer the configured studio Test credential so an upload,
-      // render, quote, and submission stay in the same account. Without one,
-      // the only possible credential is the anonymous cookie and upstream
-      // tenancy checks remain authoritative.
-      if (typeof asset.template_render_id === "string") return "studio";
-      if (typeof asset.asset_id === "string") return hasStudioTokenConfiguration() ? "studio" : "anonymous";
-    }
-  }
-  return "anonymous";
-}
-
 export function asError(value: unknown, status: number): BatchRelayError {
   if (value && typeof value === "object" && "error" in value && "code" in value && "message" in value && "docs_url" in value && "request_id" in value) {
     return value as BatchRelayError;

@@ -7,21 +7,30 @@
  */
 
 export type StorefrontWebMcpState = {
+  /** Revision for the visible storefront state as a whole. */
   revision: number;
-  canPreparePrintImages: boolean;
+  /** Monotonically increasing revision for the left-to-right photo tray. */
+  trayRevision: number;
+  photoCount: number;
+  selectedPhotoId: string | null;
+  selectedProductId: string | null;
+  selectedTemplateId: string | null;
+  selectedTemplateOutputId: string | null;
+  canConfigurePrint: boolean;
   canRenderTemplatePreview: boolean;
   canAddToCart: boolean;
+  /** A cart proposal card is visible and waiting on the shopper. */
+  pendingProposal: boolean;
   cartItemCount: number;
 };
 
 export type StorefrontWebMcpAction =
   | "ask_storefront"
   | "find_prints"
-  | "prepare_print_images"
-  | "render_template_preview"
+  | "configure_print"
   | "add_to_cart"
-  | "manage_cart"
-  | "prepare_sandbox_order";
+  | "resolve_cart_proposal"
+  | "manage_cart";
 
 export type StorefrontWebMcpActionRequest = {
   requestId: string;
@@ -40,13 +49,22 @@ export const storefrontWebMcpEvents = {
   action: "batchrelay:webmcp:action",
   result: "batchrelay:webmcp:result",
 } as const;
-const requestTimeoutMs = 15_000;
+// Client actions resolve as soon as the visible workbench has applied them, so
+// a tool call returns one final grounded result rather than a progress guess.
+const requestTimeoutMs = 45_000;
 
 const defaultState: StorefrontWebMcpState = {
   revision: 0,
-  canPreparePrintImages: false,
+  trayRevision: 0,
+  photoCount: 0,
+  selectedPhotoId: null,
+  selectedProductId: null,
+  selectedTemplateId: null,
+  selectedTemplateOutputId: null,
+  canConfigurePrint: false,
   canRenderTemplatePreview: false,
   canAddToCart: false,
+  pendingProposal: false,
   cartItemCount: 0,
 };
 
@@ -66,9 +84,22 @@ function isState(value: unknown): value is StorefrontWebMcpState {
   const candidate = value as Partial<StorefrontWebMcpState>;
   return (
     typeof candidate.revision === "number" &&
-    typeof candidate.canPreparePrintImages === "boolean" &&
+    Number.isInteger(candidate.revision) &&
+    candidate.revision >= 0 &&
+    typeof candidate.trayRevision === "number" &&
+    Number.isInteger(candidate.trayRevision) &&
+    candidate.trayRevision >= 0 &&
+    typeof candidate.photoCount === "number" &&
+    Number.isInteger(candidate.photoCount) &&
+    candidate.photoCount >= 0 &&
+    (typeof candidate.selectedPhotoId === "string" || candidate.selectedPhotoId === null) &&
+    (typeof candidate.selectedProductId === "string" || candidate.selectedProductId === null) &&
+    (typeof candidate.selectedTemplateId === "string" || candidate.selectedTemplateId === null) &&
+    (typeof candidate.selectedTemplateOutputId === "string" || candidate.selectedTemplateOutputId === null) &&
+    typeof candidate.canConfigurePrint === "boolean" &&
     typeof candidate.canRenderTemplatePreview === "boolean" &&
     typeof candidate.canAddToCart === "boolean" &&
+    typeof candidate.pendingProposal === "boolean" &&
     typeof candidate.cartItemCount === "number" &&
     Number.isInteger(candidate.cartItemCount) &&
     candidate.cartItemCount >= 0

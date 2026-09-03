@@ -19,14 +19,16 @@ npm run dev
 Open `http://localhost:3000`.
 
 Without studio credentials, the site still loads the unauthenticated canonical
-catalog. Routable HTTPS images can use anonymous Test Mode managed ingest.
+catalog. Photographs come only from the visible tray.
 Template discovery, local-file uploads, and template rendering return an
 explicit configuration error rather than sample data.
 
 To use the Batch Relay team's active templates, set a dedicated studio Test Mode
-key plus that studio's ID and an event ID in `.env.local`. The key needs the
-published endpoint grants, including `print_orders:read`, `print_orders:write`,
-and `studio_assets:write`. The selected template
+key plus that studio's ID and an event ID in `.env.local`. Use the Template
+previews key purpose with `templates:read`, `template_previews:write`,
+`template_renders:write`, and the explicit `studio_assets:write` upload grant.
+The key does not need print-order authority; public sandbox quote, submission,
+and status routes always use the visitor's anonymous session. The selected template
 must publish an output compatible with `print-5x7` or `print-8x10`. The UI reads
 the returned output and stable slot contract before it accepts image or text
 values, then uses the returned render artifact in the cart.

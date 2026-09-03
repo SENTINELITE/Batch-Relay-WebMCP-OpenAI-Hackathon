@@ -1,0 +1,99 @@
+{
+  "journey": "A shopper loads a browser-local photo folder, asks an agent to create one or more visible print drafts, reviews exact template-slot assignments and local crops, requests proofs when wanted, then explicitly adds completed drafts to a sandbox-only cart.",
+  "site": "Batch Relay print workbench",
+  "entry_module": "src/components/webmcp/WebMcpRegistrar.tsx",
+  "suggestions": [
+    {
+      "id": "ask-storefront",
+      "name": "ask_storefront",
+      "description": "Use when a shopper asks what photographs, print drafts, template choices, slot requirements, proof states, cart items, or sandbox limitations are currently visible. Returns grounded structured state and the next available action without changing the workbench.",
+      "why": "Agents need one trustworthy read of the visible tray, drafts, template contracts, and cart before acting.",
+      "status": "review",
+      "availability": { "scope": "everywhere" },
+      "source_module": "src/webmcp/tools/storefront.ts",
+      "params": [{ "name": "question", "type": "string", "description": "The shopper's question about the visible storefront state or flow." }]
+    },
+    {
+      "id": "find-prints",
+      "name": "find_prints",
+      "description": "Use when a shopper wants to browse, compare, or identify canonical print products before creating a draft. Returns matching published product facts and template requirements, and visibly opens the format chooser without inventing offers or compatibility.",
+      "why": "A natural-language print request must resolve to one real canonical product before configuration.",
+      "status": "review",
+      "availability": { "scope": "everywhere", "when": "the published catalog is loaded" },
+      "source_module": "src/webmcp/tools/storefront.ts",
+      "params": [
+        { "name": "query", "type": "string?", "description": "Product name, dimensions, category, or canonical ID fragment." },
+        { "name": "productType", "type": "string?", "description": "Optional published product-type filter." },
+        { "name": "maxResults", "type": "integer?", "description": "Maximum results from 1 through 50." }
+      ]
+    },
+    {
+      "id": "configure-print",
+      "name": "configure_print",
+      "description": "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements; it never reorders or deletes tray files, uploads artwork, renders a proof, charges a card, or creates an order.",
+      "why": "One staged configuration journey should replace the manual product, template, output, slot, and crop click chain.",
+      "status": "review",
+      "availability": { "scope": "everywhere", "when": "the published catalog is loaded", "note": "Creates one visible draft per call and can update an existing draft by ID." },
+      "source_module": "src/webmcp/tools/storefront.ts",
+      "params": [
+        { "name": "draftId", "type": "string?", "description": "Existing visible draft to patch; omitted creates a new draft." },
+        { "name": "trayRevision", "type": "integer", "description": "Visible tray revision used to reject stale photo references." },
+        { "name": "productId", "type": "string?", "description": "Exact canonical product ID." },
+        { "name": "productQuery", "type": "string?", "description": "Unambiguous product name or dimension query when no ID is supplied." },
+        { "name": "photoRefs", "type": "array<string|integer>?", "description": "Tray photo IDs, left-to-right ordinals, or filenames considered for the draft." },
+        { "name": "templateId", "type": "string?", "description": "Explicit active template override; otherwise use the remembered compatible template or first compatible server result." },
+        { "name": "outputId", "type": "string?", "description": "Explicit compatible output; required when multiple orientations remain possible." },
+        { "name": "orientation", "type": "portrait|landscape?", "description": "Human-facing output orientation when multiple compatible outputs exist." },
+        { "name": "slotPatches", "type": "array<object>?", "description": "Exact stable slot or unique-label patches for photo assignment, unassignment, text, zoom, focus, and offsets." },
+        { "name": "directCrop", "type": "object?", "description": "Non-destructive crop for a direct-artwork draft using zoom and focus or exact offsets." }
+      ]
+    },
+    {
+      "id": "request-server-proof",
+      "name": "request_server_proof",
+      "description": "Use when a shopper explicitly wants a server-generated JPEG proof for a complete visible template draft. Starts the published browser-preview job asynchronously, shows progress in that draft, and returns the proof job ID and framing-parity status; it does not create fulfillment artwork, add to cart, charge a card, or create an order.",
+      "why": "Server proof is useful evidence but must remain separate from animation-frame local editing and final fulfillment rendering.",
+      "status": "review",
+      "availability": { "scope": "everywhere", "when": "a visible template draft has every required slot assigned" },
+      "source_module": "src/webmcp/tools/storefront.ts",
+      "params": [{ "name": "draftId", "type": "string", "description": "Complete visible template draft to proof." }]
+    },
+    {
+      "id": "add-to-cart",
+      "name": "add_to_cart",
+      "description": "Use when a shopper explicitly wants a complete visible print draft added to the local cart. Starts any required managed-artwork or fulfillment-render preparation asynchronously, keeps visible progress on the draft, and moves it into the cart only after preparation succeeds; it never starts checkout, charges a card, or creates a production order.",
+      "why": "Natural-language multi-product requests need each independently reviewable draft to cross an explicit reversible cart boundary.",
+      "status": "review",
+      "availability": { "scope": "everywhere", "when": "at least one visible draft has all required product and artwork inputs" },
+      "source_module": "src/webmcp/tools/storefront.ts",
+      "params": [
+        { "name": "draftId", "type": "string", "description": "Complete visible draft to prepare and add." },
+        { "name": "quantity", "type": "integer?", "description": "Quantity from 1 through 99; defaults to 1." }
+      ]
+    },
+    {
+      "id": "manage-cart",
+      "name": "manage_cart",
+      "description": "Use when a shopper wants to inspect, change quantity, remove, or clear items already in the visible local cart. Returns the resulting cart state and never changes source photographs, initiates checkout, charges a card, or creates an order.",
+      "why": "The agent must be able to correct a reversible multi-line cart without touching the person's photo library.",
+      "status": "review",
+      "availability": { "scope": "everywhere", "when": "the local cart has items", "note": "Unregisters when the cart becomes empty." },
+      "source_module": "src/webmcp/tools/storefront.ts",
+      "params": [
+        { "name": "action", "type": "view|update_quantity|remove|clear", "description": "Requested reversible cart action." },
+        { "name": "itemId", "type": "string?", "description": "Visible cart item for update or removal." },
+        { "name": "quantity", "type": "integer?", "description": "Replacement quantity from 1 through 99." }
+      ]
+    },
+    {
+      "id": "prepare-sandbox-order",
+      "name": "prepare_sandbox_order",
+      "description": "Use when a shopper wants the visible cart prepared for Batch Relay Test Mode review and quoting. Moves the workbench to the shipping review, applies only supplied non-sensitive fields, and returns the sandbox review or quote state; it cannot charge a card or create a production order.",
+      "why": "The demo needs a truthful final handoff that stops before payment or production fulfillment.",
+      "status": "review",
+      "availability": { "scope": "everywhere", "when": "the local cart has items", "note": "Unregisters when the cart becomes empty." },
+      "source_module": "src/webmcp/tools/storefront.ts",
+      "params": [{ "name": "shippingPostalCode", "type": "string?", "description": "Optional postal code to copy into the visible review form; other required details remain visible user inputs." }]
+    }
+  ]
+}

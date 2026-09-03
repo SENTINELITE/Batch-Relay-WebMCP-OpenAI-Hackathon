@@ -1,9 +1,27 @@
+import type { BrowserPreviewDocument, BrowserPreviewRender } from "./browser-preview";
+
 export type ApiError = {
   code?: string;
   message?: string;
   error?: string;
   request_id?: string;
 };
+
+const browserPreviewAssetContentPath = /^\/v1\/templates\/[^/?#]+\/outputs\/[^/?#]+\/browser-preview\/assets\/[^/?#]+\/content$/;
+
+/**
+ * Browser-preview assets are API-issued opaque handles. Only turn the
+ * published relative content path into its same-origin storefront proxy; raw
+ * asset_ref values are deliberately never used to reconstruct this URL.
+ */
+export function browserPreviewAssetProxyURL(contentURL: string): string | null {
+  if (!contentURL.startsWith("/") || contentURL.startsWith("//")) return null;
+  const parsed = new URL(contentURL, "https://browser-preview.invalid");
+  if (parsed.origin !== "https://browser-preview.invalid" || parsed.hash || !browserPreviewAssetContentPath.test(parsed.pathname)) return null;
+  const revisionIDs = parsed.searchParams.getAll("revision_id");
+  if (revisionIDs.length !== 1 || !revisionIDs[0] || [...parsed.searchParams.keys()].some((key) => key !== "revision_id")) return null;
+  return `/api${parsed.pathname.slice(3)}?revision_id=${encodeURIComponent(revisionIDs[0])}`;
+}
 
 export type CatalogProduct = {
   id: string;
@@ -121,14 +139,30 @@ export type TemplateOutputs = {
 
 export type TemplateContract = {
   template: { id: string; revision_id: string; revision_number: number };
-  output: { id: string; label?: string; ordinal: number };
+  output: {
+    id: string;
+    label?: string;
+    ordinal: number;
+    /** The API's own surface/variant pairing for this output id. */
+    surfaces?: Array<{
+      id: string;
+      variant_id: string;
+      label?: string;
+      fulfillment_role?: "artwork" | "front" | "back";
+      ordinal?: number;
+      width_in?: number;
+      height_in?: number;
+    }>;
+  };
   slots: Array<{
     key: string;
     kind: "image" | "text";
     ordinal: number;
     required: boolean;
     suggested_label?: string;
+    suggested_semantic_key?: string;
     max_length?: number;
+    expected_aspect_ratio?: { width: number; height: number };
   }>;
 };
 
@@ -200,4 +234,20 @@ export const storefrontClient = {
   }),
   templateRender: (renderId: string) =>
     request<TemplateRender>(`/api/renders/${encodeURIComponent(renderId)}`),
+  browserPreviewDocument: (templateId: string, outputId: string, revisionId: string) =>
+    request<BrowserPreviewDocument>(`/api/templates/${encodeURIComponent(templateId)}/outputs/${encodeURIComponent(outputId)}/browser-preview?revision_id=${encodeURIComponent(revisionId)}`),
+  createBrowserPreview: (
+    templateId: string,
+    outputId: string,
+    body: { revision_id: string; output_id: string; inputs: Record<string, { asset_id: string } | { value: string }> },
+  ) => request<BrowserPreviewRender>(`/api/templates/${encodeURIComponent(templateId)}/outputs/${encodeURIComponent(outputId)}/browser-preview?revision_id=${encodeURIComponent(body.revision_id)}`, {
+    method: "POST",
+    headers: { "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify(body),
+  }),
+  browserPreview: (renderId: string) =>
+    request<BrowserPreviewRender>(`/api/browser-previews/${encodeURIComponent(renderId)}`),
+  browserPreviewArtifactURL: (renderId: string, artifactId: string) =>
+    `/api/browser-previews/${encodeURIComponent(renderId)}/artifacts/${encodeURIComponent(artifactId)}/content`,
+  browserPreviewAssetProxyURL,
 };

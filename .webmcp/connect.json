@@ -1,0 +1,9 @@
+{
+  "org": "org_3IkpCceeBmlaD6rQ0sAiTrBTV2A",
+  "domain_id": "35b81e32-4e0d-48c5-9cfe-909a10c94490",
+  "domain_public_id": "dom-gf38ebv9nsnn",
+  "display_name": "batch-relay-webmcp-storefront",
+  "environment": "production",
+  "key_id": "49887a31-1606-465f-a326-48f2ff86eabb",
+  "dashboard_url": "https://app.agentlane.com/connection?domain=35b81e32-4e0d-48c5-9cfe-909a10c94490"
+}

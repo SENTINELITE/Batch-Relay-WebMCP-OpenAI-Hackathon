@@ -1,49 +1,50 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { registerTools } from "@nekuda/webmcp-sdk";
 
 import {
-  getStorefrontWebMcpState,
-  subscribeToStorefrontWebMcpState,
-  type StorefrontWebMcpState,
-} from "../../webmcp/storefront-bridge";
-import {
   addToCart,
   askStorefront,
+  configurePrint,
   findPrints,
   manageCart,
-  preparePrintImages,
-  prepareSandboxOrder,
-  renderTemplatePreview,
+  resolveCartProposal,
 } from "../../webmcp/tools/storefront";
 
-function availableTools(state: StorefrontWebMcpState) {
-  return [
-    askStorefront,
-    findPrints,
-    ...(state.canPreparePrintImages ? [preparePrintImages] : []),
-    ...(state.canRenderTemplatePreview ? [renderTemplatePreview] : []),
-    ...(state.canAddToCart ? [addToCart] : []),
-    ...(state.cartItemCount > 0 ? [manageCart, prepareSandboxOrder] : []),
-  ];
-}
+/** Optional WebMCP telemetry key. Registration stays local when it is unset. */
+const trackingKey = process.env.NEXT_PUBLIC_WEBMCP_TRACKING_KEY;
 
 /**
- * Registers root storefront tools and re-registers contextual tools only while
- * their corresponding visible UI state is valid.
+ * The published storefront tool surface. It is deliberately constant.
+ *
+ * An agent lists tools once and then plans a whole turn from that list, so
+ * hiding a tool until its precondition happens to hold makes a legitimate
+ * sequence unplannable: `configure_print` creates the first draft, but
+ * `add_to_cart` would only appear afterwards, and the proposal card only makes
+ * `resolve_cart_proposal` appear later still. Readiness is therefore enforced
+ * inside each tool and by the visible workbench handler, which can say exactly
+ * what is missing, instead of by the tool being absent.
  */
+const storefrontTools = [
+  askStorefront,
+  findPrints,
+  configurePrint,
+  addToCart,
+  resolveCartProposal,
+  manageCart,
+];
+
+/** Registers the storefront tool surface once for the visible client flow. */
 export function WebMcpRegistrar() {
-  const [state, setState] = useState<StorefrontWebMcpState>(() => getStorefrontWebMcpState());
-
-  useEffect(() => subscribeToStorefrontWebMcpState(setState), []);
-
   useEffect(() => {
     // Storefront tools stay entirely within the visible app's client flow.
-    // Do not opt this public storefront into SDK telemetry or third-party tracking.
-    const registration = registerTools(availableTools(state), { telemetry: false });
+    const registration = registerTools(
+      storefrontTools,
+      trackingKey ? { telemetry: true, tracking: { apiKey: trackingKey } } : undefined,
+    );
     return () => registration.unregister();
-  }, [state]);
+  }, []);
 
   return null;
 }

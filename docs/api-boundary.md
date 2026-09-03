@@ -25,6 +25,12 @@ saved payment method.
 The configured Test key, studio, and event must belong to the same Batch Relay
 studio. The site never accepts a studio ID or credential from a WebMCP tool.
 
+The dedicated key needs only `templates:read`, `template_previews:write`,
+`template_renders:write`, and—because browser-local files must become durable
+managed assets—`studio_assets:write`. The same-origin print-order routes are
+hard-wired to the visitor's anonymous sandbox session and never fall back to
+the studio key.
+
 The team's active production-authored templates can be read with a scoped Test
 Mode API account for that same studio. A public server route using that key is a
 delegated capability, not visitor authentication. Deploy it only with a
