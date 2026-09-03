@@ -268,6 +268,8 @@ test("the bundled published spec converts into a parser-valid document with exac
 
   assert.equal(individual.inputSlotKey, "image_122qlv9");
   assert.equal(team.inputSlotKey, "image_12rkfks");
+  assert.equal(individual.inputSlotLabel, "Athlete portrait (5x7)");
+  assert.equal(team.inputSlotLabel, "athlete.portrait");
   assert.equal(individual.anchor, "mc");
   assert.deepEqual(individual.offsetIn, { x: -1.623, y: -1.822 });
   assert.deepEqual(individual.sizeIn, { width: 4.003, height: 5.604 });
@@ -446,6 +448,11 @@ test("the Neon Lights spec keeps its CDN background beneath the published tint",
     ["text_1e6560b98c6e", "Year"],
   ]);
   assert.ok(textLayers.every((layer) => layer.fontFamily.startsWith("var(--font-barlow-semi-condensed)")));
+  assert.deepEqual(textLayers.slice(0, 3).map((layer) => [layer.sizeIn.width, layer.align]), [
+    [3.2560340261635883, "left"],
+    [3.211509685046013, "right"],
+    [3.1717939179104064, "left"],
+  ]);
   assert.ok(decoration.slice(4).every((layer) => layer.kind === "image" && layer.assetRef?.endsWith(".png")));
 });
 

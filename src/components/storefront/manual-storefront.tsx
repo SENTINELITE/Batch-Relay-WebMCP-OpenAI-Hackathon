@@ -12,6 +12,14 @@ import {
 } from "@/lib/storefront/client";
 import { type TemplateState } from "@/lib/storefront/customization";
 import {
+  faceFacts,
+  readFocusPreset,
+  resolveFocusPreset,
+  type CropPatchValues,
+  type FocusPresetResult,
+} from "@/lib/storefront/focus-preset";
+import { defaultCropForSubject, subjectRegionFromFaces } from "@/lib/storefront/face-geometry";
+import {
   createPrintDraft,
   cropPatchFromSlotTransform,
   describeMissingRequirements,
@@ -70,7 +78,7 @@ import {
   type PrintReview,
   type ReviewSlot,
 } from "@/lib/storefront/print-review";
-import { detectFaces, type FaceBox } from "@/lib/storefront/face-detection";
+import { detectFaces, faceDetectionAvailable, type FaceBox } from "@/lib/storefront/face-detection";
 import {
   agentDraftPlacement,
   emptyShopperViewContext,
@@ -376,6 +384,12 @@ export function ManualStorefront() {
   // downstream waits on it.
   const [, setPhotoFaces] = useState<Record<string, readonly FaceBox[]>>({});
   const photoFacesRef = useRef<Record<string, readonly FaceBox[]>>({});
+  // The detection pass in flight for each photograph, and which passes have
+  // finished. `photoFacesRef` alone cannot tell "found none" from "not looked
+  // yet" — it only ever holds non-empty results — and `focusOn: "faces"` has to
+  // report those two as different answers, so readiness is tracked separately.
+  const photoFaceJobsRef = useRef<Record<string, Promise<readonly FaceBox[]>>>({});
+  const photoFacesResolvedRef = useRef<Record<string, true>>({});
   // Which drafts were made behind the shopper's screen, so a proposal card can
   // say the print was found in the catalog rather than chosen on screen.
   const backgroundDraftIds = useRef<Set<string>>(new Set());
@@ -523,7 +537,10 @@ export function ManualStorefront() {
     let live = true;
     for (const photo of photoLibrary.photos) {
       if (imageDimensionsRef.current[photo.id]) continue;
-      void createImageBitmap(photo.file).then(async (bitmap) => {
+      // Registered synchronously, before the decode starts, so a `focusOn:
+      // "faces"` crop arriving mid-pass has something to await instead of
+      // reporting a photograph it is already looking at as never examined.
+      const job = createImageBitmap(photo.file).then(async (bitmap) => {
         const size = { width: bitmap.width, height: bitmap.height };
         if (live && !imageDimensionsRef.current[photo.id]) {
           imageDimensionsRef.current = { ...imageDimensionsRef.current, [photo.id]: size };
@@ -535,17 +552,27 @@ export function ManualStorefront() {
         // land, publishing it re-runs the reviews that already read this ref.
         try {
           const faces = await detectFaces(bitmap, photo.id);
-          if (live && faces.length > 0) {
+          if (faces.length > 0) {
             photoFacesRef.current = { ...photoFacesRef.current, [photo.id]: faces };
-            setPhotoFaces(photoFacesRef.current);
+            if (live) setPhotoFaces(photoFacesRef.current);
           }
+          return faces;
         } finally {
           bitmap.close();
         }
       }).catch(() => {
         // A photograph this browser cannot decode simply yields no resolution
         // finding, rather than a warning invented from nothing.
+        return [] as readonly FaceBox[];
+      }).then((faces) => {
+        // Whatever happened, this photograph has now been looked at once. The
+        // refs outlive the effect deliberately: a re-render must not turn a
+        // finished answer back into "not ready".
+        photoFacesResolvedRef.current[photo.id] = true;
+        return faces;
       });
+      photoFaceJobsRef.current[photo.id] = job;
+      void job;
     }
     return () => { live = false; };
   }, [photoLibrary.photos]);
@@ -1397,7 +1424,16 @@ export function ManualStorefront() {
       if (prefills.length > 0) {
         setTemplateAssignments(assignments);
         setPrefilledSlots(Object.fromEntries(prefills.map((prefill) => [prefill.slotKey, prefill.role])));
-        if (targetDraftId) patchDraft(targetDraftId, { slotAssignments: assignments, proofState: "idle" });
+        // A carried-over photograph gets the same face-centred first framing a
+        // hand-dropped one does, and only if this slot has no framing yet.
+        const seeded = seededSlotTransforms(
+          draftsRef.current.find((candidate) => candidate.id === targetDraftId)?.slotTransforms ?? {},
+          Object.fromEntries(prefills.map((prefill) => [prefill.slotKey, prefill.photoId])),
+          browserPreviewSlotBoxes(previewDocument),
+        );
+        setSlotTransforms(seeded);
+        lastBrowserPreviewTransforms.current = seeded;
+        if (targetDraftId) patchDraft(targetDraftId, { slotAssignments: assignments, slotTransforms: seeded, proofState: "idle" });
       }
       return selected;
     } catch (error) {
@@ -1418,7 +1454,18 @@ export function ManualStorefront() {
     });
     // Framing belongs to the browser preview and is never baked into the
     // source File. Keeping it while unassigned makes reassignment reversible.
-    if (photoId) setSlotTransforms((transforms) => ({ ...transforms, [slotKey]: transforms[slotKey] ?? initialBrowserPreviewTransform }));
+    // A slot with no framing yet starts centred on the faces already found in
+    // this photograph, which is a better first look than the middle of a
+    // standing portrait; a slot that already has one is left alone.
+    if (photoId) {
+      setSlotTransforms((transforms) => {
+        if (transforms[slotKey]) return transforms;
+        const next = { ...transforms, [slotKey]: seededSlotTransform(photoId, browserPreviewSlotBoxes(browserPreviewDocumentRef.current)[slotKey] ?? null) };
+        lastBrowserPreviewTransforms.current = next;
+        if (selectedDraftId) patchDraft(selectedDraftId, { slotTransforms: next });
+        return next;
+      });
+    }
     setActiveImageSlotKey(photoId ? slotKey : null);
     // A deliberate choice always wins over a carried-over default, and becomes
     // the photograph remembered for that role.
@@ -1462,6 +1509,140 @@ export function ManualStorefront() {
     lastBrowserPreviewTransforms.current = next;
     setSlotTransforms(next);
     if (selectedDraftId) patchDraft(selectedDraftId, { slotTransforms: next, proofState: "idle" });
+  }
+
+  /**
+   * The faces known for a photograph, waiting only briefly for a pass already
+   * running.
+   *
+   * `null` means "not known yet", which is a different answer from an empty
+   * array and is reported as such. The wait is capped because a crop patch is a
+   * conversational turn: a shopper who said "zoom in on her face" would rather
+   * hear that detection has not landed than watch the agent hang on it.
+   */
+  const FACE_WAIT_MS = 2000;
+  async function awaitFacesForPhoto(photoId: string | null): Promise<readonly FaceBox[] | null> {
+    if (!photoId) return null;
+    const known = photoFacesRef.current[photoId];
+    if (known) return known;
+    if (photoFacesResolvedRef.current[photoId]) return [];
+    const job = photoFaceJobsRef.current[photoId];
+    if (!job) return null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settled = await Promise.race([
+      job.catch(() => [] as readonly FaceBox[]),
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), FACE_WAIT_MS); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    return settled;
+  }
+
+  /**
+   * The face facts published beside a slot. A photograph the detector has
+   * finished with reports 0, one it has not reached reports null; conflating
+   * those is how an agent ends up asserting there are no faces in a portrait.
+   */
+  function publishedFaceFacts(photoId: string | null) {
+    if (!photoId) return faceFacts(undefined);
+    return faceFacts(photoFacesRef.current[photoId] ?? (photoFacesResolvedRef.current[photoId] ? [] : null));
+  }
+
+  /** Source photograph width / height, once its pixels have been decoded. */
+  function photoAspectRatio(photoId: string | null): number | null {
+    const size = photoId ? imageDimensionsRef.current[photoId] ?? null : null;
+    return size && size.height > 0 ? size.width / size.height : null;
+  }
+
+  function boxAspectRatio(box: { width: number; height: number } | null | undefined): number | null {
+    return box && box.height > 0 ? box.width / box.height : null;
+  }
+
+  /**
+   * One crop patch's `focusOn` turned into numbers, or honestly refused.
+   *
+   * Every crop entry point — set_crop, directCrop and revise_prints — goes
+   * through here, so there is exactly one place that decides what "faces" means
+   * and exactly one set of words for what it did.
+   */
+  async function resolveCropFocusPreset(options: {
+    photoId: string | null;
+    targetAspectRatio: number | null;
+    preset: ReturnType<typeof readFocusPreset>;
+    patch: CropPatchValues;
+  }): Promise<FocusPresetResult> {
+    const faces = options.preset === "faces" ? await awaitFacesForPhoto(options.photoId) : (
+      options.photoId
+        ? photoFacesRef.current[options.photoId] ?? (photoFacesResolvedRef.current[options.photoId] ? [] : null)
+        : null
+    );
+    return resolveFocusPreset({
+      preset: options.preset,
+      patch: options.patch,
+      faces,
+      detectionAvailable: faceDetectionAvailable(),
+      targetAspectRatio: options.targetAspectRatio,
+      // Read after the await: the same pass that finds the faces decodes the
+      // pixels, so waiting for one has already produced the other.
+      sourceAspectRatio: photoAspectRatio(options.photoId),
+      hasPhoto: Boolean(options.photoId),
+    });
+  }
+
+  /** The honesty fields. `focus_applied` is the only licence to claim framing. */
+  function focusWire(result: FocusPresetResult) {
+    return {
+      focus_applied: result.focusApplied,
+      focus_note: result.note,
+      faces_detected: result.facesDetected,
+      subject_region: result.subjectRegion,
+      explicit_overrides: result.explicitOverrides,
+    };
+  }
+
+  /**
+   * The starting framing for a photograph newly dropped into a slot: centred on
+   * the faces when they are already known, and the flat frame otherwise.
+   *
+   * Only ever used at the moment of assignment. Nothing here re-crops a slot
+   * later, because a shopper may already have looked at or moved it.
+   */
+  function seededSlotTransform(
+    photoId: string | null,
+    box: { width: number; height: number } | null,
+  ): BrowserPreviewTransform {
+    const faces = photoId ? photoFacesRef.current[photoId] ?? null : null;
+    const subject = subjectRegionFromFaces(faces);
+    const target = boxAspectRatio(box);
+    const source = photoAspectRatio(photoId);
+    if (!subject || !target || !source) return initialBrowserPreviewTransform;
+    const crop = defaultCropForSubject(subject, target, source);
+    return crop
+      ? slotTransformFromCropPatch(initialBrowserPreviewTransform, { zoom: crop.zoom, focusX: crop.focusX, focusY: crop.focusY })
+      : initialBrowserPreviewTransform;
+  }
+
+  /**
+   * Seed a starting framing for every slot that has just been given a
+   * photograph and has none yet.
+   *
+   * Deliberately additive: a slot that already carries a transform keeps it,
+   * whether that came from the shopper's own drag or from an earlier seed. That
+   * is the whole retroactivity rule — a crop is seeded once, at the moment the
+   * photograph lands, and faces that arrive later never move a frame somebody
+   * may already have looked at or adjusted.
+   */
+  function seededSlotTransforms(
+    existing: Record<string, BrowserPreviewTransform>,
+    assignments: Record<string, string>,
+    boxes: Record<string, { width: number; height: number }>,
+  ): Record<string, BrowserPreviewTransform> {
+    const next = { ...existing };
+    for (const [slotKey, photoId] of Object.entries(assignments)) {
+      if (next[slotKey]) continue;
+      const seeded = seededSlotTransform(photoId, boxes[slotKey] ?? null);
+      if (seeded !== initialBrowserPreviewTransform) next[slotKey] = seeded;
+    }
+    return next;
   }
 
   /**
@@ -1509,6 +1690,9 @@ export function ManualStorefront() {
       box: boxes[key] ?? null,
       photoId: draft.slotAssignments[key] ?? null,
       crop: cropPatchFromSlotTransform(draft.slotTransforms[key] ?? initialBrowserPreviewTransform),
+      // What the detector has to say about the assigned photograph, so an agent
+      // can aim its own focus point — or know there is nothing to aim at.
+      faceFacts: publishedFaceFacts(draft.slotAssignments[key] ?? null),
     }));
   }
 
@@ -1757,8 +1941,17 @@ export function ManualStorefront() {
                     role: slot.role,
                     assigned_photo_id: slot.photoId,
                     crop: slot.crop,
+                    // faces_detected is null while the local pass is still
+                    // running: not yet known, not "none there".
+                    ...slot.faceFacts,
                   })),
                   direct_crop: draft.template ? null : visibleDirectCrop(draft),
+                  // A direct print has no published slots, so its one
+                  // photograph's face facts are reported on the draft itself.
+                  direct_photo: draft.template ? null : {
+                    photo_id: draft.photoIds[0] ?? null,
+                    ...publishedFaceFacts(draft.photoIds[0] ?? null),
+                  },
                   // What adding this draft would do to the cart, and whether it
                   // is already spoken for by a card or a line.
                   pending_proposal_id: livePendingProposals().find((proposal) => proposal.draftId === draft.id)?.id ?? null,
@@ -1782,6 +1975,9 @@ export function ManualStorefront() {
                 crop: slot.kind === "image"
                   ? cropPatchFromSlotTransform(slotTransforms[slot.key] ?? initialBrowserPreviewTransform)
                   : null,
+                ...(slot.kind === "image"
+                  ? publishedFaceFacts(templateAssignments[slot.key] ?? null)
+                  : { faces_detected: null, subject_region: null }),
               })),
               direct_crop: visibleDirectCrop(selectedDraft),
               // The photograph the shopper last chose for each semantic role,
@@ -1876,6 +2072,11 @@ export function ManualStorefront() {
           let finalDraft = draft;
           let responseContract: TemplateContract | null = null;
           let appliedPrefills: SlotPrefill[] = [];
+          // What each focusOn in this call actually resolved to. Reported per
+          // slot in the response, because a preset can succeed on one slot and
+          // find nothing on another in the very same patch.
+          let directCropFocusReport: FocusPresetResult | null = null;
+          const slotFocusReports: Record<string, FocusPresetResult> = {};
           setDrafts((items) => existingDraft ? items.map((item) => item.id === draft.id ? draft : item) : [...items, draft]);
           // A shopper customizing a print by hand keeps the screen. Their "add a
           // 5x7 of image 6" asks for a second print, not for the memory mate
@@ -1952,12 +2153,31 @@ export function ManualStorefront() {
           // as never having been on screen and goes to the proposal card.
           const directCrop = request.input.directCrop && typeof request.input.directCrop === "object" ? request.input.directCrop as Record<string, unknown> : null;
           if (directCrop) {
+            // focusOn is resolved before the numbers are merged, so a preset
+            // that could not be honoured leaves the caller's own values —
+            // including none at all — exactly where they were.
+            const resolvedFocus = await resolveCropFocusPreset({
+              photoId: photoIds[0] ?? draft.photoIds[0] ?? null,
+              targetAspectRatio: boxAspectRatio(product.physical_output),
+              preset: readFocusPreset(directCrop),
+              patch: {
+                zoom: typeof directCrop.zoom === "number" ? directCrop.zoom : undefined,
+                focusX: typeof directCrop.focusX === "number" ? directCrop.focusX : undefined,
+                focusY: typeof directCrop.focusY === "number" ? directCrop.focusY : undefined,
+                offsetX: typeof directCrop.offsetX === "number" ? directCrop.offsetX : undefined,
+                offsetY: typeof directCrop.offsetY === "number" ? directCrop.offsetY : undefined,
+              },
+            });
+            directCropFocusReport = resolvedFocus;
+            const patch = resolvedFocus.patch;
             const nextCrop = {
-              zoom: typeof directCrop.zoom === "number" ? directCrop.zoom : draft.directCrop.zoom,
-              focusX: typeof directCrop.focusX === "number" ? directCrop.focusX : draft.directCrop.focusX,
-              focusY: typeof directCrop.focusY === "number" ? directCrop.focusY : draft.directCrop.focusY,
-              offsetX: typeof directCrop.offsetX === "number" ? directCrop.offsetX : draft.directCrop.offsetX,
-              offsetY: typeof directCrop.offsetY === "number" ? directCrop.offsetY : draft.directCrop.offsetY,
+              zoom: patch.zoom ?? draft.directCrop.zoom,
+              focusX: patch.focusX ?? draft.directCrop.focusX,
+              focusY: patch.focusY ?? draft.directCrop.focusY,
+              // A face-centred focus carries the whole pan, so a stale offset
+              // would slide the face straight back out of the middle.
+              offsetX: patch.offsetX ?? (resolvedFocus.focusApplied === "faces" ? 0 : draft.directCrop.offsetX),
+              offsetY: patch.offsetY ?? (resolvedFocus.focusApplied === "faces" ? 0 : draft.directCrop.offsetY),
             };
             if (onScreen) { setCropZoom(nextCrop.zoom); setCropX(nextCrop.focusX); setCropY(nextCrop.focusY); }
             finalDraft = patchPrintDraft(finalDraft, { directCrop: nextCrop });
@@ -2031,16 +2251,27 @@ export function ManualStorefront() {
             // draft keeps the role defaults the loaded output just prefilled.
             appliedPrefills = resolvedPrefills().prefills;
             const assignments = appliedPrefills.length > 0 ? resolvedPrefills().assignments : draft.slotAssignments;
+            // Slots filled by this call — a role prefill, or the draft's own
+            // photographs landing on a freshly resolved output — start centred
+            // on any faces already known. Slots that already carry a framing
+            // are untouched, including one the shopper has moved by hand.
+            const seededTransforms = seededSlotTransforms(
+              draft.slotTransforms,
+              assignments,
+              contractSlotBoxes(contract, responseDocument),
+            );
             if (onScreen) {
               setTemplateAssignments(assignments);
               setTemplateInputs(draft.textValues);
-              setSlotTransforms(draft.slotTransforms);
+              setSlotTransforms(seededTransforms);
+              lastBrowserPreviewTransforms.current = seededTransforms;
             }
             const contractPatch: Parameters<typeof patchPrintDraft>[1] = {
               template: templateForPatch,
               templateContractKnown: true,
               requiredSlotKeys: effectiveRequiredTemplateSlotKeys(product, contract.slots),
               slotAssignments: assignments,
+              slotTransforms: seededTransforms,
             };
             finalDraft = patchPrintDraft(finalDraft, contractPatch);
             patchDraft(draft.id, contractPatch);
@@ -2055,9 +2286,12 @@ export function ManualStorefront() {
             appliedPrefills = resolvedPrefills().prefills;
             const assignments = { ...(appliedPrefills.length > 0 ? resolvedPrefills().assignments : draft.slotAssignments) };
             const values = { ...draft.textValues };
-            const transforms = { ...draft.slotTransforms };
             const patchAliases = imageSlotAliasesForContract(contract, responseDocument);
-            const patchRoles = imageSlotRoles(contract.slots, contractSlotBoxes(contract, responseDocument));
+            const patchBoxes = contractSlotBoxes(contract, responseDocument);
+            // Any prefilled slot is seeded before the explicit patches run, so
+            // an explicit set_crop in the same call still has the last word.
+            const transforms = seededSlotTransforms(draft.slotTransforms, assignments, patchBoxes);
+            const patchRoles = imageSlotRoles(contract.slots, patchBoxes);
             const explicitAssignments: Record<string, string> = {};
             for (const patch of slotPatches) {
               const resolution = resolveSlotPatchTarget(contract.slots, patch, patchAliases);
@@ -2069,6 +2303,12 @@ export function ManualStorefront() {
                 if (photo.kind !== "resolved") throw new Error(`Photo reference for ${slot.key} is not uniquely visible in the tray.`);
                 assignments[slot.key] = photo.photo.id;
                 explicitAssignments[slot.key] = photo.photo.id;
+                // A photograph arriving in an unframed slot gets the same
+                // face-centred start a hand-dropped one gets.
+                if (!transforms[slot.key]) {
+                  const seeded = seededSlotTransform(photo.photo.id, patchBoxes[slot.key] ?? null);
+                  if (seeded !== initialBrowserPreviewTransform) transforms[slot.key] = seeded;
+                }
               } else if (patch.operation === "unassign") {
                 if (slot.kind !== "image") throw new Error(`Only image slot ${slot.key} can be unassigned.`);
                 delete assignments[slot.key];
@@ -2077,13 +2317,28 @@ export function ManualStorefront() {
                 values[slot.key] = patch.text;
               } else if (patch.operation === "set_crop") {
                 if (slot.kind !== "image") throw new Error(`set_crop applies only to image slot ${slot.key}.`);
-                transforms[slot.key] = slotTransformFromCropPatch(transforms[slot.key] ?? initialBrowserPreviewTransform, {
-                  zoom: typeof patch.zoom === "number" ? patch.zoom : undefined,
-                  focusX: typeof patch.focusX === "number" ? patch.focusX : undefined,
-                  focusY: typeof patch.focusY === "number" ? patch.focusY : undefined,
-                  offsetX: typeof patch.offsetX === "number" ? patch.offsetX : undefined,
-                  offsetY: typeof patch.offsetY === "number" ? patch.offsetY : undefined,
+                // The photograph this crop actually lands on — including one
+                // assigned by an earlier patch in this same call, which is what
+                // makes "use photo 3 here and frame her face" a single turn.
+                const resolvedFocus = await resolveCropFocusPreset({
+                  photoId: assignments[slot.key] ?? null,
+                  targetAspectRatio: boxAspectRatio(patchBoxes[slot.key] ?? null),
+                  preset: readFocusPreset(patch),
+                  patch: {
+                    zoom: typeof patch.zoom === "number" ? patch.zoom : undefined,
+                    focusX: typeof patch.focusX === "number" ? patch.focusX : undefined,
+                    focusY: typeof patch.focusY === "number" ? patch.focusY : undefined,
+                    offsetX: typeof patch.offsetX === "number" ? patch.offsetX : undefined,
+                    offsetY: typeof patch.offsetY === "number" ? patch.offsetY : undefined,
+                  },
                 });
+                slotFocusReports[slot.key] = resolvedFocus;
+                transforms[slot.key] = slotTransformFromCropPatch(
+                  // A resolved face focus is absolute, not a nudge: it starts
+                  // from the flat frame so a previous pan cannot add itself in.
+                  resolvedFocus.focusApplied === "faces" ? initialBrowserPreviewTransform : transforms[slot.key] ?? initialBrowserPreviewTransform,
+                  resolvedFocus.patch,
+                );
               } else throw new Error("Unknown slot patch operation.");
             }
             // An explicit patch is the shopper's own instruction: it overrides a
@@ -2170,9 +2425,20 @@ export function ManualStorefront() {
                 // The set_crop values that reproduce this slot's framing, so a
                 // relative crop change can be computed from what is visible.
                 crop: cropPatchFromSlotTransform(finalDraft.slotTransforms[slot.key] ?? initialBrowserPreviewTransform),
+                // The detector's own facts about the assigned photograph.
+                ...publishedFaceFacts(assignedPhotoId),
+                // What a focusOn on this slot actually did, if one was asked
+                // for. Only focus_applied "faces" means the crop is centred on
+                // a face: say nothing stronger than this field does.
+                focus: slotFocusReports[slot.key] ? focusWire(slotFocusReports[slot.key]!) : null,
               };
             }) ?? [],
             direct_crop: visibleDirectCrop(finalDraft),
+            direct_photo: finalDraft.template ? null : {
+              photo_id: finalDraft.photoIds[0] ?? null,
+              ...publishedFaceFacts(finalDraft.photoIds[0] ?? null),
+            },
+            direct_crop_focus: directCropFocusReport ? focusWire(directCropFocusReport) : null,
             // Geometry only — resolution, zoom, trim proximity and aspect. A
             // needs_review verdict is a reason to show the shopper, never a
             // refusal to proceed.
@@ -2202,15 +2468,19 @@ export function ManualStorefront() {
             ? request.input.crop as Record<string, unknown>
             : null;
           const cropValue = (key: string) => typeof crop?.[key] === "number" ? crop[key] as number : undefined;
-          const cropPatch = {
+          const cropPatch: CropPatchValues = {
             zoom: cropValue("zoom"),
             focusX: cropValue("focusX"),
             focusY: cropValue("focusY"),
             offsetX: cropValue("offsetX"),
             offsetY: cropValue("offsetY"),
           };
-          if (Object.values(cropPatch).every((value) => value === undefined)) {
-            throw new Error("revise_prints needs at least one crop value to propagate: zoom, focusX, focusY, offsetX, or offsetY.");
+          // focusOn is a crop value in its own right: "frame the others on the
+          // faces too" carries no numbers at all, because each print's faces
+          // are somewhere different.
+          const cropPreset = readFocusPreset(crop);
+          if (!cropPreset && Object.values(cropPatch).every((value) => value === undefined)) {
+            throw new Error("revise_prints needs at least one crop value to propagate: focusOn, zoom, focusX, focusY, offsetX, or offsetY.");
           }
           const selector = request.input.slotSelector && typeof request.input.slotSelector === "object"
             ? request.input.slotSelector as Record<string, unknown>
@@ -2220,22 +2490,45 @@ export function ManualStorefront() {
           const wantedLabel = typeof selector.label === "string" ? selector.label : undefined;
 
           const revised = new Map<string, PrintDraft>();
-          const reviseResults = requestedIds.map((rawId) => {
+          type ReviseResult = {
+            draft_id: string;
+            status: "applied" | "skipped";
+            reason: string | null;
+            slot_key: string | null;
+            crop: { zoom: number; focusX: number; focusY: number; offsetX: number; offsetY: number } | null;
+            review: ReturnType<typeof printReviewWire> | null;
+            /** Non-null only when this call asked for a focus preset. */
+            focus: ReturnType<typeof focusWire> | null;
+          };
+          // Sequential rather than mapped, because a focus preset may have to
+          // wait on that draft's own photograph before it knows any numbers.
+          const reviseResults: ReviseResult[] = [];
+          for (const rawId of requestedIds) {
+            reviseResults.push(await (async (): Promise<ReviseResult> => {
             const draftId = typeof rawId === "string" ? rawId : String(rawId);
             const draft = draftsRef.current.find((candidate) => candidate.id === draftId);
             if (!draft) {
-              return { draft_id: draftId, status: "skipped", reason: "no_such_visible_draft", slot_key: null, crop: null, review: null };
+              return { draft_id: draftId, status: "skipped", reason: "no_such_visible_draft", slot_key: null, crop: null, review: null, focus: null };
             }
             // A direct print has no published slots: the print itself is the
             // frame, so the crop lands on exactly the values the prepare-step
             // sliders and configure_print's directCrop already write.
             if (!draft.template) {
+              // Resolved against *this* print's photograph: the point of a
+              // preset is that each print gets its own numbers.
+              const resolvedFocus = await resolveCropFocusPreset({
+                photoId: draft.photoIds[0] ?? null,
+                targetAspectRatio: boxAspectRatio(productForDraft(draft)?.physical_output ?? null),
+                preset: cropPreset,
+                patch: cropPatch,
+              });
+              const patch = resolvedFocus.patch;
               const nextCrop = {
-                zoom: cropPatch.zoom ?? draft.directCrop.zoom,
-                focusX: cropPatch.focusX ?? draft.directCrop.focusX,
-                focusY: cropPatch.focusY ?? draft.directCrop.focusY,
-                offsetX: cropPatch.offsetX ?? draft.directCrop.offsetX,
-                offsetY: cropPatch.offsetY ?? draft.directCrop.offsetY,
+                zoom: patch.zoom ?? draft.directCrop.zoom,
+                focusX: patch.focusX ?? draft.directCrop.focusX,
+                focusY: patch.focusY ?? draft.directCrop.focusY,
+                offsetX: patch.offsetX ?? (resolvedFocus.focusApplied === "faces" ? 0 : draft.directCrop.offsetX),
+                offsetY: patch.offsetY ?? (resolvedFocus.focusApplied === "faces" ? 0 : draft.directCrop.offsetY),
               };
               patchDraft(draft.id, { directCrop: nextCrop });
               if (draft.id === selectedDraftId) {
@@ -2250,12 +2543,13 @@ export function ManualStorefront() {
                 slot_key: null,
                 crop: visibleDirectCrop(next),
                 review: printReviewWire(reviewForDraft(next)),
+                focus: cropPreset ? focusWire(resolvedFocus) : null,
               };
             }
 
             const facts = draftImageSlotFacts(draft);
             if (facts.length === 0) {
-              return { draft_id: draft.id, status: "skipped", reason: "no_image_slot_resolved_for_this_draft", slot_key: null, crop: null, review: null };
+              return { draft_id: draft.id, status: "skipped", reason: "no_image_slot_resolved_for_this_draft", slot_key: null, crop: null, review: null, focus: null };
             }
             let slotKey: string | null = null;
             let skipReason: string | null = null;
@@ -2279,11 +2573,21 @@ export function ManualStorefront() {
               skipReason = `this draft has ${facts.length} image slots (${facts.map((fact) => fact.aliases[0] ?? fact.key).join(", ")}); name one with slotSelector`;
             }
             if (!slotKey) {
-              return { draft_id: draft.id, status: "skipped", reason: skipReason ?? "no_matching_slot", slot_key: null, crop: null, review: null };
+              return { draft_id: draft.id, status: "skipped", reason: skipReason ?? "no_matching_slot", slot_key: null, crop: null, review: null, focus: null };
             }
+            const targetFact = facts.find((fact) => fact.key === slotKey) ?? null;
+            const resolvedFocus = await resolveCropFocusPreset({
+              photoId: targetFact?.photoId ?? null,
+              targetAspectRatio: boxAspectRatio(targetFact?.box ?? null),
+              preset: cropPreset,
+              patch: cropPatch,
+            });
             const transforms = {
               ...draft.slotTransforms,
-              [slotKey]: slotTransformFromCropPatch(draft.slotTransforms[slotKey] ?? initialBrowserPreviewTransform, cropPatch),
+              [slotKey]: slotTransformFromCropPatch(
+                resolvedFocus.focusApplied === "faces" ? initialBrowserPreviewTransform : draft.slotTransforms[slotKey] ?? initialBrowserPreviewTransform,
+                resolvedFocus.patch,
+              ),
             };
             patchDraft(draft.id, { slotTransforms: transforms, proofState: "idle" });
             // The workbench preview repaints only if this is the draft on it.
@@ -2300,8 +2604,10 @@ export function ManualStorefront() {
               slot_key: slotKey,
               crop: cropPatchFromSlotTransform(transforms[slotKey]!),
               review: printReviewWire(reviewForDraft(next)),
+              focus: cropPreset ? focusWire(resolvedFocus) : null,
             };
-          });
+            })());
+          }
 
           // A card in the deck paints a snapshot of the draft it proposed, so a
           // reframed draft has to be written back into its standing card or the
@@ -2508,9 +2814,23 @@ export function ManualStorefront() {
                 templateContractKnown: true,
                 requiredSlotKeys: effectiveRequiredTemplateSlotKeys(batchProduct, preflight.contract.slots),
                 slotAssignments: batchAssignments,
+                // A batch print is framed before its card is ever painted, so
+                // the shopper's first look at it is already on the faces.
+                slotTransforms: seededSlotTransforms(
+                  draft.slotTransforms,
+                  batchAssignments,
+                  browserPreviewSlotBoxes(preflight.document),
+                ),
               });
             } else {
               photoRoleMemory.current = rememberDirectPhoto(photoRoleMemory.current, batchProduct.physical_output, photo.id);
+              // The whole photograph is the print: the same face-centred start,
+              // expressed in the direct-crop vocabulary.
+              const subject = subjectRegionFromFaces(photoFacesRef.current[photo.id] ?? null);
+              const target = boxAspectRatio(batchProduct.physical_output);
+              const source = photoAspectRatio(photo.id);
+              const seeded = subject && target && source ? defaultCropForSubject(subject, target, source) : null;
+              if (seeded) draft = patchPrintDraft(draft, { directCrop: { ...seeded, offsetX: 0, offsetY: 0 } });
             }
             const proposal = createCartProposal({
               draftId: draft.id,

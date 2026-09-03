@@ -38,7 +38,7 @@ type BrowserTemplatePreviewProps = {
   serverProof: { url: string; transforms: Record<string, BrowserPreviewTransform> } | null;
   textValues: Record<string, string>;
   onSurfaceChange: (surfaceID: string) => void;
-  onActiveImageSlotChange: (slotKey: string) => void;
+  onActiveImageSlotChange: (slotKey: string | null) => void;
   onPreviewChange?: (slotKey: string, transform: BrowserPreviewTransform) => void;
   onPreviewCommit?: (reason: PreviewCommitReason, slotKey: string, transform: BrowserPreviewTransform) => void;
   onPreviewPanLimitsChange?: (slotKey: string, limits: BrowserPreviewPanLimits) => void;
@@ -71,6 +71,18 @@ function textLayerValue(layer: BrowserPreviewLayer, textValues: Record<string, s
     if (fragment.kind === "literal") return fragment.value;
     return textValues[fragment.slotKey]?.trim() ? textValues[fragment.slotKey] : fragment.placeholder ?? "";
   }).join("");
+}
+
+function EmptyImageSlot({ label }: { label: string }) {
+  return <span className="flex size-full flex-col items-center justify-center gap-1 bg-foreground/10 p-2 text-center text-muted-foreground">
+    <svg aria-hidden="true" className="size-5 opacity-60" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" viewBox="0 0 24 24">
+      <rect height="16" rx="2" width="18" x="3" y="4" />
+      <circle cx="9" cy="10" r="2" />
+      <path d="m3 18 5-5 4 4 3-3 6 6" />
+    </svg>
+    <span className="text-[12px] font-semibold leading-tight text-foreground/70">Missing {label}</span>
+    <span className="text-[11px] leading-tight">Drag an image here</span>
+  </span>;
 }
 
 function layerStyle(layer: BrowserPreviewLayer, canvas: NonNullable<ReturnType<typeof browserPreviewCanvas>>): CSSProperties {
@@ -145,6 +157,7 @@ export function BrowserTemplatePreview({
     : null, [document.input_slots, document.template.browser_document, selectedSurface]);
   const [transforms, setTransforms] = useState<Record<string, BrowserPreviewTransform>>(() => transformsFor(localImageSlots));
   const nextTransforms = useRef(transforms);
+  const previewRoot = useRef<HTMLElement | null>(null);
   const frame = useRef<number | null>(null);
   const drag = useRef<{ pointerID: number; slotKey: string; target: HTMLDivElement; x: number; y: number } | null>(null);
   const finishDragRef = useRef<(pointerID: number, releasePointerCapture?: boolean) => void>(() => {});
@@ -157,6 +170,18 @@ export function BrowserTemplatePreview({
     drag.current = null;
     if (active?.target.hasPointerCapture?.(active.pointerID)) active.target.releasePointerCapture(active.pointerID);
   }, []);
+
+  useEffect(() => {
+    if (!activeImageSlotKey) return;
+    const clearOutsideSelection = (event: globalThis.PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || previewRoot.current?.contains(target)) return;
+      if (target instanceof Element && target.closest("[data-template-framing-controls]")) return;
+      onActiveImageSlotChange(null);
+    };
+    globalThis.document.addEventListener("pointerdown", clearOutsideSelection, true);
+    return () => globalThis.document.removeEventListener("pointerdown", clearOutsideSelection, true);
+  }, [activeImageSlotKey, onActiveImageSlotChange]);
 
   // Committed framing arrives as a prop, so an agent's configure_print crop
   // patch repaints here immediately. A live drag owns the transform instead.
@@ -319,7 +344,7 @@ export function BrowserTemplatePreview({
 
   if (!selectedSurface || !canvas) return <Notice tone="error" role="alert">The published browser document does not contain the selected output surface.</Notice>;
 
-  return <section className="grid gap-4" aria-label="Responsive template preview">
+  return <section className="grid gap-4" aria-label="Responsive template preview" ref={previewRoot}>
     {document.output.surfaces.length > 1 && <SelectField label="Surface" value={selectedSurface.id} onChange={(event) => onSurfaceChange(event.target.value)}>{document.output.surfaces.map((surface) => <option key={surface.id} value={surface.id}>{surface.id} · {surface.fulfillment_role}</option>)}</SelectField>}
     <PrintFrame className="mx-auto w-[min(100%,452px)]">
       <div className={canvasClassName} style={{ aspectRatio: `${canvas.widthIn} / ${canvas.heightIn}`, background: canvas.backgroundColor }} onLostPointerCapture={loseDrag} onPointerCancel={endDrag} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={endDrag}>
@@ -361,18 +386,18 @@ export function BrowserTemplatePreview({
                 width: "100%",
               }
             : undefined;
-          if (layer.kind === "image") return <SlotDropSurface aria-label={isLocalSlot ? `Select ${localSlotKey} image slot` : undefined} className={cn("absolute", !source && "border border-dashed border-border-strong bg-foreground/5")} dropEnabled={dropEnabled} isActive={isActive} key={layer.id} slotKey={isLocalSlot ? localSlotKey! : null} onClick={isLocalSlot ? () => selectLocalSlot(localSlotKey!) : undefined} onKeyDown={isLocalSlot ? (event) => selectLocalSlotFromKeyboard(event, localSlotKey!) : undefined} onLostPointerCapture={isLocalSlot ? loseDrag : undefined} onPointerDown={isLocalSlot ? (event) => { event.stopPropagation(); selectLocalSlot(localSlotKey!); startDrag(event, localSlotKey!); } : undefined} role={isLocalSlot ? "button" : undefined} style={style} tabIndex={isLocalSlot ? 0 : undefined}>
+          if (layer.kind === "image") return <SlotDropSurface aria-label={isLocalSlot ? `Select ${layer.inputSlotLabel ?? "image"} slot` : undefined} className={cn("absolute", !source && "border border-dashed border-border-strong bg-foreground/5")} dropEnabled={dropEnabled} isActive={isActive} key={layer.id} slotKey={isLocalSlot ? localSlotKey! : null} onClick={isLocalSlot ? () => selectLocalSlot(localSlotKey!) : undefined} onKeyDown={isLocalSlot ? (event) => selectLocalSlotFromKeyboard(event, localSlotKey!) : undefined} onLostPointerCapture={isLocalSlot ? loseDrag : undefined} onPointerDown={isLocalSlot ? (event) => { event.stopPropagation(); selectLocalSlot(localSlotKey!); startDrag(event, localSlotKey!); } : undefined} role={isLocalSlot ? "button" : undefined} style={style} tabIndex={isLocalSlot ? 0 : undefined}>
             {source ? <img alt={layer.assetRef ? "Published template artwork" : `Local preview for ${localSlotKey} image slot`} className={cn("block select-none", isLocalSlot && "absolute max-w-none")} draggable={false} onLoad={isLocalSlot ? (event) => {
               const { naturalHeight: height, naturalWidth: width } = event.currentTarget;
               if (!localImage || width <= 0 || height <= 0) return;
               setSourceSizes((sizes) => sizes[localImage.source]?.width === width && sizes[localImage.source]?.height === height
                 ? sizes
                 : { ...sizes, [localImage.source]: { width, height } });
-            } : undefined} src={source} style={localImageStyle ?? { height: "100%", objectFit: layer.fitMode === "contain" ? "contain" : "cover", transformOrigin: "center", width: "100%" }} /> : <span className="flex h-full items-center justify-center p-1.5 text-center text-[13px] leading-[1.3] text-muted-foreground">{isLocalSlot ? `No local photo assigned to ${localSlotKey}.` : "Published image content is unavailable."}</span>}
+            } : undefined} src={source} style={localImageStyle ?? { height: "100%", objectFit: layer.fitMode === "contain" ? "contain" : "cover", transformOrigin: "center", width: "100%" }} /> : isLocalSlot ? <EmptyImageSlot label={layer.inputSlotLabel ?? "image"} /> : <span className="flex h-full items-center justify-center p-1.5 text-center text-[13px] leading-[1.3] text-muted-foreground">Published image content is unavailable.</span>}
           </SlotDropSurface>;
           if (layer.kind === "shape") return <div aria-hidden key={layer.id} style={{ ...style, background: shapeBackground(layer) }} />;
           const value = textLayerValue(layer, textValues);
-          return <div className="flex overflow-hidden leading-[1.12] whitespace-pre-wrap" key={layer.id} style={{ ...style, color: layer.color, fontFamily: layer.fontFamily, fontSize: `${(layer.typeSizePt ?? 12) / 72 / canvas.widthIn * 100}cqw`, fontWeight: layer.fontWeight, letterSpacing: `${layer.trackingEm ?? 0}em`, justifyContent: layer.verticalAlign === "bottom" ? "flex-end" : layer.verticalAlign === "middle" ? "center" : "flex-start", textAlign: layer.align }}>{value}</div>;
+          return <div className="flex flex-col overflow-hidden leading-[1.12] whitespace-pre-wrap" key={layer.id} style={{ ...style, color: layer.color, fontFamily: layer.fontFamily, fontSize: `${(layer.typeSizePt ?? 12) / 72 / canvas.widthIn * 100}cqw`, fontWeight: layer.fontWeight, letterSpacing: `${layer.trackingEm ?? 0}em`, justifyContent: layer.verticalAlign === "bottom" ? "flex-end" : layer.verticalAlign === "middle" ? "center" : "flex-start" }}><span className="block w-full" style={{ textAlign: layer.align }}>{value}</span></div>;
         })}
         {proofMatchesTransforms && serverProof && <img alt="Server-rendered template proof" className="absolute inset-0 z-[5] h-full w-full object-cover" src={serverProof.url} />}
       </div>

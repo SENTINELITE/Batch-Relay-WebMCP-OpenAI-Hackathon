@@ -21,7 +21,11 @@ test("revise_prints reframes through the same patch path set_crop uses, never a 
   // print through the same directCrop fields configure_print writes. If either
   // grew its own arithmetic, the agent's read of a crop and its write of one
   // would stop agreeing.
-  assert.match(revise, /slotTransformFromCropPatch\(draft\.slotTransforms\[slotKey\] \?\? initialBrowserPreviewTransform, cropPatch\)/);
+  // Still the one shared transform patch. A focusOn preset only resolves to
+  // values first — it never grows arithmetic of its own — and a resolved
+  // face focus is absolute, so it starts from the flat frame rather than
+  // adding itself to whatever pan was already there.
+  assert.match(revise, /slotTransformFromCropPatch\(\s*resolvedFocus\.focusApplied === "faces" \? initialBrowserPreviewTransform : draft\.slotTransforms\[slotKey\] \?\? initialBrowserPreviewTransform,\s*resolvedFocus\.patch,\s*\)/);
   assert.match(revise, /patchDraft\(draft\.id, \{ slotTransforms: transforms, proofState: "idle" \}\)/);
   assert.match(revise, /patchDraft\(draft\.id, \{ directCrop: nextCrop \}\)/);
   // The reported crop is read back out of the committed transform, so the

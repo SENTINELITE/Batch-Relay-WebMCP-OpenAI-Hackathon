@@ -49,12 +49,11 @@ export function TemplateSlotAssignment({
   return <div className="grid gap-3" aria-label="Template slot assignments">
     <div className="grid gap-1">
       <p className="text-base font-semibold text-foreground">Template inputs</p>
-      <p className="text-sm text-muted-foreground">Assign photographs using the published stable slot keys. Nothing is matched by a guessed label.</p>
+      <p className="text-sm text-muted-foreground">Choose or drag photographs into the image areas, then enter the text you want printed.</p>
     </div>
     {slots.map((slot) => slot.kind === "image" ? <ImageSlotRow key={slot.key} slotKey={slot.key}>
       <span className="grid min-w-0 gap-1">
         <span className="text-sm font-semibold text-foreground">{slot.suggested_label ?? `Image ${slot.ordinal + 1}`}{slot.required ? " *" : ""}</span>
-        <span className="font-mono text-[13px] break-words text-muted-foreground">{slot.key}</span>
         {prefilledSlotProvenance?.[slot.key] && assignments[slot.key] && <span className="text-[13px] text-muted-foreground">Prefilled from your {prefilledSlotProvenance[slot.key]}</span>}
       </span>
       <select className={selectClassName} value={assignments[slot.key] ?? ""} onChange={(event) => onAssign(slot.key, event.target.value || null)}>
@@ -64,7 +63,6 @@ export function TemplateSlotAssignment({
     </ImageSlotRow> : <label className={rowClassName} key={slot.key}>
       <span className="grid min-w-0 gap-1">
         <span className="text-sm font-semibold text-foreground">{slot.suggested_label ?? `Text ${slot.ordinal + 1}`}{slot.required ? " *" : ""}</span>
-        <span className="font-mono text-[13px] break-words text-muted-foreground">{slot.key}</span>
       </span>
       <input
         className={fieldControlClassName}

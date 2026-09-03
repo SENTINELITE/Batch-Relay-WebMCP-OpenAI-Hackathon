@@ -521,6 +521,8 @@ test("template preview clears a drag when pointer capture is lost outside the sl
   assert.match(preview, /window\.addEventListener\("pointercancel", endWindowDrag\)/);
   assert.match(preview, /function finishDrag\(/);
   assert.match(preview, /drag\.current = null/);
+  assert.match(preview, /globalThis\.document\.addEventListener\("pointerdown", clearOutsideSelection, true\)/);
+  assert.match(preview, /target\.closest\("\[data-template-framing-controls\]"\)/);
 });
 
 test("a committed browser-preview slot transform updates the local draft without a removed render path", async () => {
@@ -535,7 +537,7 @@ test("the multi-slot browser preview preserves independent slot transforms witho
   assert.match(source, /localImageSlots: Record<string, LocalBrowserPreviewImage>/);
   assert.match(source, /const localSlotKey = layer\.inputSlotKey/);
   assert.match(source, /const localImage = localSlotKey \? localImageSlots\[localSlotKey\] : undefined/);
-  assert.match(source, /No local photo assigned to \$\{localSlotKey\}/);
+  assert.match(source, /<EmptyImageSlot label=/);
   assert.match(source, /onPreviewChange\?\.\(slotKey, normalized\)/);
   assert.match(source, /onPreviewCommit\?\.\(reason, slotKey, eventTransformFor\(slotKey\)\)/);
   assert.match(source, /serverProof\.transforms\[slotKey\]/);

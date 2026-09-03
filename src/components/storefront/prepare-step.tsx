@@ -83,7 +83,6 @@ export function PrepareStep({
   cropZoom,
   customization,
   hasLocalImage,
-  imageName,
   imagePreview,
   managedAsset,
   onAddPreparedLine,
@@ -100,8 +99,6 @@ export function PrepareStep({
   photos,
   prefilledSlotProvenance,
   preparing,
-  selectedPhotoId,
-  selectedPhotoOrdinal,
   selectedProduct,
   selectedTemplateId,
   templateAssignments,
@@ -266,33 +263,12 @@ export function PrepareStep({
         <div className="flex flex-col gap-6">
           <Surface aria-labelledby="prepare-photo-title" as="section">
             <PanelHeading id="prepare-photo-title" title="Prepare selected photo" />
-            <div className="mt-4 flex items-center gap-3 rounded-[12px] bg-surface-warm px-4 py-3">
-              <span className="font-mono text-[13px] text-muted-foreground">
-                {selectedPhotoOrdinal}
-              </span>
-              <div className="min-w-0">
-                <b className="block truncate text-[15px] font-semibold">
-                  {imageName ?? "Choose a photograph from the tray"}
-                </b>
-                {selectedPhotoId ? (
-                  <small className="block truncate font-mono text-[13px] text-muted-foreground">
-                    {selectedPhotoId}
-                  </small>
-                ) : (
-                  <small className="block text-sm text-muted-foreground">
-                    The tray selection is the active direct-print image.
-                  </small>
-                )}
-              </div>
-            </div>
-
             {hasLocalImage && (
               <div className="mt-5 flex flex-col gap-4">
                 {templatePreviewIsPrimary && activeImageSlotKey && activeSlotTransform ? (
-                  <div className="flex flex-col gap-4">
+                  <div className="flex flex-col gap-4" data-template-framing-controls>
                     <div className="grid gap-1">
                       <p className="text-sm font-semibold text-foreground">Frame selected image</p>
-                      <p className="font-mono text-[13px] break-words text-muted-foreground">{activeImageSlotKey}</p>
                     </div>
                     <RangeField
                       hint={`${activeSlotTransform.zoom.toFixed(2)} times`}
@@ -367,11 +343,8 @@ export function PrepareStep({
             )}
 
             {managedAsset && (
-              <p className="mt-5 rounded-[12px] bg-surface-warm px-4 py-3 font-mono text-[13px] text-foreground">
-                Managed asset <b className="font-semibold">{managedAsset.asset_id}</b>{" "}
-                <span className="text-muted-foreground">
-                  {managedAsset.pixel_width} × {managedAsset.pixel_height}px
-                </span>
+              <p className="mt-5 rounded-[12px] bg-surface-warm px-4 py-3 text-sm text-foreground">
+                Selected crop is ready.
               </p>
             )}
           </Surface>

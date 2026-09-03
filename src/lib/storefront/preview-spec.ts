@@ -246,6 +246,7 @@ function convertLayer(layer: RenderTemplateSpecLayer, slotKeys: ReadonlyMap<stri
   const publicAssetURL = layer.source?.kind === "templateAsset" ? publicTemplateAssetURL(layer.source.assetRef) : null;
   if (layer.source?.kind === "templateAsset" && !publicAssetURL) return null;
   const boundKey = layer.source?.kind === "binding" && layer.source.key ? slotKeys.get(layer.source.key) ?? null : null;
+  const boundLabel = layer.source?.kind === "binding" && layer.source.key ? slotLabels.get(layer.source.key) : undefined;
   if (layer.kind === "image" && !boundKey && !publicAssetURL) return null;
   const role = boundKey ?? layer.name ?? layer.id;
   const common = {
@@ -264,6 +265,7 @@ function convertLayer(layer: RenderTemplateSpecLayer, slotKeys: ReadonlyMap<stri
       kind: "image",
       opacity: layer.opacity ?? 1,
       fitMode: layer.fit?.mode ?? "cover",
+      inputSlotLabel: boundLabel,
       imageSource: publicAssetURL
         ? { kind: "templateAsset", assetRef: layer.source?.assetRef }
         : { kind: "binding" },

@@ -14,7 +14,7 @@ export const frozenDemoTemplate = {
   revisionID: "rev_398677279733464cafb253d610f0e891",
   revisionNumber: 3,
   outputID: "memory-mate-8x10-portrait-a",
-  documentSHA256: "6e0f326a0c393240dc50f58c6707fd5ad556b26e7fd16c650b0a3c14dfdc8498",
+  snapshotSHA256: "5218a247a26ee7fcbc62f0fba68e5b035984d83c1550cc435ea5c51e33efcaa2",
   frozenAt: "2026-09-03T19:21:28.043Z",
   reviewAfter: "2026-09-24",
 } as const;
@@ -93,8 +93,5 @@ export function frozenDemoBrowserPreview(templateID: string, outputID: string, r
   const spec = bundledTemplateSpec(templateID);
   if (!contract || !spec || !bundledTemplateSpecMatchesRevision(spec, frozenDemoTemplate.revisionID)) return null;
   const document = specBrowserPreviewDocument({ spec, contract, output: frozenOutput });
-  return document ? {
-    ...document,
-    template: { ...document.template, document_sha256: frozenDemoTemplate.documentSHA256 },
-  } : null;
+  return document;
 }

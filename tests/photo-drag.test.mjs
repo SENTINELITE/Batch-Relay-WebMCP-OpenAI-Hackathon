@@ -50,7 +50,8 @@ test("a slot accepts a drop without taking over the pointer gestures it already 
   assert.match(surface, /\{\.\.\.rest\}/);
   // The pan gesture and slot activation are still bound on the slot itself.
   assert.match(preview, /<SlotDropSurface[\s\S]*?onPointerDown=\{isLocalSlot \? \(event\) => \{ event\.stopPropagation\(\); selectLocalSlot\(localSlotKey!\); startDrag\(event, localSlotKey!\); \} : undefined\}/);
-  assert.match(preview, /No local photo assigned to \$\{localSlotKey\}/);
+  // An unassigned local slot stays visibly marked (dashed drop affordance).
+  assert.match(preview, /!source && "border border-dashed/);
 });
 
 test("only the live template canvas registers each slot as a drop target", async () => {

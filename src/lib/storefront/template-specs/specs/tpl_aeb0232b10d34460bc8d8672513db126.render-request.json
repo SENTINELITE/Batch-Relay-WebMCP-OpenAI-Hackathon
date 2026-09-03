@@ -235,11 +235,11 @@
                 "frame": {
                   "anchor": "mc",
                   "offsetIn": {
-                    "x": 0.904,
+                    "x": 1.878,
                     "y": 2.326
                   },
                   "sizeIn": {
-                    "width": 1.3089988708496094,
+                    "width": 3.2560340261635883,
                     "height": 0.39999999999999997
                   }
                 },
@@ -273,11 +273,11 @@
                 "fontWeight": 700,
                 "trackingEm": -0.02,
                 "align": "left",
-                "sizing": "auto-width",
-                "textFlow": "one-line",
-                "automaticFit": false,
+                "sizing": "auto-height",
+                "textFlow": "wrap-to-fit",
+                "automaticFit": true,
                 "minimumTypeSizePt": 12,
-                "autoWrap": false,
+                "autoWrap": true,
                 "maxLines": 2,
                 "verticalAlign": "middle",
                 "color": "#c46de2"
@@ -288,11 +288,11 @@
                 "frame": {
                   "anchor": "mc",
                   "offsetIn": {
-                    "x": 3.021,
+                    "x": 1.811,
                     "y": 3.012
                   },
                   "sizeIn": {
-                    "width": 0.7916659715440538,
+                    "width": 3.211509685046013,
                     "height": 0.39999999999999997
                   }
                 },
@@ -325,12 +325,12 @@
                 "fontId": "barlow-semi-condensed",
                 "fontWeight": 700,
                 "trackingEm": -0.02,
-                "align": "left",
-                "sizing": "auto-width",
-                "textFlow": "one-line",
-                "automaticFit": false,
+                "align": "right",
+                "sizing": "auto-height",
+                "textFlow": "wrap-to-fit",
+                "automaticFit": true,
                 "minimumTypeSizePt": 12,
-                "autoWrap": false,
+                "autoWrap": true,
                 "maxLines": 2,
                 "verticalAlign": "middle",
                 "color": "#1363de"
@@ -341,11 +341,11 @@
                 "frame": {
                   "anchor": "mc",
                   "offsetIn": {
-                    "x": 1.007,
+                    "x": 1.835,
                     "y": 3.699
                   },
                   "sizeIn": {
-                    "width": 1.5159989081488716,
+                    "width": 3.1717939179104064,
                     "height": 0.39999999999999997
                   }
                 },
@@ -384,11 +384,11 @@
                 "fontWeight": 700,
                 "trackingEm": -0.02,
                 "align": "left",
-                "sizing": "auto-width",
-                "textFlow": "one-line",
-                "automaticFit": false,
+                "sizing": "auto-height",
+                "textFlow": "wrap-to-fit",
+                "automaticFit": true,
                 "minimumTypeSizePt": 12,
-                "autoWrap": false,
+                "autoWrap": true,
                 "maxLines": 2,
                 "verticalAlign": "middle",
                 "color": "#c46de2"

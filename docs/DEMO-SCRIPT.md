@@ -101,6 +101,28 @@ math.
 
 **Fires:** `configure_print` with `orientation: "landscape"`.
 
+**Then say:**
+> "Zoom in on her face in the individual, quite a lot."
+
+**Screen:** the individual slot tightens onto the head — not the middle of the
+photo, the *head*.
+
+**Fires:** `configure_print` with one `slotPatch`
+`{ label: "individual", operation: "set_crop", zoom: 3, focusOn: "faces" }`. The
+agent names the magnification; the app owns where to point it, because the app
+is the only side holding the face boxes. The response comes back with
+`focus_applied: "faces"`, `faces_detected: 1` and the `subject_region` it used.
+
+**Line for the room:** "It did not guess a focus point and it is not allowed to
+claim one. `focusOn: faces` is an *intention* — the page turns it into
+coordinates, and the response says which of `faces`, `no_faces_detected` or
+`faces_not_ready` actually happened. If there is no face in the picture, the
+crop stays put and the agent has to say so."
+
+*(If the portrait you demo on has no detectable face, that is still the beat —
+let it come back `no_faces_detected` and read the honest narration out loud. It
+lands harder than the success case.)*
+
 **Line for the room:** "Every one of those was one tool call against the published
 template contract. The tool returns what is still missing — it never pretends a
 draft is finished."
@@ -225,7 +247,8 @@ The batch is background by definition — the cards *are* the review."
 
 **Say to the room while it answers:** "It is not guessing and it is not looking
 at pixels. That is geometry: the photo's pixels against the printed inches at
-the crop I asked for. No model, no face detection — arithmetic I can argue with."
+the crop I asked for — arithmetic I can argue with. The face model from Beat 3
+only ever *aims* a crop; it never gets a vote on whether a print is good."
 
 **Do:** click the flagged card's print in the rail, then **drag the framing with
 the mouse** until it looks right — pull the zoom back, recentre the subject. The

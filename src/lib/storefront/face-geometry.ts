@@ -220,6 +220,42 @@ export type SubjectCrop = {
 };
 
 /**
+ * The focus point that centres a subject at a zoom somebody else chose.
+ *
+ * `defaultCropForSubject` picks its own zoom; this is the same arithmetic with
+ * the zoom held fixed, which is what a request like "zoom right in on her face"
+ * needs — the shopper named the magnification, so only the pan is ours to
+ * compute. At a zoom tighter than the subject the point still centres the
+ * subject's middle, so the crop lands on the face rather than the torso.
+ */
+export function focusForSubject(
+  subject: SubjectRegion | null,
+  targetAspectRatio: number,
+  sourceAspectRatio: number,
+  zoom: number,
+): { focusX: number; focusY: number } | null {
+  if (!subject) return null;
+  const target = finite(targetAspectRatio);
+  const source = finite(sourceAspectRatio);
+  if (!target || !source || target <= 0 || source <= 0) return null;
+  if (subject.width <= 0 || subject.height <= 0) return null;
+  const magnification = clamp(finite(zoom) ?? 1, 1, 4);
+  const wider = source > target;
+  const baseWidth = wider ? target / source : 1;
+  const baseHeight = wider ? 1 : source / target;
+  const width = clamp(baseWidth / magnification, 0, 1);
+  const height = clamp(baseHeight / magnification, 0, 1);
+  const centerX = subject.x + subject.width / 2;
+  const centerY = subject.y + subject.height / 2;
+  const slackX = 1 - width;
+  const slackY = 1 - height;
+  return {
+    focusX: slackX <= 0 ? 50 : clamp(((centerX - width / 2) / slackX) * 100, 0, 100),
+    focusY: slackY <= 0 ? 50 : clamp(((centerY - height / 2) / slackY) * 100, 0, 100),
+  };
+}
+
+/**
  * A starting crop that centres the detected subject.
  *
  * It never zooms *out* — zoom 1 is already the whole cover-fitted frame — and it
@@ -251,15 +287,6 @@ export function defaultCropForSubject(
   const wantedHeight = subject.height / (1 - 2 * room);
   const zoom = clamp(Math.min(baseWidth / wantedWidth, baseHeight / wantedHeight), 1, 4);
 
-  const width = clamp(baseWidth / zoom, 0, 1);
-  const height = clamp(baseHeight / zoom, 0, 1);
-  const centerX = subject.x + subject.width / 2;
-  const centerY = subject.y + subject.height / 2;
-  const slackX = 1 - width;
-  const slackY = 1 - height;
-  return {
-    zoom,
-    focusX: slackX <= 0 ? 50 : clamp(((centerX - width / 2) / slackX) * 100, 0, 100),
-    focusY: slackY <= 0 ? 50 : clamp(((centerY - height / 2) / slackY) * 100, 0, 100),
-  };
+  const focus = focusForSubject(subject, target, source, zoom);
+  return focus ? { zoom, ...focus } : null;
 }

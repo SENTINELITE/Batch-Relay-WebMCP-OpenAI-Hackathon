@@ -106,7 +106,7 @@ const approvedTools = [
     exportName: "configurePrint",
     stableKey: "storefront.prepare_print_images",
     name: "configure_print",
-    description: "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. It never takes the screen away from a shopper who is customizing a print by hand: a new draft made while they are working on another one waits in the draft rail instead, and the response says which happened with placed on_screen or draft_rail and a matching visible flag. Narrate that honestly — when a draft was placed in the draft rail, do not tell the shopper they are looking at it; adding it will show them a proposal card carrying its own live preview. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
+    description: "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. A set_crop patch or directCrop may also carry focusOn faces, which centers the crop on the faces this browser detected in that photograph \u2014 combine it with a zoom for a request like zoom right in on her face \u2014 and every response reports faces_detected, subject_region and a focus_applied of faces, no_faces_detected, faces_not_ready, detection_unavailable or explicit, so never tell the shopper a crop is centered on a face unless focus_applied came back faces. It never takes the screen away from a shopper who is customizing a print by hand: a new draft made while they are working on another one waits in the draft rail instead, and the response says which happened with placed on_screen or draft_rail and a matching visible flag. Narrate that honestly — when a draft was placed in the draft rail, do not tell the shopper they are looking at it; adding it will show them a proposal card carrying its own live preview. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
     fields: ["draftId", "draft_id", "trayRevision", "photoRefs", "productId", "productQuery", "templateId", "templateQuery", "outputId", "orientation", "slotPatches", "directCrop"],
   },
   {
@@ -127,7 +127,7 @@ const approvedTools = [
     exportName: "revisePrints",
     stableKey: "storefront.revise_prints",
     name: "revise_prints",
-    description: "Propagate a framing the shopper has already approved onto other prints, for a request like frame the others like this. Applies one crop patch — the same zoom, focus and offset vocabulary configure_print's set_crop takes and ask_storefront reports per draft — to every draft named in draftIds, aiming at each draft's only image slot unless slotSelector names a role such as individual or team, a published slotKey, or a label; every affected preview and proposal card repaints before this returns. Returns a per-draft result saying applied or skipped with the reason, and never adds anything to the demo cart, answers a proposal, or moves the shopper to another print.",
+    description: "Propagate a framing the shopper has already approved onto other prints, for a request like frame the others like this. Applies one crop patch — the same zoom, focus and offset vocabulary configure_print's set_crop takes and ask_storefront reports per draft — to every draft named in draftIds, aiming at each draft's only image slot unless slotSelector names a role such as individual or team, a published slotKey, or a label; every affected preview and proposal card repaints before this returns. The crop may carry focusOn faces instead of, or alongside, coordinates, which centers each print on the faces detected in its own photograph, and each result reports focus_applied so face-centering is only ever narrated when the response confirms it. Returns a per-draft result saying applied or skipped with the reason, and never adds anything to the demo cart, answers a proposal, or moves the shopper to another print.",
     fields: ["draftIds", "draft_ids", "crop", "slotSelector"],
   },
   {
@@ -176,6 +176,9 @@ test("configure_print is a closed draft schema and rejects stale or ambiguous tr
   const slotPatches = objectAfter(objectAfter(objectAfter(schema, "properties:"), "slotPatches:"), "items:");
   assert.deepEqual(shallowKeys(objectAfter(slotPatches, "properties:")), [
     "slotKey", "label", "operation", "photoRef", "text", "zoom", "focusX", "focusY", "offsetX", "offsetY",
+    // focusOn is the one crop value that names an intention rather than a
+    // coordinate; both spellings are accepted, as everywhere else.
+    "focusOn", "focus_on",
   ]);
   assert.match(slotPatches, /required:\s*\["operation"\]/);
   assert.match(slotPatches, /oneOf:\s*\[\{\s*required:\s*\["slotKey"\]\s*\},\s*\{\s*required:\s*\["label"\]\s*\}\]/);
@@ -183,7 +186,7 @@ test("configure_print is a closed draft schema and rejects stale or ambiguous tr
 
   const directCrop = objectAfter(objectAfter(schema, "properties:"), "directCrop:");
   assert.deepEqual(shallowKeys(objectAfter(directCrop, "properties:")), [
-    "zoom", "focusX", "focusY", "offsetX", "offsetY",
+    "zoom", "focusX", "focusY", "offsetX", "offsetY", "focusOn", "focus_on",
   ]);
   assert.match(directCrop, /minProperties:\s*1/);
   assert.match(directCrop, /additionalProperties:\s*false/);
@@ -657,7 +660,11 @@ test("a background draft derives its slot aliases from its own artwork", async (
   assert.match(source, /const responseDocument: BrowserPreviewDocument \| null = onScreen\s*\?\s*browserPreviewDocumentRef\.current\s*:\s*offScreenTemplate\?\.document \?\? null/);
   assert.match(source, /imageSlotAliasesForContract\(responseContract, responseDocument\)/);
   assert.match(source, /imageSlotAliasesForContract\(contract, responseDocument\)/);
-  assert.match(source, /imageSlotRoles\(contract\.slots, contractSlotBoxes\(contract, responseDocument\)\)/);
+  // The slot boxes are read once into patchBoxes and reused for roles and for
+  // the target aspect a face-centred crop needs; both still come from this
+  // draft's own document.
+  assert.match(source, /const patchBoxes = contractSlotBoxes\(contract, responseDocument\)/);
+  assert.match(source, /imageSlotRoles\(contract\.slots, patchBoxes\)/);
 });
 
 test("find_prints looks the catalog up without moving the shopper off their work", async () => {

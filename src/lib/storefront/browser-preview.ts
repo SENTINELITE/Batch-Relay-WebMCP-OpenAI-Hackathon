@@ -155,6 +155,8 @@ export type BrowserPreviewLayer = {
    * callers must never infer this from browser binding metadata, a role, or a label.
    */
   inputSlotKey?: string;
+  /** Published human label for an empty bound image slot. */
+  inputSlotLabel?: string;
   cornerRadiusIn?: number;
   cornerRadiiIn?: { tl: number; tr: number; br: number; bl: number };
   fills?: Array<{
@@ -287,6 +289,7 @@ function layer(value: unknown, inputSlotKeys: ReadonlyMap<string, string>): Brow
     fitMode: value.fitMode === "contain" || value.fitMode === "exact" ? value.fitMode : "cover",
     assetRef: record(value.imageSource) && value.imageSource.kind === "templateAsset" ? nonEmpty(value.imageSource.assetRef) ?? undefined : undefined,
     inputSlotKey: kind === "image" && record(value.imageSource) && value.imageSource.kind === "binding" ? inputSlotKeys.get(id) : undefined,
+    inputSlotLabel: kind === "image" && record(value.imageSource) && value.imageSource.kind === "binding" ? nonEmpty(value.inputSlotLabel) ?? undefined : undefined,
     cornerRadiusIn: Math.max(0, finite(value.cornerRadiusIn) ?? 0),
     cornerRadiiIn: cornerRadii(value.cornerRadiiIn),
     fills: fills.length > 0 ? fills : undefined,
