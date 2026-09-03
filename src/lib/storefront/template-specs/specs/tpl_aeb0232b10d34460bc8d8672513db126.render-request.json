@@ -4,11 +4,11 @@
     "schemaVersion": "batchrelay.render-template/v6",
     "templateEngineVersion": "0.11.0",
     "templateId": "tpl_aeb0232b10d34460bc8d8672513db126",
-    "revisionId": "rev_601c0a0f1cc64e4a9527cd2a547cf66c",
-    "revisionNumber": 1,
+    "revisionId": "rev_398677279733464cafb253d610f0e891",
+    "revisionNumber": 3,
     "name": "Neon Lights",
     "createdAt": "2026-09-03T05:16:07.018Z",
-    "updatedAt": "2026-09-03T05:51:07.359Z",
+    "updatedAt": "2026-09-03T19:21:28.043Z",
     "units": "inches",
     "origin": "top-left",
     "safeAreaIn": 0.25,
@@ -19,9 +19,40 @@
         "kind": "image",
         "label": "Athlete portrait (5x7)",
         "required": false,
-        "requiredAspectRatio": { "width": 5, "height": 7 },
+        "requiredAspectRatio": {
+          "width": 5,
+          "height": 7
+        },
         "fitPolicy": "exact",
         "minimumEffectivePpi": 300
+      },
+      {
+        "key": "text_5106920550f5",
+        "semanticRole": "athlete_print_name",
+        "kind": "text",
+        "label": "Print Name",
+        "required": false
+      },
+      {
+        "key": "text_171cff5dcfde",
+        "semanticRole": "athlete_jersey_number",
+        "kind": "text",
+        "label": "Jersey Number",
+        "required": false
+      },
+      {
+        "key": "text_746edef46a4a",
+        "semanticRole": "athlete_team",
+        "kind": "text",
+        "label": "Team",
+        "required": false
+      },
+      {
+        "key": "text_1e6560b98c6e",
+        "semanticRole": "athlete_year",
+        "kind": "text",
+        "label": "Year",
+        "required": false
       },
       {
         "key": "athlete.portrait.10x8",
@@ -29,7 +60,10 @@
         "kind": "image",
         "label": "athlete.portrait",
         "required": false,
-        "requiredAspectRatio": { "width": 10, "height": 8 },
+        "requiredAspectRatio": {
+          "width": 10,
+          "height": 8
+        },
         "fitPolicy": "exact",
         "minimumEffectivePpi": 300
       }
@@ -41,7 +75,12 @@
         "heightIn": 10,
         "safety": {
           "policy": "photographic-print/v1",
-          "expectedTrimIn": { "left": 0.08, "right": 0.08, "top": 0.1, "bottom": 0.1 },
+          "expectedTrimIn": {
+            "left": 0.08,
+            "right": 0.08,
+            "top": 0.1,
+            "bottom": 0.1
+          },
           "importantContentInsetIn": 0.25
         },
         "variants": [
@@ -55,13 +94,24 @@
                 "kind": "shape",
                 "frame": {
                   "anchor": "tl",
-                  "offsetIn": { "x": 0, "y": 0 },
-                  "sizeIn": { "width": 8, "height": 10 }
+                  "offsetIn": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "sizeIn": {
+                    "width": 8,
+                    "height": 10
+                  }
                 },
                 "rotationDeg": 0,
                 "opacity": 1,
                 "blendMode": "normal",
-                "fills": [{ "kind": "solid", "color": "#ffede1" }]
+                "fills": [
+                  {
+                    "kind": "solid",
+                    "color": "#ffede1"
+                  }
+                ]
               },
               {
                 "id": "bg_memory-mate-8x10-portrait_a_image",
@@ -69,8 +119,14 @@
                 "kind": "image",
                 "frame": {
                   "anchor": "tl",
-                  "offsetIn": { "x": 0, "y": 0 },
-                  "sizeIn": { "width": 8, "height": 10 }
+                  "offsetIn": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "sizeIn": {
+                    "width": 8,
+                    "height": 10
+                  }
                 },
                 "rotationDeg": 0,
                 "opacity": 1,
@@ -79,10 +135,15 @@
                   "kind": "templateAsset",
                   "assetRef": "https://images.batchrelay.com/qs721nx4b560vgs1g9frmkt97d8c539d/templates/backgrounds/sha256/7058e81385b9b20cd943656ceede1f69fd92113537c6864402af3ac9eb09bed2.jpg"
                 },
-                "fit": { "mode": "cover" },
+                "fit": {
+                  "mode": "cover"
+                },
                 "orientationPolicy": "auto",
                 "orientationAnchor": "bottom-center",
-                "sourcePixelSize": { "width": 3936, "height": 4920 }
+                "sourcePixelSize": {
+                  "width": 3936,
+                  "height": 4920
+                }
               },
               {
                 "id": "bg_memory-mate-8x10-portrait_a_tint",
@@ -90,28 +151,51 @@
                 "kind": "shape",
                 "frame": {
                   "anchor": "tl",
-                  "offsetIn": { "x": 0, "y": 0 },
-                  "sizeIn": { "width": 8, "height": 10 }
+                  "offsetIn": {
+                    "x": 0,
+                    "y": 0
+                  },
+                  "sizeIn": {
+                    "width": 8,
+                    "height": 10
+                  }
                 },
                 "rotationDeg": 0,
                 "opacity": 1,
                 "blendMode": "normal",
-                "fills": [{ "kind": "solid", "color": "#17110c", "opacity": 0.55 }]
+                "fills": [
+                  {
+                    "kind": "solid",
+                    "color": "#17110c",
+                    "opacity": 0.55
+                  }
+                ]
               },
               {
                 "id": "n_1c8755c5-ebdb-4cd8-a2bc-1b81d5213913",
                 "name": "Individual portrait",
                 "frame": {
                   "anchor": "mc",
-                  "offsetIn": { "x": -1.623, "y": -1.822 },
-                  "sizeIn": { "width": 4.003, "height": 5.604 }
+                  "offsetIn": {
+                    "x": -1.875,
+                    "y": 2.126
+                  },
+                  "sizeIn": {
+                    "width": 3.75,
+                    "height": 5.25
+                  }
                 },
                 "rotationDeg": 0,
                 "opacity": 1,
                 "blendMode": "normal",
                 "kind": "image",
-                "source": { "kind": "binding", "key": "athlete.portrait.5x7" },
-                "fit": { "mode": "exact" },
+                "source": {
+                  "kind": "binding",
+                  "key": "athlete.portrait.5x7"
+                },
+                "fit": {
+                  "mode": "exact"
+                },
                 "orientationPolicy": "keep-upright",
                 "cornerRadiusIn": 0.06,
                 "orientationAnchor": "bottom-center"
@@ -121,16 +205,418 @@
                 "name": "Individual portrait",
                 "frame": {
                   "anchor": "mc",
-                  "offsetIn": { "x": 0, "y": 2.799 },
-                  "sizeIn": { "width": 4.185, "height": 3.348 }
+                  "offsetIn": {
+                    "x": 1.25,
+                    "y": -2.75
+                  },
+                  "sizeIn": {
+                    "width": 5,
+                    "height": 4
+                  }
                 },
                 "rotationDeg": 0,
                 "opacity": 1,
                 "blendMode": "normal",
                 "kind": "image",
-                "source": { "kind": "binding", "key": "athlete.portrait.10x8" },
-                "fit": { "mode": "exact" },
+                "source": {
+                  "kind": "binding",
+                  "key": "athlete.portrait.10x8"
+                },
+                "fit": {
+                  "mode": "exact"
+                },
                 "orientationPolicy": "keep-upright",
+                "cornerRadiusIn": 0.06,
+                "orientationAnchor": "bottom-center"
+              },
+              {
+                "id": "n_f5b98e7e-bf8b-46aa-b56e-09f840341fe7",
+                "name": "Athlete name",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": {
+                    "x": 0.904,
+                    "y": 2.326
+                  },
+                  "sizeIn": {
+                    "width": 1.3089988708496094,
+                    "height": 0.39999999999999997
+                  }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "text",
+                "content": {
+                  "kind": "composition",
+                  "fragments": [
+                    {
+                      "id": "lit_a8d6837399324a9ebed10b763cef6e54",
+                      "kind": "literal",
+                      "value": ""
+                    },
+                    {
+                      "id": "token_ca9d70db3e234cfd953e18753ba3c5b9",
+                      "kind": "binding",
+                      "key": "text_5106920550f5",
+                      "missingPolicy": "error"
+                    },
+                    {
+                      "id": "lit_57bc3bdd1f554765acff9edd3fc665a8",
+                      "kind": "literal",
+                      "value": ""
+                    }
+                  ]
+                },
+                "typeSizePt": 24,
+                "fontId": "barlow-semi-condensed",
+                "fontWeight": 700,
+                "trackingEm": -0.02,
+                "align": "left",
+                "sizing": "auto-width",
+                "textFlow": "one-line",
+                "automaticFit": false,
+                "minimumTypeSizePt": 12,
+                "autoWrap": false,
+                "maxLines": 2,
+                "verticalAlign": "middle",
+                "color": "#c46de2"
+              },
+              {
+                "id": "n_2a39cbbb-4336-4941-81b5-ba342d204476",
+                "name": "Jersey number",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": {
+                    "x": 3.021,
+                    "y": 3.012
+                  },
+                  "sizeIn": {
+                    "width": 0.7916659715440538,
+                    "height": 0.39999999999999997
+                  }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "text",
+                "content": {
+                  "kind": "composition",
+                  "fragments": [
+                    {
+                      "id": "lit_18e94341a39343af92a20dbc29bb5a8d",
+                      "kind": "literal",
+                      "value": ""
+                    },
+                    {
+                      "id": "token_7e9abda913ac456b817dd56684fe176a",
+                      "kind": "binding",
+                      "key": "text_171cff5dcfde",
+                      "missingPolicy": "error"
+                    },
+                    {
+                      "id": "lit_d7f7f5ec597c41ae8242eb0aced4c732",
+                      "kind": "literal",
+                      "value": ""
+                    }
+                  ]
+                },
+                "typeSizePt": 24,
+                "fontId": "barlow-semi-condensed",
+                "fontWeight": 700,
+                "trackingEm": -0.02,
+                "align": "left",
+                "sizing": "auto-width",
+                "textFlow": "one-line",
+                "automaticFit": false,
+                "minimumTypeSizePt": 12,
+                "autoWrap": false,
+                "maxLines": 2,
+                "verticalAlign": "middle",
+                "color": "#1363de"
+              },
+              {
+                "id": "n_28052211-e5c1-403f-b5ab-2b2dc272c530",
+                "name": "Position",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": {
+                    "x": 1.007,
+                    "y": 3.699
+                  },
+                  "sizeIn": {
+                    "width": 1.5159989081488716,
+                    "height": 0.39999999999999997
+                  }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "text",
+                "content": {
+                  "kind": "composition",
+                  "fragments": [
+                    {
+                      "id": "lit_82c42a0c74ea4c11bd7c15dfc624bc78",
+                      "kind": "literal",
+                      "value": ""
+                    },
+                    {
+                      "id": "lit_52b575eca1514d93a5162d678619b0f6",
+                      "kind": "literal",
+                      "value": ""
+                    },
+                    {
+                      "id": "token_a6a6b4df36314149a223bd7e98314f03",
+                      "kind": "binding",
+                      "key": "text_746edef46a4a",
+                      "missingPolicy": "error"
+                    },
+                    {
+                      "id": "lit_ece15f4cdd6f42d68690639c3c163d2b",
+                      "kind": "literal",
+                      "value": ""
+                    }
+                  ]
+                },
+                "typeSizePt": 24,
+                "fontId": "barlow-semi-condensed",
+                "fontWeight": 700,
+                "trackingEm": -0.02,
+                "align": "left",
+                "sizing": "auto-width",
+                "textFlow": "one-line",
+                "automaticFit": false,
+                "minimumTypeSizePt": 12,
+                "autoWrap": false,
+                "maxLines": 2,
+                "verticalAlign": "middle",
+                "color": "#c46de2"
+              },
+              {
+                "id": "n_eab4164e-f184-4728-9319-bb2afdc9cb1d",
+                "name": "Position",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": {
+                    "x": -2.718,
+                    "y": -4.366
+                  },
+                  "sizeIn": {
+                    "width": 2.0646109432644315,
+                    "height": 1.2666666666666666
+                  }
+                },
+                "rotationDeg": 0,
+                "opacity": 0.3,
+                "blendMode": "normal",
+                "kind": "text",
+                "content": {
+                  "kind": "composition",
+                  "fragments": [
+                    {
+                      "id": "lit_82c42a0c74ea4c11bd7c15dfc624bc78",
+                      "kind": "literal",
+                      "value": ""
+                    },
+                    {
+                      "id": "token_f8d2be5730e340f0a7efcda8b5ea1997",
+                      "kind": "binding",
+                      "key": "text_1e6560b98c6e",
+                      "missingPolicy": "error"
+                    },
+                    {
+                      "id": "lit_52b575eca1514d93a5162d678619b0f6",
+                      "kind": "literal",
+                      "value": ""
+                    }
+                  ]
+                },
+                "typeSizePt": 76,
+                "fontId": "barlow-semi-condensed",
+                "fontWeight": 700,
+                "trackingEm": -0.02,
+                "align": "left",
+                "sizing": "auto-width",
+                "textFlow": "one-line",
+                "automaticFit": true,
+                "minimumTypeSizePt": 12,
+                "autoWrap": false,
+                "maxLines": 2,
+                "verticalAlign": "top",
+                "color": "#c46de2"
+              },
+              {
+                "id": "n_80d8d508-3c50-4f67-9087-83077148b34e",
+                "name": "Template overlay (transparent PNG)",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": {
+                    "x": -0.438,
+                    "y": 4.694
+                  },
+                  "sizeIn": {
+                    "width": 1.375,
+                    "height": 1.375
+                  }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "image",
+                "source": {
+                  "kind": "templateAsset",
+                  "assetRef": "https://images.batchrelay.com/qs721nx4b560vgs1g9frmkt97d8c539d/templates/overlays/sha256/a6e44766b4d6a49300c7da3ae7465397013bd859d2df2e7d7c400faa08dce883.png"
+                },
+                "fit": {
+                  "mode": "contain"
+                },
+                "orientationPolicy": "follow-slot",
+                "cornerRadiusIn": 0.06,
+                "orientationAnchor": "bottom-center"
+              },
+              {
+                "id": "n_ec9c6750-8482-4389-b19e-1d6563aafe6a",
+                "name": "Template overlay (transparent PNG)",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": {
+                    "x": -3.897,
+                    "y": 0
+                  },
+                  "sizeIn": {
+                    "width": 2.12,
+                    "height": 2.12
+                  }
+                },
+                "rotationDeg": 80,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "image",
+                "source": {
+                  "kind": "templateAsset",
+                  "assetRef": "https://images.batchrelay.com/qs721nx4b560vgs1g9frmkt97d8c539d/templates/overlays/sha256/1aa349f9cc7b85cce3b2df56278da2e33c58bf7f2af9090bd201f26bea9420f4.png"
+                },
+                "fit": {
+                  "mode": "contain"
+                },
+                "orientationPolicy": "follow-slot",
+                "cornerRadiusIn": 0.06,
+                "orientationAnchor": "bottom-center"
+              },
+              {
+                "id": "n_39e6a70d-ecee-4cec-89a0-9fbfd9b35a6d",
+                "name": "Template overlay (transparent PNG)",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": {
+                    "x": 0,
+                    "y": -0.498
+                  },
+                  "sizeIn": {
+                    "width": 3.2,
+                    "height": 2.127
+                  }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "image",
+                "source": {
+                  "kind": "templateAsset",
+                  "assetRef": "https://images.batchrelay.com/qs721nx4b560vgs1g9frmkt97d8c539d/templates/overlays/sha256/5f2d3fbf3e2480fa48ccda724a76feeb9f619e7b23bd537624e7fa3f99bdfbbf.png"
+                },
+                "fit": {
+                  "mode": "contain"
+                },
+                "orientationPolicy": "follow-slot",
+                "cornerRadiusIn": 0.06,
+                "orientationAnchor": "bottom-center"
+              },
+              {
+                "id": "n_181dc4d4-c007-4177-97da-bc7c024a7f7e",
+                "name": "Template overlay (transparent PNG)",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": {
+                    "x": 3.85,
+                    "y": -4.577
+                  },
+                  "sizeIn": {
+                    "width": 3.2,
+                    "height": 2.347
+                  }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "image",
+                "source": {
+                  "kind": "templateAsset",
+                  "assetRef": "https://images.batchrelay.com/qs721nx4b560vgs1g9frmkt97d8c539d/templates/overlays/sha256/b97133eb9514109b10eed7478cc2478480cc71531d2f88d222037ddf42744e21.png"
+                },
+                "fit": {
+                  "mode": "contain"
+                },
+                "orientationPolicy": "follow-slot",
+                "cornerRadiusIn": 0.06,
+                "orientationAnchor": "bottom-center"
+              },
+              {
+                "id": "n_a0ef764a-7a99-4351-9ce0-20c5869b0e1c",
+                "name": "Template overlay (transparent PNG)",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": {
+                    "x": -1.819,
+                    "y": -0.922
+                  },
+                  "sizeIn": {
+                    "width": 4.156,
+                    "height": 4.156
+                  }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "image",
+                "source": {
+                  "kind": "templateAsset",
+                  "assetRef": "https://images.batchrelay.com/qs721nx4b560vgs1g9frmkt97d8c539d/templates/overlays/sha256/a85a6b718611dca529caf71ab27ae0b860c548c9d75cadb7ee78fd6901366bce.png"
+                },
+                "fit": {
+                  "mode": "contain"
+                },
+                "orientationPolicy": "follow-slot",
+                "cornerRadiusIn": 0.06,
+                "orientationAnchor": "bottom-center"
+              },
+              {
+                "id": "n_18fc6f8c-9867-4023-99af-7e606d4fe3e4",
+                "name": "Template overlay (transparent PNG)",
+                "frame": {
+                  "anchor": "mc",
+                  "offsetIn": {
+                    "x": -4.164,
+                    "y": 5.184
+                  },
+                  "sizeIn": {
+                    "width": 3.2,
+                    "height": 3.006
+                  }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "kind": "image",
+                "source": {
+                  "kind": "templateAsset",
+                  "assetRef": "https://images.batchrelay.com/qs721nx4b560vgs1g9frmkt97d8c539d/templates/overlays/sha256/0561c6181c68382cab86f9da0a7d614f19ccdecadbfa6554a279e35fa42d385c.png"
+                },
+                "fit": {
+                  "mode": "contain"
+                },
+                "orientationPolicy": "follow-slot",
                 "cornerRadiusIn": 0.06,
                 "orientationAnchor": "bottom-center"
               }
@@ -138,14 +624,27 @@
           }
         ],
         "surfaceGeometry": {
-          "outputBoundsIn": { "width": 8, "height": 10 },
+          "outputBoundsIn": {
+            "width": 8,
+            "height": 10
+          },
           "finishedArea": {
             "kind": "rectangle",
-            "insetIn": { "left": 0, "top": 0, "right": 0, "bottom": 0 }
+            "insetIn": {
+              "left": 0,
+              "top": 0,
+              "right": 0,
+              "bottom": 0
+            }
           },
           "importantContentArea": {
             "kind": "rectangle",
-            "insetIn": { "left": 0.25, "top": 0.25, "right": 0.25, "bottom": 0.25 }
+            "insetIn": {
+              "left": 0.25,
+              "top": 0.25,
+              "right": 0.25,
+              "bottom": 0.25
+            }
           }
         }
       }
@@ -154,10 +653,19 @@
   "bindings": {
     "schemaVersion": "batchrelay.render-bindings/v2",
     "recordId": "browser-preview-record",
-    "text": {},
+    "text": {
+      "text_5106920550f5": "text_5106920550f5",
+      "text_171cff5dcfde": "text_171cff5dcfde",
+      "text_746edef46a4a": "text_746edef46a4a",
+      "text_1e6560b98c6e": "text_1e6560b98c6e"
+    },
     "images": {
-      "athlete.portrait.5x7": { "assetRef": "local:athlete.portrait.5x7" },
-      "athlete.portrait.10x8": { "assetRef": "local:athlete.portrait.10x8" }
+      "athlete.portrait.5x7": {
+        "assetRef": "local:athlete.portrait.5x7"
+      },
+      "athlete.portrait.10x8": {
+        "assetRef": "local:athlete.portrait.10x8"
+      }
     }
   },
   "surfaceId": "memory-mate-8x10-portrait",

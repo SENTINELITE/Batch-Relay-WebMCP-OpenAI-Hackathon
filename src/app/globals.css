@@ -48,9 +48,9 @@
   --animate-cart-ack: cart-ack 1100ms var(--ease-out-expo) forwards;
   --animate-cart-ack-badge: cart-ack-badge 1400ms var(--ease-out-expo) forwards;
 
-  --animate-proposal-in: proposal-in 300ms var(--ease-out-expo) both;
-  --animate-proposal-accept: proposal-accept 420ms var(--ease-out-expo) forwards;
-  --animate-proposal-reject: proposal-reject 240ms var(--ease-out-expo) forwards;
+  --animate-proposal-in: proposal-in 220ms var(--ease-out-expo) both;
+  --animate-proposal-accept: proposal-accept 260ms var(--ease-out-expo) forwards;
+  --animate-proposal-reject: proposal-reject 180ms var(--ease-out-expo) forwards;
 
   @keyframes backdrop-in {
     from { opacity: 0; }

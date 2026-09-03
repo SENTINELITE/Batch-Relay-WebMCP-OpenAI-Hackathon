@@ -291,10 +291,13 @@ URL that does not exist."
 **Say:**
 > "What other sizes do you print?"
 
-**Screen:** format chooser opens.
+**Screen:** nothing moves. The shopper stays exactly where they were — if they
+are mid-crop on the workbench, they keep the workbench. Only the status banner
+reports what the catalog returned.
 
 **Fires:** `find_prints` — read-only, returns published product facts and template
-requirements from the live catalog.
+requirements from the live catalog. It never changes the visible step, so the
+agent can look up sizes while the shopper keeps working by hand.
 
 ---
 

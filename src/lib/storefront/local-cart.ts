@@ -55,8 +55,10 @@ export const CART_PROPOSAL_VISIBLE_DEPTH = 3;
 
 /** How long each exit animation runs before its entry leaves the stack. */
 export const CART_PROPOSAL_EXIT_MS: Record<"accept" | "reject", number> = {
-  accept: 460,
-  reject: 260,
+  // Leave a small buffer after the 260ms/180ms CSS motion completes, while
+  // keeping the whole acknowledgement below the deck's 300ms motion budget.
+  accept: 280,
+  reject: 200,
 };
 
 /** The proposals still awaiting the shopper, oldest first. */

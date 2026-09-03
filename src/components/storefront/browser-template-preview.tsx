@@ -65,6 +65,14 @@ function shapeBackground(layer: BrowserPreviewLayer): string {
   return stops ? `linear-gradient(${fill.angleDeg ?? 0}deg, ${stops})` : "transparent";
 }
 
+function textLayerValue(layer: BrowserPreviewLayer, textValues: Record<string, string>): string {
+  if (!layer.textFragments) return textValues[layer.role] ?? layer.sample ?? "";
+  return layer.textFragments.map((fragment) => {
+    if (fragment.kind === "literal") return fragment.value;
+    return textValues[fragment.slotKey]?.trim() ? textValues[fragment.slotKey] : fragment.placeholder ?? "";
+  }).join("");
+}
+
 function layerStyle(layer: BrowserPreviewLayer, canvas: NonNullable<ReturnType<typeof browserPreviewCanvas>>): CSSProperties {
   const position = browserPreviewLayerPosition(layer, canvas);
   const fallbackRadius = Math.max(0, layer.cornerRadiusIn ?? 0);
@@ -363,7 +371,7 @@ export function BrowserTemplatePreview({
             } : undefined} src={source} style={localImageStyle ?? { height: "100%", objectFit: layer.fitMode === "contain" ? "contain" : "cover", transformOrigin: "center", width: "100%" }} /> : <span className="flex h-full items-center justify-center p-1.5 text-center text-[13px] leading-[1.3] text-muted-foreground">{isLocalSlot ? `No local photo assigned to ${localSlotKey}.` : "Published image content is unavailable."}</span>}
           </SlotDropSurface>;
           if (layer.kind === "shape") return <div aria-hidden key={layer.id} style={{ ...style, background: shapeBackground(layer) }} />;
-          const value = textValues[layer.role] ?? layer.sample ?? "";
+          const value = textLayerValue(layer, textValues);
           return <div className="flex overflow-hidden leading-[1.12] whitespace-pre-wrap" key={layer.id} style={{ ...style, color: layer.color, fontFamily: layer.fontFamily, fontSize: `${(layer.typeSizePt ?? 12) / 72 / canvas.widthIn * 100}cqw`, fontWeight: layer.fontWeight, letterSpacing: `${layer.trackingEm ?? 0}em`, justifyContent: layer.verticalAlign === "bottom" ? "flex-end" : layer.verticalAlign === "middle" ? "center" : "flex-start", textAlign: layer.align }}>{value}</div>;
         })}
         {proofMatchesTransforms && serverProof && <img alt="Server-rendered template proof" className="absolute inset-0 z-[5] h-full w-full object-cover" src={serverProof.url} />}

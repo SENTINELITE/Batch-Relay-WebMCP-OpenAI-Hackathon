@@ -44,7 +44,7 @@ test("direct artwork clears a template-only failure without changing its availab
   });
 });
 
-test("template proxies use the exact published routes and query names", async () => {
+test("the template demo is frozen while hosted rendering keeps the published route", async () => {
   const [templates, outputs, contract, renders, client] = await Promise.all([
     read("src/app/api/templates/route.ts"),
     read("src/app/api/templates/[templateId]/outputs/route.ts"),
@@ -53,12 +53,12 @@ test("template proxies use the exact published routes and query names", async ()
     read("src/lib/storefront/client.ts"),
   ]);
 
-  assert.match(templates, /`\/v1\/studios\/\$\{encodeURIComponent\(configuredStudioID\(\)\)\}\/templates`/);
-  assert.match(templates, /\["cursor", "limit", "status"\]/);
-  assert.match(outputs, /`\/v1\/studios\/\$\{encodeURIComponent\(configuredStudioID\(\)\)\}\/templates\/\$\{templateID\}\/outputs`/);
-  assert.match(outputs, /\["revision_id"\]/);
-  assert.match(contract, /`\/v1\/templates\/\$\{templateID\}\/outputs\/\$\{outputID\}\/contract`/);
-  assert.match(contract, /\["revision_id"\]/);
+  assert.match(templates, /frozenDemoTemplateCatalog/);
+  assert.match(outputs, /frozenDemoTemplateOutputs/);
+  assert.match(outputs, /frozen_demo_revision_mismatch/);
+  assert.match(contract, /frozenDemoTemplateContract/);
+  assert.match(contract, /frozen_demo_revision_mismatch/);
+  assert.doesNotMatch(`${templates}\n${outputs}\n${contract}`, /forwardUpstream/);
   assert.match(renders, /`\/v1\/templates\/\$\{templateID\}\/renders`/);
   assert.match(client, /templateOutputs: \(templateId: string\) =>\s*request<TemplateOutputs>\(`\/api\/templates\/\$\{encodeURIComponent\(templateId\)\}\/outputs`\)/);
   assert.doesNotMatch(`${templates}\n${outputs}\n${contract}\n${renders}\n${client}`, /convex/i);

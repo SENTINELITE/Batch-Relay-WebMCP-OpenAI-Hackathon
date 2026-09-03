@@ -25,8 +25,18 @@ export type CartProposalCardProps = {
   moreCount: number;
   /** Set once the shopper has answered, while the card animates away. */
   exit: "accept" | "reject" | null;
+  /** True only for a newly dealt active card, never a browsing remount. */
+  animateArrival: boolean;
+  /** The active proposal's committed position in the deck. */
+  position: number;
+  /** Total proposals awaiting the shopper. */
+  total: number;
+  canGoPrevious: boolean;
+  canGoNext: boolean;
   onAccept: () => void;
   onReject: () => void;
+  onPrevious: () => void;
+  onNext: () => void;
 };
 
 const exitAnimation: Record<"accept" | "reject", string> = {
@@ -52,8 +62,15 @@ export function CartProposalCard({
   depth,
   moreCount,
   exit,
+  animateArrival,
+  position,
+  total,
+  canGoPrevious,
+  canGoNext,
   onAccept,
   onReject,
+  onPrevious,
+  onNext,
 }: CartProposalCardProps) {
   const needsReview = review.verdict === "needs_review";
   const focus = directCropFocus(proposal.draft.directCrop);
@@ -62,7 +79,7 @@ export function CartProposalCard({
   // resolved card can fly out while the one behind it scales up into its place.
   const motion = exit
     ? `${exitAnimation[exit]} motion-reduce:animate-none motion-reduce:opacity-0`
-    : "animate-proposal-in motion-reduce:animate-none";
+    : animateArrival ? "animate-proposal-in motion-reduce:animate-none" : "";
 
   const thumbnail = <PrintFrame aspect={aspect}>
     {proposal.thumbnailURL
@@ -81,9 +98,9 @@ export function CartProposalCard({
 
   return (
     <aside
-      aria-label="Cart proposal"
+      aria-label={`Cart proposal ${position} of ${total}`}
       className={`${motion} relative flex w-full flex-col gap-3 rounded-[18px] border border-border-strong bg-card p-4 shadow-warm`}
-      role="dialog"
+      role="region"
     >
       {onTop && moreCount > 0 ? (
         <span
@@ -94,7 +111,14 @@ export function CartProposalCard({
         </span>
       ) : null}
 
-      <b className="block text-[15px] font-semibold leading-tight">{proposal.productName}</b>
+      <div className="flex items-center justify-between gap-2">
+        <b className="block text-[15px] font-semibold leading-tight">{proposal.productName}</b>
+        {onTop ? (
+          <span aria-hidden className="shrink-0 font-mono text-[11px] text-muted-foreground">
+            {position} / {total}
+          </span>
+        ) : null}
+      </div>
 
       {/* This print was found in the catalog and made behind the screen — the
           shopper never chose it in the format picker, so the card says so. */}
@@ -130,13 +154,41 @@ export function CartProposalCard({
       </div>
 
       <div className="flex gap-2">
-        <Button className="flex-1" disabled={Boolean(exit) || !onTop} onClick={onAccept}>
+        <Button
+          className="flex-1"
+          data-proposal-primary-action={onTop ? "true" : undefined}
+          disabled={Boolean(exit) || !onTop}
+          onClick={onAccept}
+        >
           Add to cart
         </Button>
         <Button className="flex-1" disabled={Boolean(exit) || !onTop} onClick={onReject} variant="secondary">
           Don&apos;t add
         </Button>
       </div>
+
+      {onTop && total > 1 ? (
+        <nav aria-label="Proposal navigation" className="flex items-center justify-between gap-2 border-t border-border pt-2">
+          <Button
+            aria-label="Previous proposal"
+            className="h-9 px-3 text-[13px]"
+            disabled={!canGoPrevious || Boolean(exit)}
+            onClick={onPrevious}
+            variant="ghost"
+          >
+            Previous
+          </Button>
+          <Button
+            aria-label="Next proposal"
+            className="h-9 px-3 text-[13px]"
+            disabled={!canGoNext || Boolean(exit)}
+            onClick={onNext}
+            variant="ghost"
+          >
+            Next
+          </Button>
+        </nav>
+      ) : null}
     </aside>
   );
 }

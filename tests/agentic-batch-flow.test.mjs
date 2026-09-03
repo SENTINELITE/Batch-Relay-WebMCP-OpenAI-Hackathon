@@ -38,7 +38,7 @@ test("revise_prints repaints every visible surface before it answers", async () 
   // A card paints a snapshot of the draft it proposed, so a reframed draft has
   // to be written back into its standing card or the shopper would be
   // answering a picture of the framing that was just replaced.
-  assert.match(revise, /setProposalStack\(\(entries\) => entries\.map\(/);
+  assert.match(revise, /commitProposalStack\(\(entries\) => entries\.map\(/);
   assert.match(revise, /proposal: \{ \.\.\.entry\.proposal, draft: next \}/);
   // And all of it lands before the tool resolves.
   assert.match(revise, /await nextPaint\(\);/);
@@ -83,9 +83,9 @@ test("propose_prints stages a batch in the background and never takes the screen
     /setTemplateAssignments/,
   ]) assert.doesNotMatch(propose, steal, `propose_prints must not call ${steal}`);
 
-  // The template is resolved as a pure read, exactly as a background
-  // configure_print does, and every draft is recorded as rail-placed.
-  assert.match(propose, /await resolveTemplateOffScreen\(batchProduct, draft, \{ orientation: batchOrientation \}\)/);
+  // One shared preflight keeps the background workbench pure while avoiding a
+  // repeated template/output/contract/preview request for every photograph.
+  assert.match(propose, /await resolveBatchTemplatePreflight\(batchProduct, \{/);
   assert.match(propose, /backgroundDraftIds\.current\.add\(draft\.id\)/);
   assert.match(propose, /placed: "draft_rail"/);
   assert.match(propose, /none of them took the screen/);
@@ -95,13 +95,15 @@ test("propose_prints reuses the one proposal machinery so the cards stack in the
   const ui = await read("src/components/storefront/manual-storefront.tsx");
   const propose = handler(ui, "propose_prints", "add_to_cart");
 
-  // The same call add_to_cart makes, so the cards are the same cards with the
-  // same duplicate rule and the same standalone previews.
-  assert.match(propose, /const staged = proposeDraft\(draft, batchQuantity\);/);
-  assert.match(propose, /duplicate_of_pending_proposal: staged\.duplicate/);
-  assert.match(propose, /status: staged\.duplicate \? "already_proposed" : "proposed"/);
+  // Batch proposals use the same local-cart model as individual cards, then
+  // commit every card to the deck in one state update.
+  assert.match(propose, /const proposal = createCartProposal\(\{/);
+  assert.match(propose, /const createdEntries: CartProposalStackEntry\[\] = \[\];/);
+  assert.match(propose, /commitProposalStack\(\(entries\) => \[\.\.\.entries, \.\.\.createdEntries\]\);/);
+  assert.match(propose, /duplicate_of_pending_proposal: false/);
+  assert.match(propose, /status: "proposed"/);
   // Nothing enters the cart here; only the shopper's answer does that.
-  assert.doesNotMatch(propose, /addDraftToCart|resolveProposals|setCart\(/);
+  assert.doesNotMatch(propose, /addDraftToCart|resolveProposals|setCart\(|proposeDraft\(/);
   assert.match(propose, /decided_by: "shopper"/);
   assert.match(propose, /nextStep: "await_shopper_decision"/);
 });
@@ -111,17 +113,54 @@ test("propose_prints reports one ordered result per photograph and survives a pa
   const propose = handler(ui, "propose_prints", "add_to_cart");
 
   // One print per photo reference, in the order they were named.
-  assert.match(propose, /for \(const \[index, reference\] of refs\.entries\(\)\)/);
-  assert.match(propose, /position: index \+ 1|const position = index \+ 1/);
+  assert.match(propose, /const resolvedPhotos = refs\.map\(\(reference, index\) =>/);
+  assert.match(propose, /position: index \+ 1/);
   // A reference that cannot be resolved is reported in place and the loop
   // continues; aborting the batch would throw away the prints that did work.
   assert.match(propose, /is not in the current photo tray/);
   assert.match(propose, /matches multiple tray photographs/);
-  assert.match(propose, /catch \(error\) \{[\s\S]*?status: "failed",[\s\S]*?reason: responseMessage\(error\)/);
-  assert.match(propose, /continue;/);
+  assert.match(propose, /status: "skipped"/);
+  assert.match(propose, /const validPhotos = resolvedPhotos\.flatMap/);
   // Every item carries its verdict, and the batch carries the counts.
   assert.match(propose, /review: printReviewWire\(reviewForDraft\(draft\)\)/);
   assert.match(propose, /review_summary: summary/);
+});
+
+test("propose_prints preflights shared template facts once and commits atomically", async () => {
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  const propose = handler(ui, "propose_prints", "add_to_cart");
+  const preflight = ui.slice(
+    ui.indexOf("async function resolveBatchTemplatePreflight"),
+    ui.indexOf("/** Compact discovery for ask_storefront"),
+  );
+
+  assert.equal((propose.match(/resolveBatchTemplatePreflight\(/g) ?? []).length, 1);
+  assert.equal((propose.match(/setDrafts\(/g) ?? []).length, 1);
+  assert.equal((propose.match(/commitProposalStack\(/g) ?? []).length, 1);
+  assert.match(preflight, /await storefrontClient\.templateOutputs\(template\.id\)/);
+  assert.match(preflight, /await storefrontClient\.templateContract\(template\.id, output\.id, outputs\.revision_id\)/);
+  assert.match(preflight, /await resolvePreviewDocument\(template\.id, output, outputs\.revision_id, contract\)/);
+  assert.match(propose, /status: "batch_preflight_failed"/);
+  assert.match(propose, /committed: false/);
+});
+
+test("batch template intent is explicit, active, and idempotent", async () => {
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  const selectors = ui.slice(
+    ui.indexOf("function resolveRequestedBatchTemplate"),
+    ui.indexOf("/**\n   * Shared preflight"),
+  );
+  const propose = handler(ui, "propose_prints", "add_to_cart");
+
+  assert.match(selectors, /normalizedTemplateName/);
+  assert.match(selectors, /template_not_found/);
+  assert.match(selectors, /template_ambiguous/);
+  assert.match(selectors, /template\.id === requested\.templateId/);
+  assert.match(ui, /if \(!explicitTemplateSelection && product\.template_requirement === "optional"\) return null;/);
+  assert.match(propose, /const idempotencyKey = batchStagingKey\(/);
+  assert.match(propose, /const existingBatch = batchStagingSessions\.current\.get\(idempotencyKey\)/);
+  assert.match(propose, /idempotent_retry: true/);
+  assert.match(ui, /batchStagingSessions\.current\.delete\(key\)/);
 });
 
 test("accept_ready answers only the unflagged cards and leaves the flagged ones standing", async () => {
@@ -129,7 +168,7 @@ test("accept_ready answers only the unflagged cards and leaves the flagged ones 
   const resolve = handler(ui, "resolve_cart_proposal");
 
   // The subset is chosen by the verdict, not by position or count.
-  assert.match(resolve, /targets = pendingProposals\.filter\(\(proposal\) => reviewForDraft\(proposal\.draft\)\.verdict === "ready"\)/);
+  assert.match(resolve, /targets = standing\.filter\(\(proposal\) => reviewForDraft\(proposal\.draft\)\.verdict === "ready"\)/);
   assert.match(resolve, /scope: readyOnly \? "ready_pending"/);
   // A needs_review card is exactly the one the shopper meant to look at, so it
   // is never swept up by this decision.
@@ -138,7 +177,7 @@ test("accept_ready answers only the unflagged cards and leaves the flagged ones 
   // accept_ready exactly as for every other decision.
   assert.match(resolve, /resolve_cart_proposal relays the shopper's decision only/);
   assert.ok(
-    resolve.indexOf("shopperConfirmation") < resolve.indexOf('targets = pendingProposals.filter'),
+    resolve.indexOf("shopperConfirmation") < resolve.indexOf('targets = standing.filter'),
     "the shopper's own words are demanded before any card is selected",
   );
 });
@@ -165,4 +204,60 @@ test("the review verdict rides on every response that offers a print, and on the
   // the format picker and the card is their first sight of it.
   assert.match(card, /Found in catalog/);
   assert.match(ui, /foundInCatalog: backgroundDraftIds\.current\.has\(proposal\.draftId\)/);
+});
+
+test("a crop patch on the print already on screen never tears its composed preview down", async () => {
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  const configure = handler(ui, "configure_print", "revise_prints");
+
+  // prepare-step falls back to the raw photograph whenever browserPreviewDocument
+  // is null. selectProduct and chooseTemplate both null it and then await the
+  // network, so reloading the workbench for a crop-only patch painted the
+  // shopper's full-bleed picture for a frame before the template came back.
+  assert.match(configure, /const reusesLoadedTemplate = Boolean\(/);
+  // The reload — and the tray selection that goes with it — happen only when
+  // the workbench is not already showing this exact draft, product and output.
+  assert.match(
+    configure,
+    /if \(!reusesLoadedTemplate\) \{\s*selectProduct\(product, false, false\);\s*dispatchPhotoLibrary\(\{ type: "select", photoId: photoIds\[0\] \?\? null \}\);\s*\}/,
+    "selectProduct and the tray selection must be gated behind the reuse check",
+  );
+  // Reusing means keeping the loaded template rather than resolving it again.
+  assert.match(configure, /if \(reusesLoadedTemplate\) \{[\s\S]*?templateForPatch = loadedTemplate;/);
+  // Every guard that makes the reuse safe: same draft, same product, same
+  // template output, and a document actually painted.
+  for (const guard of [
+    /selectedDraftId === draft\.id/,
+    /productSelectionKey\(selectedProduct\) === productSelectionKey\(product\)/,
+    /browserPreviewDocumentRef\.current/,
+    /existingDraft\.template\?\.outputId === loadedTemplate\.outputId/,
+    /!requestedTemplateId \|\| requestedTemplateId === loadedTemplate\.id/,
+    /!requestedOutputId \|\| requestedOutputId === loadedTemplate\.outputId/,
+  ]) assert.match(configure, guard, `the reuse check must verify ${guard}`);
+
+  // The repaint ordering the agent depends on survives.
+  assert.match(configure, /await nextPaint\(\);/);
+  assert.ok(
+    configure.indexOf("await nextPaint()") < configure.lastIndexOf("respondToStorefrontWebMcpAction"),
+    "the repaint must be awaited before the response is sent",
+  );
+});
+
+test("the deck's published count is read live, so two calls in one tick agree with the deck", async () => {
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+
+  // The ref is the single source of truth and is written synchronously, so a
+  // second tool call landing before React re-renders still sees the first
+  // call's cards. Reading the rendered snapshot told the agent a smaller deck
+  // than the one the shopper could see.
+  assert.match(ui, /function commitProposalStack\(/);
+  assert.match(ui, /proposalStackRef\.current = committed;\s*setProposalStack\(committed\);/);
+  assert.match(ui, /function livePendingProposals\(\)/);
+  assert.match(ui, /return pendingCartProposals\(proposalStackRef\.current\);/);
+  // Nothing may mutate the deck behind the committer's back.
+  const mutations = ui.match(/setProposalStack\(/g) ?? [];
+  assert.equal(mutations.length, 1, "setProposalStack must only be called by commitProposalStack");
+  // Duplicate detection and every reported count read the live stack.
+  assert.match(ui, /pendingCartProposalForDraft\(proposalStackRef\.current, draft\.id\)/);
+  assert.doesNotMatch(ui, /pending_proposal_count: pendingProposals\.length/);
 });

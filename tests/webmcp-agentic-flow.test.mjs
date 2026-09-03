@@ -92,14 +92,14 @@ const approvedTools = [
     exportName: "askStorefront",
     stableKey: "storefront.ask",
     name: "ask_storefront",
-    description: "Use when a shopper asks what photographs, print drafts, template choices, slot requirements, pending cart proposals, or demo cart items are currently visible. Returns grounded structured state and the next available action without changing the workbench. Each image slot reports its current crop in the same zoom, focus, and offset vocabulary configure_print accepts, so a relative request such as zooming in further can be computed from the visible framing rather than guessed.",
-    fields: ["question"],
+    description: "Inspect visible storefront state, or request a bounded compatibility summary for one template and product, without changing the workbench.",
+    fields: ["question", "templateId", "templateQuery", "productId", "productQuery", "orientation", "maxTemplateResults"],
   },
   {
     exportName: "findPrints",
     stableKey: "storefront.find_prints",
     name: "find_prints",
-    description: "Use when a shopper wants to browse, compare, or identify canonical print products before creating a draft. Returns matching published product facts and template requirements, and visibly opens the format chooser without inventing products or compatibility.",
+    description: "Use when a shopper wants to browse, compare, or identify canonical print products before creating a draft. Returns published product facts and template requirements from the live catalog without inventing products or compatibility, and without changing what the shopper is looking at: it never moves them to another step, so it is safe to call while they are working by hand on a print.",
     fields: ["query", "productType", "maxResults"],
   },
   {
@@ -107,7 +107,7 @@ const approvedTools = [
     stableKey: "storefront.prepare_print_images",
     name: "configure_print",
     description: "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. It never takes the screen away from a shopper who is customizing a print by hand: a new draft made while they are working on another one waits in the draft rail instead, and the response says which happened with placed on_screen or draft_rail and a matching visible flag. Narrate that honestly — when a draft was placed in the draft rail, do not tell the shopper they are looking at it; adding it will show them a proposal card carrying its own live preview. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
-    fields: ["draftId", "draft_id", "trayRevision", "photoRefs", "productId", "productQuery", "templateId", "outputId", "orientation", "slotPatches", "directCrop"],
+    fields: ["draftId", "draft_id", "trayRevision", "photoRefs", "productId", "productQuery", "templateId", "templateQuery", "outputId", "orientation", "slotPatches", "directCrop"],
   },
   {
     exportName: "addToCart",
@@ -135,7 +135,7 @@ const approvedTools = [
     stableKey: "storefront.propose_prints",
     name: "propose_prints",
     description: "Stage one print per photograph in a single call, for a request like make a 5x7 of each of photos 10 through 15. Creates a draft for every reference in photoRefs against one product, prefilling any template roles the shopper has already chosen, and stacks a picture-in-picture proposal card for each — always in the background, so a shopper customizing a print by hand keeps the screen and never has it taken from them. Returns an ordered per-item result carrying photo_ref, draft_id, proposal_id, status and a geometry review verdict, reporting a photograph that could not be staged in place rather than abandoning the rest of the batch. Nothing enters the demo cart until the SHOPPER answers each card, so stop afterwards and tell them the deck is waiting.",
-    fields: ["trayRevision", "productId", "productQuery", "photoRefs", "photo_refs", "quantity", "orientation"],
+    fields: ["trayRevision", "productId", "productQuery", "photoRefs", "photo_refs", "quantity", "orientation", "templateId", "templateQuery", "outputId"],
   },
   {
     exportName: "manageCart",
@@ -189,6 +189,45 @@ test("configure_print is a closed draft schema and rejects stale or ambiguous tr
   assert.match(directCrop, /additionalProperties:\s*false/);
 });
 
+test("template selection stays unambiguous across configuration, batch staging, and compatibility lookup", async () => {
+  const source = await read("src/webmcp/tools/storefront.ts");
+  const ask = toolDefinition(source, "askStorefront");
+  const configure = toolDefinition(source, "configurePrint");
+  const propose = toolDefinition(source, "proposePrints");
+
+  assert.match(inputSchema(ask), /maxTemplateResults:\s*\{\s*type:\s*"integer",\s*minimum:\s*1,\s*maximum:\s*20\s*\}/);
+  assert.match(inputSchema(ask), /required:\s*\["question"\]/);
+  for (const definition of [ask, configure, propose]) {
+    const schema = inputSchema(definition);
+    assert.match(schema, /templateId:\s*\{\s*type:\s*"string"/);
+    assert.match(schema, /templateQuery:\s*\{\s*type:\s*"string"/);
+  }
+  for (const definition of [configure, propose]) {
+    assert.match(inputSchema(definition), /outputId:\s*\{\s*type:\s*"string"/);
+  }
+  assert.match(source, /templateId !== undefined && input\.templateQuery !== undefined/);
+  assert.match(source, /input\.outputId !== undefined && input\.templateId === undefined && input\.templateQuery === undefined/);
+  for (const [definition, action] of [[ask, "ask_storefront"], [configure, "configure_print"], [propose, "propose_prints"]]) {
+    assert.match(definition, new RegExp(String.raw`validateTemplateSelection\(input, "${action}"\)`));
+  }
+});
+
+test("the bridge exposes expected storefront failures as structured tool errors and preserves timeout uncertainty", async () => {
+  const bridge = await read("src/webmcp/storefront-bridge.ts");
+  assert.match(bridge, /export type StorefrontWebMcpExpectedError/);
+  for (const code of [
+    "template_not_found", "template_ambiguous", "template_output_incompatible",
+    "template_no_compatible_output", "template_contract_unavailable",
+    "template_preview_unavailable", "template_required_unavailable",
+    "batch_preflight_failed", "storefront_timeout", "transient_upstream",
+  ]) assert.match(bridge, new RegExp(String.raw`"${code}"`));
+  assert.match(bridge, /isError: true/);
+  assert.match(bridge, /structuredContent: \{ error: normalized \}/);
+  assert.match(bridge, /commitStatus: "unknown"/);
+  assert.match(bridge, /resolve\(expectedErrorResult\(response\.error\)\)/);
+  assert.match(bridge, /resolve\(expectedErrorResult\(\{[\s\S]*?code: "storefront_timeout"/);
+});
+
 test("cart proposals use completed visible draft IDs, not product or offer identifiers", async () => {
   const source = await read("src/webmcp/tools/storefront.ts");
   const cart = toolDefinition(source, "addToCart");
@@ -225,7 +264,7 @@ test("add_to_cart returns without blocking and stacks a second proposal instead 
   assert.doesNotMatch(handler, /is still waiting on the shopper/);
   // A second card for a draft that already has one asks nothing new, so the
   // standing proposal is returned rather than a twin.
-  assert.match(ui, /pendingCartProposalForDraft\(proposalStack, draft\.id\)/);
+  assert.match(ui, /pendingCartProposalForDraft\(proposalStackRef\.current, draft\.id\)/);
   assert.match(handler, /duplicate_of_pending_proposal: duplicate/);
   assert.match(handler, /pending_proposal_count: stackCount/);
 });
@@ -265,9 +304,9 @@ test("the shopper can answer the whole stack in one sentence", async () => {
   // still demand their words; the quote applies to the batch.
   assert.match(handler, /const bulk = requestedDecision === "accept_all" \|\| requestedDecision === "reject_all"/);
   assert.match(handler, /shopperConfirmation/);
-  assert.match(handler, /targets = pendingProposals;/);
+  assert.match(handler, /targets = standing;/);
   // A single decision must name the card it answers.
-  assert.match(handler, /pendingProposals\.find\(\(candidate\) => candidate\.id === proposalId\)/);
+  assert.match(handler, /standing\.find\(\(candidate\) => candidate\.id === proposalId\)/);
   // The response says what it resolved and what is left waiting.
   assert.match(handler, /resolved: targets\.map\(/);
   assert.match(handler, /pending_proposal_count: remaining/);
@@ -546,20 +585,21 @@ test("proposals stack as an overlapping deck that promotes the next card when on
   assert.match(stack, /fixed bottom-5 left-5 z-50 w-\[min\(92vw,300px\)\]/);
   assert.doesNotMatch(stack, /flex-col/);
   assert.match(stack, /absolute bottom-0 left-0 w-full origin-bottom-left/);
-  assert.match(ui, /setProposalStack\(\(entries\) => \[\.\.\.entries, \{ proposal, exit: null \}\]\)/);
-  assert.match(stack, /entries\.map\(\(entry, index\) =>/);
+  assert.match(ui, /commitProposalStack\(\(entries\) => \[\.\.\.entries, \{ proposal, exit: null \}\]\)/);
+  assert.match(stack, /mountedIds\.map\(\(id\) =>/);
 
-  // The newest card is on top at full scale; the ones behind peek out, scaled
-  // down and dimmed, and are the only ones counted past the visible depth.
+  // Selection is stable by proposal id. Only the active preview and a bounded
+  // window around it mount, even when a batch contains dozens of cards.
   assert.match(cartModel, /CART_PROPOSAL_VISIBLE_DEPTH = 3/);
-  assert.match(stack, /const pendingIds = entries\.filter\(\(entry\) => !entry\.exit\)/);
-  assert.match(stack, /pendingCount - 1 - pendingIds\.indexOf\(proposal\.id\)/);
-  assert.match(stack, /if \(depth >= CART_PROPOSAL_VISIBLE_DEPTH\) return null/);
+  assert.match(stack, /const \[activeProposalId, setActiveProposalId\]/);
+  assert.match(stack, /restoreActiveProposalId\(activeProposalId, previous, pendingIds\)/);
+  assert.match(stack, /proposalPreviewWindow\(pendingIds, activeId\)/);
+  assert.match(stack, /PROPOSAL_DECK_MAX_PREVIEWS/);
   assert.match(stack, /const scale = 1 - SCALE_STEP \* depth/);
-  assert.match(stack, /opacity: 1 - 0\.2 \* depth/);
-  assert.match(stack, /moreCount = Math\.max\(0, pendingCount - CART_PROPOSAL_VISIBLE_DEPTH\)/);
+  assert.match(stack, /opacity: 1 - 0\.18 \* depth/);
+  assert.match(stack, /moreCount = Math\.max\(0, pendingIds\.length - mountedPendingCount\)/);
   assert.match(card, /\+\{moreCount\} more/);
-  // Only the card on top can be clicked or tabbed into.
+  // Only the active card can be clicked or tabbed into.
   assert.match(stack, /onTop && !exit \? "pointer-events-auto" : "pointer-events-none"/);
   assert.match(stack, /inert=\{!onTop \|\| Boolean\(exit\)\}/);
   assert.match(card, /disabled=\{Boolean\(exit\) \|\| !onTop\}/);
@@ -572,8 +612,7 @@ test("proposals stack as an overlapping deck that promotes the next card when on
   assert.match(ui, /CART_PROPOSAL_EXIT_MS\[decision\]/);
   assert.match(ui, /pendingProposalCount: pendingProposals\.length/);
 
-  // Enter from the left it is anchored to; accept toward the masthead cart
-  // chip after a beat of affirmation; reject back out the way it came.
+  // Arrival and decisions remain brief, with reduced motion disabling travel.
   for (const keyframe of ["proposal-in", "proposal-accept", "proposal-reject"]) {
     assert.match(css, new RegExp(String.raw`@keyframes ${keyframe} \{`));
     assert.match(css, new RegExp(String.raw`--animate-${keyframe}:[^;]*var\(--ease-out-expo\)`));
@@ -581,12 +620,18 @@ test("proposals stack as an overlapping deck that promotes the next card when on
   assert.match(card, /animate-proposal-in motion-reduce:animate-none/);
   assert.match(card, /animate-proposal-accept/);
   assert.match(card, /animate-proposal-reject/);
-  // Depth is counted over the proposals still waiting, so the card behind rises
-  // into the top spot while the answered one is still flying away, and a card
-  // resolved out of the middle fades where it stands.
-  assert.match(stack, /transition-\[transform,opacity\] duration-300 ease-\[var\(--ease-out-expo\)\] motion-reduce:transition-none/);
-  assert.match(stack, /entries\.length - 1 - index/);
-  assert.match(stack, /\{ \.\.\.layerStyle\(depth\), opacity: 0 \}/);
+  assert.match(stack, /transition-\[transform,opacity\] duration-\[240ms\] ease-\[var\(--ease-out-expo\)\] motion-reduce:transition-none/);
+  assert.match(cartModel, /accept: 280/);
+  assert.match(cartModel, /reject: 200/);
+
+  // Hover/focus fans background cards right. Horizontal wheel movement keeps
+  // the active card tied to its ID and never consumes ordinary vertical scroll.
+  assert.match(stack, /const fan = !prefersReducedMotion && finePointer && \(hovered \|\| focusWithin\)/);
+  assert.match(stack, /const right = \(fan \? FAN_RIGHT_PX : PEEK_RIGHT_PX\) \* depth/);
+  assert.match(stack, /Math\.abs\(event\.deltaX\) > Math\.abs\(event\.deltaY\)/);
+  assert.match(stack, /event\.preventDefault\(\)/);
+  assert.match(stack, /ArrowLeft/);
+  assert.match(stack, /ArrowRight/);
 });
 
 test("a proposal preview resolves live artwork, then the bundled copy, then a synthesized layout", async () => {
@@ -613,4 +658,42 @@ test("a background draft derives its slot aliases from its own artwork", async (
   assert.match(source, /imageSlotAliasesForContract\(responseContract, responseDocument\)/);
   assert.match(source, /imageSlotAliasesForContract\(contract, responseDocument\)/);
   assert.match(source, /imageSlotRoles\(contract\.slots, contractSlotBoxes\(contract, responseDocument\)\)/);
+});
+
+test("find_prints looks the catalog up without moving the shopper off their work", async () => {
+  const source = await read("src/components/storefront/manual-storefront.tsx");
+  const start = source.indexOf('request.action === "find_prints"');
+  const end = source.indexOf('request.action === "configure_print"');
+  assert.ok(start !== -1 && end > start, "expected configure_print to follow find_prints");
+  const find = source.slice(start, end);
+
+  // A shopper mid-crop on the workbench asked what other sizes exist. That is a
+  // question, not a request to be taken somewhere: an earlier iteration called
+  // setStep("catalog") here and yanked them off the print they were holding
+  // every time the agent checked a size.
+  for (const steal of [
+    /setStep\(/,
+    /selectProduct\(/,
+    /setSelectedDraftId/,
+    /noteVisibleDraft/,
+    /noteShopperLookingAtSelectedDraft/,
+    /dispatchPhotoLibrary/,
+    /setBrowserPreviewDocument/,
+    /setCustomization/,
+    /setSelectedProductKey/,
+  ]) assert.doesNotMatch(find, steal, `find_prints must not call ${steal}`);
+
+  // It still answers with the live catalog, and says so in the banner.
+  assert.match(find, /naturalProductMatches\(catalog, query\)/);
+  assert.match(find, /respondToStorefrontWebMcpAction\(\{ requestId: request\.requestId, result: \{ matches, note \} \}\)/);
+});
+
+test("the find_prints tool promises a read-only lookup and never a navigation", async () => {
+  const tools = await read("src/webmcp/tools/storefront.ts");
+  const start = tools.indexOf('stableKey: "storefront.find_prints"');
+  const find = tools.slice(start, tools.indexOf("});", start));
+  assert.match(find, /readOnlyHint: true/);
+  assert.match(find, /without changing what the shopper is looking at/);
+  // The description used to advertise the navigation as a feature.
+  assert.doesNotMatch(find, /opens the format chooser/);
 });

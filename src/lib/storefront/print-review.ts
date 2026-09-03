@@ -1,23 +1,39 @@
 /**
- * Geometry-only quality review for a print draft.
+ * Quality review for a print draft.
  *
- * This module deliberately contains no model, no face detection and no network
- * call. Every finding is arithmetic over facts the storefront already holds:
- * the photograph's pixel dimensions, the slot's printed size in inches, the
+ * Every finding is arithmetic over facts the storefront already holds: the
+ * photograph's pixel dimensions, the slot's printed size in inches, the
  * published aspect ratio, and the crop the shopper can see. That is the whole
  * point — an exception the shopper can be shown and argue with, rather than an
  * opaque score.
+ *
+ * There is exactly one optional exception. When the browser has managed to run
+ * the local face detector, a slot may carry normalised face boxes, and the
+ * review will say something sharper than geometry can: *this* face is near the
+ * trim, or out of frame. That signal is never required. No faces means the file
+ * behaves precisely as it did before it existed, which the tests assert
+ * directly, because the geometry heuristics are the backbone and the model is a
+ * garnish that must be free to be absent.
  *
  * A finding is a *reason to look*, never a refusal: `needs_review` still adds
  * to the cart the moment the shopper says so. The verdict exists so the deck
  * can mark the one card worth a second glance, and so "accept the ready ones"
  * means something precise.
  */
+import {
+  confidentFaces,
+  edgeClearances,
+  projectBoxIntoFrame,
+  sourceWindowForCrop,
+  FACE_VISIBLE_FRACTION_FLOOR,
+  type FaceBox,
+} from "./face-geometry.ts";
 
 export type PrintReviewCode =
   | "low_resolution"
   | "extreme_zoom"
   | "subject_near_trim"
+  | "face_near_trim"
   | "aspect_mismatch";
 
 export type PrintReviewFinding = {
@@ -84,6 +100,12 @@ export type ReviewSlot = {
    * from `surfaceGeometry.importantContentArea` where the spec publishes it.
    */
   importantContentMargin?: { x: number; y: number } | null;
+  /**
+   * Faces found in the source photograph, normalised to it. Optional in every
+   * sense: absent, empty, or from a detector that gave up all mean the same
+   * thing — review this slot on geometry alone.
+   */
+  faces?: readonly FaceBox[] | null;
   crop: ReviewCrop;
 };
 
@@ -166,6 +188,110 @@ function subjectNearTrim(slot: ReviewSlot): PrintReviewFinding | null {
   };
 }
 
+/**
+ * The printed frame's shape. The slot's printed inches are the truth when the
+ * layout has resolved; a published required aspect stands in when it has not.
+ */
+function targetAspectRatio(slot: ReviewSlot): number | null {
+  const printedWidth = positive(slot.printedSizeIn?.width);
+  const printedHeight = positive(slot.printedSizeIn?.height);
+  if (printedWidth && printedHeight) return printedWidth / printedHeight;
+  const requiredWidth = positive(slot.requiredAspectRatio?.width);
+  const requiredHeight = positive(slot.requiredAspectRatio?.height);
+  return requiredWidth && requiredHeight ? requiredWidth / requiredHeight : null;
+}
+
+/**
+ * Everything needed to say where a face lands on the print, or null when the
+ * answer would be invented — no confident faces, undecoded pixels, or a slot
+ * whose printed shape is not yet known.
+ */
+function faceProjection(slot: ReviewSlot) {
+  const faces = confidentFaces(slot.faces);
+  if (faces.length === 0) return null;
+  const pixelWidth = positive(slot.photoPixels?.width);
+  const pixelHeight = positive(slot.photoPixels?.height);
+  const target = targetAspectRatio(slot);
+  if (!pixelWidth || !pixelHeight || !target) return null;
+  const sourceWindow = sourceWindowForCrop({
+    sourceAspectRatio: pixelWidth / pixelHeight,
+    targetAspectRatio: target,
+    zoom: positive(slot.crop.zoom) ?? 1,
+    focusX: slot.crop.focusX,
+    focusY: slot.crop.focusY,
+  });
+  if (!sourceWindow) return null;
+  const projected = faces.flatMap((face) => {
+    const box = projectBoxIntoFrame(face, sourceWindow);
+    return box ? [box] : [];
+  });
+  return projected.length > 0 ? projected : null;
+}
+
+/**
+ * Whether the face signal is strong enough to speak for this slot.
+ *
+ * When it is, the geometry-only `subject_near_trim` guess is withdrawn: that
+ * check reads the shopper's focus point as a stand-in for the subject, and once
+ * the actual subject is known the stand-in is only noise.
+ */
+export function hasFaceSignal(slot: ReviewSlot): boolean {
+  return faceProjection(slot) !== null;
+}
+
+const FACE_TRIM_EDGES = ["left", "right", "top", "bottom"] as const;
+
+/**
+ * Whether a detected face is cropped out of the print, or close enough to the
+ * trim that the cut could take part of it.
+ *
+ * Unlike `subjectNearTrim` this uses the published important-content margin as
+ * published, without scaling it by zoom. The zoom scaling there is a hedge
+ * against a point-estimate; here the face has real extent, so its distance to
+ * the trim is measured rather than guessed, and a hedge would only over-report.
+ */
+function faceNearTrim(slot: ReviewSlot): PrintReviewFinding | null {
+  const projected = faceProjection(slot);
+  if (!projected) return null;
+  const margin = {
+    x: positive(slot.importantContentMargin?.x) ?? DEFAULT_IMPORTANT_CONTENT_MARGIN,
+    y: positive(slot.importantContentMargin?.y) ?? DEFAULT_IMPORTANT_CONTENT_MARGIN,
+  };
+
+  const cropped = projected.filter((face) => face.visibleFraction < FACE_VISIBLE_FRACTION_FLOOR);
+  if (cropped.length > 0) {
+    const subject = cropped.length === projected.length && projected.length > 1
+      ? `All ${projected.length} faces`
+      : cropped.length > 1
+        ? `${cropped.length} faces`
+        : "A face";
+    const gone = cropped.every((face) => face.visibleFraction <= 0);
+    const verb = gone ? (cropped.length > 1 ? "fall outside" : "falls outside") : "may be cropped out of";
+    return {
+      code: "face_near_trim",
+      slot_key: slot.slotKey,
+      message: `${subject} ${verb} the printed frame of the ${slotName(slot)} at this crop.`,
+    };
+  }
+
+  let tightest: { edge: (typeof FACE_TRIM_EDGES)[number]; clearance: number } | null = null;
+  for (const face of projected) {
+    const clearances = edgeClearances(face);
+    for (const edge of FACE_TRIM_EDGES) {
+      const limit = edge === "left" || edge === "right" ? margin.x : margin.y;
+      const clearance = clearances[edge];
+      if (clearance >= limit) continue;
+      if (!tightest || clearance < tightest.clearance) tightest = { edge, clearance };
+    }
+  }
+  if (!tightest) return null;
+  return {
+    code: "face_near_trim",
+    slot_key: slot.slotKey,
+    message: `A face sits close to the ${tightest.edge} trim edge of the ${slotName(slot)} — nudge the framing before this one prints.`,
+  };
+}
+
 function aspectMismatch(slot: ReviewSlot): PrintReviewFinding | null {
   const wantedWidth = positive(slot.requiredAspectRatio?.width);
   const wantedHeight = positive(slot.requiredAspectRatio?.height);
@@ -183,14 +309,23 @@ function aspectMismatch(slot: ReviewSlot): PrintReviewFinding | null {
   };
 }
 
-const checks = [lowResolution, extremeZoom, subjectNearTrim, aspectMismatch];
+const checks = [lowResolution, extremeZoom, subjectNearTrim, faceNearTrim, aspectMismatch];
 
-/** Every finding for one slot, in a stable order. */
+/**
+ * Every finding for one slot, in a stable order.
+ *
+ * The one conditional rule: a slot with a usable face signal drops the
+ * geometry-only `subject_near_trim`, because `face_near_trim` has answered the
+ * same question from the photograph instead of from the focus slider.
+ */
 export function reviewSlot(slot: ReviewSlot): PrintReviewFinding[] {
-  return checks.flatMap((check) => {
+  const findings = checks.flatMap((check) => {
     const finding = check(slot);
     return finding ? [finding] : [];
   });
+  return hasFaceSignal(slot)
+    ? findings.filter((finding) => finding.code !== "subject_near_trim")
+    : findings;
 }
 
 /**

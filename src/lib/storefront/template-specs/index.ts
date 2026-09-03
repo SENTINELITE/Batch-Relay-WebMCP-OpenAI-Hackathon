@@ -29,12 +29,7 @@ export function bundledTemplateSpec(templateID: string): RenderTemplateSpec | nu
   return bundledTemplateSpecs.find((spec) => spec.templateId === templateID) ?? null;
 }
 
-/**
- * A bundled copy is pinned to the revision it was taken from. A newer revision
- * is still shown, because an exact older composition reads far closer to the
- * truth than a synthesized guess, but callers keep telling the shopper the
- * artwork is a local copy either way.
- */
+/** A frozen copy is usable only for the exact revision it was captured from. */
 export function bundledTemplateSpecMatchesRevision(spec: RenderTemplateSpec, revisionID: string): boolean {
   return spec.revisionId === revisionID;
 }

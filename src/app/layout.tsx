@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Geist_Mono } from "next/font/google";
+import { Barlow_Semi_Condensed, Geist_Mono } from "next/font/google";
 import localFont from "next/font/local";
 import { Agentation } from "agentation";
 
@@ -20,6 +20,13 @@ const geistMono = Geist_Mono({
   display: "swap",
 });
 
+const barlowSemiCondensed = Barlow_Semi_Condensed({
+  subsets: ["latin"],
+  variable: "--font-barlow-semi-condensed",
+  weight: "700",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
   title: "Batch Relay",
   description: "Prepare a real Batch Relay sandbox print order from the public API.",
@@ -27,7 +34,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html className={`${generalSans.variable} ${geistMono.variable}`} lang="en" suppressHydrationWarning>
+    <html className={`${generalSans.variable} ${geistMono.variable} ${barlowSemiCondensed.variable}`} lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themePreferenceBootstrapScript }} />
       </head>

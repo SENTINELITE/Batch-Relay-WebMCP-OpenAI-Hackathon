@@ -40,10 +40,56 @@ export type StorefrontWebMcpActionRequest = {
   input: Record<string, unknown>;
 };
 
+/**
+ * Expected, shopper-actionable failures from the visible storefront.
+ *
+ * The bridge intentionally keeps this separate from thrown exceptions: a
+ * template that has no published output is a normal agent-retry outcome,
+ * whereas a malformed event response or an uncaught UI fault remains a
+ * rejected tool call for diagnostics.
+ */
+export type StorefrontWebMcpErrorCode =
+  | "invalid_input"
+  | "stale_tray"
+  | "product_not_found"
+  | "product_ambiguous"
+  | "template_not_found"
+  | "template_ambiguous"
+  | "template_output_incompatible"
+  | "template_no_compatible_output"
+  | "template_contract_unavailable"
+  | "template_preview_unavailable"
+  | "template_required_unavailable"
+  | "batch_preflight_failed"
+  | "storefront_timeout"
+  | "transient_upstream"
+  | "storefront_error";
+
+export type StorefrontWebMcpExpectedError = {
+  code: StorefrontWebMcpErrorCode;
+  message: string;
+  /** What failed, so a batch-wide retry is never mistaken for one bad image. */
+  scope: "input" | "tray" | "product" | "template" | "batch" | "storefront";
+  retryable: boolean;
+  details?: Record<string, unknown>;
+  /** Whether the requested action changed visible storefront state. */
+  commitStatus?: "not_committed" | "committed" | "unknown";
+};
+
+export type StorefrontWebMcpErrorResult = {
+  content: [{ type: "text"; text: string }];
+  isError: true;
+  structuredContent: { error: StorefrontWebMcpExpectedError };
+};
+
 export type StorefrontWebMcpActionResponse = {
   requestId: string;
   result?: unknown;
-  error?: string;
+  /**
+   * Strings are accepted during the migration from the original bridge. New
+   * handlers should return the typed envelope above so agents can retry safely.
+   */
+  error?: string | StorefrontWebMcpExpectedError;
 };
 
 export const storefrontWebMcpEvents = {
@@ -71,6 +117,59 @@ const defaultState: StorefrontWebMcpState = {
 };
 
 let visibleState = defaultState;
+
+function isExpectedError(value: unknown): value is StorefrontWebMcpExpectedError {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<StorefrontWebMcpExpectedError>;
+  return (
+    typeof candidate.code === "string" &&
+    candidate.code.length > 0 &&
+    typeof candidate.message === "string" &&
+    candidate.message.length > 0 &&
+    (candidate.scope === "input" ||
+      candidate.scope === "tray" ||
+      candidate.scope === "product" ||
+      candidate.scope === "template" ||
+      candidate.scope === "batch" ||
+      candidate.scope === "storefront") &&
+    typeof candidate.retryable === "boolean" &&
+    (candidate.details === undefined ||
+      (typeof candidate.details === "object" && candidate.details !== null && !Array.isArray(candidate.details))) &&
+    (candidate.commitStatus === undefined ||
+      candidate.commitStatus === "not_committed" ||
+      candidate.commitStatus === "committed" ||
+      candidate.commitStatus === "unknown")
+  );
+}
+
+function expectedErrorResult(
+  error: string | StorefrontWebMcpExpectedError,
+): StorefrontWebMcpErrorResult {
+  // Existing handlers originally returned a plain string. Preserve their
+  // behavior for callers, but give agents one stable, inspectable shape while
+  // newer handlers migrate to specific codes and scopes.
+  const normalized: StorefrontWebMcpExpectedError = typeof error === "string"
+    ? {
+      code: "storefront_error",
+      message: error,
+      scope: "storefront",
+      retryable: false,
+      commitStatus: "unknown",
+    }
+    : {
+      ...error,
+      commitStatus: error.commitStatus ?? "unknown",
+    };
+  const commit = normalized.commitStatus === "unknown"
+    ? " Commit status is unknown."
+    : ` Commit status: ${normalized.commitStatus}.`;
+
+  return {
+    content: [{ type: "text", text: `${normalized.message}${commit}` }],
+    isError: true,
+    structuredContent: { error: normalized },
+  };
+}
 
 function browserWindow(): Window {
   if (typeof window === "undefined") {
@@ -163,7 +262,11 @@ export function subscribeToStorefrontWebMcpActions(
  * handlers should call this after their same-origin client action completes.
  */
 export function respondToStorefrontWebMcpAction(response: StorefrontWebMcpActionResponse): void {
-  if (!response.requestId || (response.error === undefined && response.result === undefined)) {
+  if (
+    !response.requestId ||
+    (response.error === undefined && response.result === undefined) ||
+    (response.error !== undefined && typeof response.error !== "string" && !isExpectedError(response.error))
+  ) {
     throw new Error("A WebMCP action response requires a request ID and result or error.");
   }
 
@@ -186,7 +289,14 @@ export function requestStorefrontWebMcpAction(
   return new Promise<unknown>((resolve, reject) => {
     const timeout = target.setTimeout(() => {
       cleanup();
-      reject(new Error(`The visible storefront did not complete ${action}.`));
+      resolve(expectedErrorResult({
+        code: "storefront_timeout",
+        message: `The visible storefront did not complete ${action} before the 45 second timeout.`,
+        scope: "storefront",
+        retryable: true,
+        details: { action, timeoutMs: requestTimeoutMs },
+        commitStatus: "unknown",
+      }));
     }, requestTimeoutMs);
 
     const onResult = (event: Event) => {
@@ -194,8 +304,8 @@ export function requestStorefrontWebMcpAction(
       if (!response || response.requestId !== requestId) return;
 
       cleanup();
-      if (response.error) {
-        reject(new Error(response.error));
+      if (response.error !== undefined) {
+        resolve(expectedErrorResult(response.error));
         return;
       }
       if (response.result === undefined) {

@@ -13,6 +13,12 @@ import {
 
 type AskStorefrontInput = {
   question: string;
+  templateId?: string;
+  templateQuery?: string;
+  productId?: string;
+  productQuery?: string;
+  orientation?: "portrait" | "landscape";
+  maxTemplateResults?: number;
 };
 
 type FindPrintsInput = {
@@ -53,6 +59,7 @@ type ConfigurePrintInput = {
   productQuery?: string;
   photoRefs?: PhotoRef[];
   templateId?: string;
+  templateQuery?: string;
   outputId?: string;
   orientation?: "portrait" | "landscape";
   slotPatches?: SlotPatch[];
@@ -91,6 +98,9 @@ type ProposePrintsInput = {
   photo_refs?: PhotoRef[];
   quantity?: number;
   orientation?: "portrait" | "landscape";
+  templateId?: string;
+  templateQuery?: string;
+  outputId?: string;
 };
 
 type ManageCartInput = {
@@ -116,20 +126,42 @@ function requireCurrentTrayRevision(trayRevision: number | undefined): void {
   }
 }
 
+/** Keep template/output selection unambiguous even when a caller bypasses JSON Schema. */
+function validateTemplateSelection(
+  input: { templateId?: string; templateQuery?: string; outputId?: string },
+  action: string,
+): void {
+  if (input.templateId !== undefined && input.templateQuery !== undefined) {
+    throw new Error(`${action} accepts either templateId or templateQuery, not both.`);
+  }
+  if (input.outputId !== undefined && input.templateId === undefined && input.templateQuery === undefined) {
+    throw new Error(`${action} needs templateId or templateQuery when outputId is supplied.`);
+  }
+}
+
 export const askStorefront = defineTool<AskStorefrontInput>({
   stableKey: "storefront.ask",
   name: "ask_storefront",
   title: "Ask the storefront",
   description:
-    "Use when a shopper asks what photographs, print drafts, template choices, slot requirements, pending cart proposals, or demo cart items are currently visible. Returns grounded structured state and the next available action without changing the workbench. Each image slot reports its current crop in the same zoom, focus, and offset vocabulary configure_print accepts, so a relative request such as zooming in further can be computed from the visible framing rather than guessed.",
+    "Inspect visible storefront state, or request a bounded compatibility summary for one template and product, without changing the workbench.",
   inputSchema: {
     type: "object",
-    properties: { question: { type: "string", minLength: 1 } },
+    properties: {
+      question: { type: "string", minLength: 1 },
+      templateId: { type: "string", minLength: 1 },
+      templateQuery: { type: "string", minLength: 1 },
+      productId: { type: "string", minLength: 1 },
+      productQuery: { type: "string", minLength: 1 },
+      orientation: { type: "string", enum: ["portrait", "landscape"] },
+      maxTemplateResults: { type: "integer", minimum: 1, maximum: 20 },
+    },
     required: ["question"],
     additionalProperties: false,
   },
   annotations: { readOnlyHint: true },
   async execute(input) {
+    validateTemplateSelection(input, "ask_storefront");
     return requestStorefrontWebMcpAction("ask_storefront", input);
   },
 });
@@ -139,7 +171,7 @@ export const findPrints = defineTool<FindPrintsInput>({
   name: "find_prints",
   title: "Find print products",
   description:
-    "Use when a shopper wants to browse, compare, or identify canonical print products before creating a draft. Returns matching published product facts and template requirements, and visibly opens the format chooser without inventing products or compatibility.",
+    "Use when a shopper wants to browse, compare, or identify canonical print products before creating a draft. Returns published product facts and template requirements from the live catalog without inventing products or compatibility, and without changing what the shopper is looking at: it never moves them to another step, so it is safe to call while they are working by hand on a print.",
   inputSchema: {
     type: "object",
     properties: {
@@ -179,6 +211,7 @@ export const configurePrint = defineTool<ConfigurePrintInput>({
       productId: { type: "string", minLength: 1 },
       productQuery: { type: "string", minLength: 1 },
       templateId: { type: "string", minLength: 1 },
+      templateQuery: { type: "string", minLength: 1 },
       outputId: { type: "string", minLength: 1 },
       orientation: { type: "string", enum: ["portrait", "landscape"] },
       slotPatches: {
@@ -231,6 +264,7 @@ export const configurePrint = defineTool<ConfigurePrintInput>({
       "configure a print from the visible photo tray",
     );
     requireCurrentTrayRevision(input.trayRevision);
+    validateTemplateSelection(input, "configure_print");
     return requestStorefrontWebMcpAction("configure_print", withResolvedIdentifierAliases(input, [["draftId", "draft_id"]]));
   },
 });
@@ -402,6 +436,9 @@ export const proposePrints = defineTool<ProposePrintsInput>({
       },
       quantity: { type: "integer", minimum: 1, maximum: 99, default: 1 },
       orientation: { type: "string", enum: ["portrait", "landscape"] },
+      templateId: { type: "string", minLength: 1 },
+      templateQuery: { type: "string", minLength: 1 },
+      outputId: { type: "string", minLength: 1 },
     },
     required: ["trayRevision"],
     anyOf: [{ required: ["photoRefs"] }, { required: ["photo_refs"] }],
@@ -415,6 +452,7 @@ export const proposePrints = defineTool<ProposePrintsInput>({
       "stage prints from the visible photo tray",
     );
     requireCurrentTrayRevision(input.trayRevision);
+    validateTemplateSelection(input, "propose_prints");
     const raw = input as unknown as Record<string, unknown>;
     requireIdentifierListAlias(
       raw,

@@ -137,6 +137,10 @@ export type BrowserPreviewLayer = {
   opacity: number;
   color?: string;
   sample?: string | null;
+  textFragments?: Array<
+    | { kind: "literal"; value: string }
+    | { kind: "binding"; slotKey: string; placeholder?: string }
+  >;
   align?: "left" | "center" | "right";
   typeSizePt?: number;
   fontFamily?: string;
@@ -219,6 +223,21 @@ function anchor(value: unknown): BrowserPreviewLayer["anchor"] {
     : "tl";
 }
 
+function textFragments(value: unknown): BrowserPreviewLayer["textFragments"] {
+  if (!Array.isArray(value)) return undefined;
+  const fragments: NonNullable<BrowserPreviewLayer["textFragments"]> = [];
+  for (const fragment of value) {
+    if (!record(fragment)) continue;
+    if (fragment.kind === "literal" && typeof fragment.value === "string") fragments.push({ kind: "literal", value: fragment.value });
+    if (fragment.kind === "binding") {
+      const slotKey = nonEmpty(fragment.slotKey);
+      const placeholder = nonEmpty(fragment.placeholder) ?? undefined;
+      if (slotKey) fragments.push({ kind: "binding", slotKey, placeholder });
+    }
+  }
+  return fragments.some((fragment) => fragment.kind === "binding") ? fragments : undefined;
+}
+
 function layer(value: unknown, inputSlotKeys: ReadonlyMap<string, string>): BrowserPreviewLayer | null {
   if (!record(value)) return null;
   const id = nonEmpty(value.id);
@@ -258,6 +277,7 @@ function layer(value: unknown, inputSlotKeys: ReadonlyMap<string, string>): Brow
     opacity: Math.min(1, Math.max(0, finite(value.opacity) ?? 1)),
     color: color(value.color, "#17110c"),
     sample: typeof value.sample === "string" || value.sample === null ? value.sample : undefined,
+    textFragments: textFragments(value.textFragments),
     align: value.align === "center" || value.align === "right" ? value.align : "left",
     typeSizePt: finite(value.typeSizePt) ?? 12,
     fontFamily: nonEmpty(value.fontFamily) ?? "system-ui",

@@ -396,22 +396,32 @@ test("only https template art on a trusted host is used, and never through the p
 test("the Neon Lights spec keeps its CDN background beneath the published tint", () => {
   const contract = {
     ...memoryMateContract,
-    template: { id: neonLightsSpec.templateId, revision_id: neonLightsSpec.revisionId, revision_number: 1 },
+    template: { id: neonLightsSpec.templateId, revision_id: neonLightsSpec.revisionId, revision_number: 3 },
+    slots: [
+      memoryMateContract.slots[0],
+      { key: "text_5106920550f5", kind: "text", ordinal: 2, required: false, suggested_label: "Print Name", suggested_semantic_key: "athlete_print_name" },
+      { key: "text_171cff5dcfde", kind: "text", ordinal: 3, required: false, suggested_label: "Jersey Number", suggested_semantic_key: "athlete_jersey_number" },
+      { key: "text_746edef46a4a", kind: "text", ordinal: 4, required: false, suggested_label: "Team", suggested_semantic_key: "athlete_team" },
+      { key: "text_1e6560b98c6e", kind: "text", ordinal: 5, required: false, suggested_label: "Year", suggested_semantic_key: "athlete_year" },
+      { ...memoryMateContract.slots[1], ordinal: 10 },
+    ],
   };
   const document = specBrowserPreviewDocument({ spec: neonLightsSpec, contract, output: memoryMateOutput });
   assert.equal(document.preview_source, "local_published_copy");
 
   const backgroundURL = "https://images.batchrelay.com/qs721nx4b560vgs1g9frmkt97d8c539d/templates/backgrounds/sha256/7058e81385b9b20cd943656ceede1f69fd92113537c6864402af3ac9eb09bed2.jpg";
-  assert.deepEqual(document.assets, [{ asset_ref: backgroundURL, kind: "public_template_asset", content_url: backgroundURL }]);
+  assert.equal(document.assets.length, 7, "the frozen copy includes the background and all six transparent overlays");
+  assert.deepEqual(document.assets[0], { asset_ref: backgroundURL, kind: "public_template_asset", content_url: backgroundURL });
+  assert.equal(document.assets.filter((asset) => asset.content_url.endsWith(".png")).length, 6);
 
   const canvas = canvasFor(document);
   assert.ok(canvas, "the converted spec must parse through browserPreviewCanvas unchanged");
   assert.equal(canvas.backgroundColor, "#ffede1");
-  assert.equal(canvas.layers.length, 5, "base shape, CDN background, tint, and the two photo slots");
+  assert.equal(canvas.layers.length, 15, "every published layer survives the frozen browser conversion");
 
-  // Paint order is what makes the design read: the tint must sit over the
-  // background image, and the photo slots over both.
-  const [base, background, tint, individual, team] = canvas.layers;
+  // Paint order is what makes the design read: base, background, tint, photos,
+  // composed text, then the six transparent overlays.
+  const [base, background, tint, individual, team, ...decoration] = canvas.layers;
   assert.equal(base.kind, "shape");
   assert.equal(base.fills[0].color, "#ffede1");
   assert.equal(background.kind, "image");
@@ -425,13 +435,25 @@ test("the Neon Lights spec keeps its CDN background beneath the published tint",
   assert.equal(tint.opacity, 0.55);
   assert.equal(individual.inputSlotKey, "image_122qlv9");
   assert.equal(team.inputSlotKey, "image_12rkfks");
+  const textLayers = decoration.slice(0, 4);
+  assert.deepEqual(textLayers.map((layer) => {
+    const binding = layer.textFragments?.find((fragment) => fragment.kind === "binding");
+    return [binding?.slotKey, binding?.placeholder];
+  }), [
+    ["text_5106920550f5", "Print Name"],
+    ["text_171cff5dcfde", "Jersey Number"],
+    ["text_746edef46a4a", "Team"],
+    ["text_1e6560b98c6e", "Year"],
+  ]);
+  assert.ok(textLayers.every((layer) => layer.fontFamily.startsWith("var(--font-barlow-semi-condensed)")));
+  assert.ok(decoration.slice(4).every((layer) => layer.kind === "image" && layer.assetRef?.endsWith(".png")));
 });
 
 test("the two bundled templates share a composition but stay separately addressable", () => {
   assert.notEqual(modernVintageSpec.templateId, neonLightsSpec.templateId);
-  assert.equal(neonLightsSpec.revisionId, "rev_601c0a0f1cc64e4a9527cd2a547cf66c");
+  assert.equal(neonLightsSpec.revisionId, "rev_398677279733464cafb253d610f0e891");
   // Modern Vintage's grain pattern is a builtin ref with no fetchable bytes,
-  // so it is still dropped while Neon Lights' CDN background is kept.
+  // so it is still dropped while the frozen Neon Lights art stays independent.
   const modernVintage = specDocument();
   assert.deepEqual(modernVintage.assets, []);
   assert.ok(canvasFor(modernVintage).layers.every((layer) => !layer.assetRef));

@@ -58,6 +58,10 @@ export type RenderTemplateSpecLayer = {
   opacity?: number;
   fills?: SpecFill[];
   source?: { kind: string; key?: string; assetRef?: string };
+  content?: {
+    kind?: string;
+    fragments?: Array<{ kind?: string; key?: string; value?: string }>;
+  };
   fit?: { mode?: string };
   cornerRadiusIn?: number;
   cornerRadiiIn?: { tl: number; tr: number; br: number; bl: number };
@@ -67,6 +71,7 @@ export type RenderTemplateSpecLayer = {
   verticalAlign?: string;
   typeSizePt?: number;
   fontFamily?: string;
+  fontId?: string;
   fontWeight?: number;
   trackingEm?: number;
 };
@@ -200,7 +205,38 @@ function shapeOpacity(layer: RenderTemplateSpecLayer): number {
   return Math.min(1, Math.max(0, layerOpacity * fillOpacity));
 }
 
-function convertLayer(layer: RenderTemplateSpecLayer, slotKeys: ReadonlyMap<string, string>): Record<string, unknown> | null {
+type ConvertedTextFragment =
+  | { kind: "literal"; value: string }
+  | { kind: "binding"; slotKey: string; placeholder?: string };
+
+function textFragmentsFor(
+  layer: RenderTemplateSpecLayer,
+  slotKeys: ReadonlyMap<string, string>,
+  slotLabels: ReadonlyMap<string, string>,
+): ConvertedTextFragment[] | undefined {
+  if (layer.content?.kind !== "composition" || !Array.isArray(layer.content.fragments)) return undefined;
+  const fragments: ConvertedTextFragment[] = [];
+  for (const fragment of layer.content.fragments) {
+    if (fragment.kind === "literal" && typeof fragment.value === "string") {
+      fragments.push({ kind: "literal", value: fragment.value });
+      continue;
+    }
+    if (fragment.kind === "binding" && fragment.key) {
+      const slotKey = slotKeys.get(fragment.key);
+      if (slotKey) fragments.push({ kind: "binding", slotKey, placeholder: slotLabels.get(fragment.key) });
+    }
+  }
+  return fragments.some((fragment) => fragment.kind === "binding") ? fragments : undefined;
+}
+
+function browserFontFamily(layer: RenderTemplateSpecLayer): string | undefined {
+  const family = layer.fontFamily ?? layer.fontId;
+  return family === "barlow-semi-condensed"
+    ? "var(--font-barlow-semi-condensed), 'Arial Narrow', sans-serif"
+    : family;
+}
+
+function convertLayer(layer: RenderTemplateSpecLayer, slotKeys: ReadonlyMap<string, string>, slotLabels: ReadonlyMap<string, string>): Record<string, unknown> | null {
   const offsetIn = layer.frame?.offsetIn;
   const sizeIn = layer.frame?.sizeIn;
   if (!layer.id || !offsetIn || !sizeIn) return null;
@@ -246,10 +282,11 @@ function convertLayer(layer: RenderTemplateSpecLayer, slotKeys: ReadonlyMap<stri
     opacity: layer.opacity ?? 1,
     color: layer.color,
     sample: layer.sample ?? null,
+    textFragments: textFragmentsFor(layer, slotKeys, slotLabels),
     align: layer.align,
     verticalAlign: layer.verticalAlign,
     typeSizePt: layer.typeSizePt,
-    fontFamily: layer.fontFamily,
+    fontFamily: browserFontFamily(layer),
     fontWeight: layer.fontWeight,
     trackingEm: layer.trackingEm,
   };
@@ -319,6 +356,7 @@ export function specBrowserPreviewDocument({
   if (selections.length === 0) return null;
 
   const slotKeys = contractSlotKeysForSpec(spec.slots ?? [], contract.slots);
+  const slotLabels = new Map((spec.slots ?? []).flatMap((slot) => slot.label ? [[slot.key, slot.label] as const] : []));
   const inputSlots: BrowserPreviewInputSlot[] = [];
   const surfaces: BrowserPreviewSurface[] = [];
   const documentSurfaces: unknown[] = [];
@@ -327,7 +365,7 @@ export function specBrowserPreviewDocument({
   selections.forEach((selection, index) => {
     const { surface, variant, published } = selection;
     const nodes = variant.layers.flatMap((layer) => {
-      const converted = convertLayer(layer, slotKeys);
+      const converted = convertLayer(layer, slotKeys, slotLabels);
       if (!converted) return [];
       if (layer.source?.kind === "binding" && layer.kind === "image") {
         const slotKey = layer.source.key ? slotKeys.get(layer.source.key) : undefined;
