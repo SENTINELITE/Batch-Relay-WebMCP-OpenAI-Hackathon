@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useDraggablePhoto } from "@/components/storefront/photo-drag";
 import { PrintFrame } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import {
@@ -8,9 +9,91 @@ import {
   filesFromPhotoFolder,
   rememberedPhotoFolderHandle,
   rememberPhotoFolderHandle,
+  type BrowserPhoto,
   type PhotoLibraryAction,
   type PhotoLibraryState,
 } from "@/lib/storefront/photo-library";
+
+type TrayPhotoCardProps = {
+  disabled: boolean;
+  onSelect: () => void;
+  ordinal: number;
+  photo: BrowserPhoto;
+  selected: boolean;
+};
+
+/**
+ * One tray photograph: a click selects it, and a drag carries it to a print
+ * slot.
+ *
+ * The two share the thumbnail without fighting because the pointer sensor only
+ * activates after the pointer has travelled, so a press that stays put is still
+ * a click. Keyboard dragging lives on its own handle instead, since Space on
+ * the thumbnail must keep selecting.
+ */
+function TrayPhotoCard({ disabled, onSelect, ordinal, photo, selected }: TrayPhotoCardProps) {
+  const { bodyProps, connect, connectHandle, handleProps, isDragging } = useDraggablePhoto(photo, disabled);
+  return <li className="w-44 shrink-0">
+    <div className="relative">
+      <PrintFrame
+        aspect="4 / 5"
+        className={cn(
+          "w-full transition-opacity duration-200 ease-[var(--ease-out-expo)] motion-reduce:transition-none",
+          selected && "ring-2 ring-primary ring-offset-2 ring-offset-card",
+          isDragging && "opacity-40",
+        )}
+        innerClassName="bg-surface-warm"
+        ref={connect}
+        rotate
+      >
+        <button
+          aria-current={selected ? "true" : undefined}
+          aria-label={`Select image ${ordinal}: ${photo.filename}`}
+          className="block size-full cursor-grab active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={disabled}
+          onClick={onSelect}
+          // The tray scrolls horizontally by touch, so the body deliberately
+          // keeps its default touch-action. Touch dragging starts on the grip.
+          onPointerDown={bodyProps.onPointerDown}
+          type="button"
+        >
+          {/* Object URLs are browser-local and intentionally not optimized through a remote loader. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img alt="" className="size-full object-cover" draggable={false} src={photo.previewURL} />
+        </button>
+      </PrintFrame>
+      {disabled ? null : <button
+        aria-label={`Drag image ${ordinal}, ${photo.filename}, onto a print slot`}
+        className="absolute -left-2 -top-2 grid size-6 cursor-grab touch-none place-items-center rounded-full border border-border bg-card text-muted-foreground shadow-warm transition-colors hover:text-foreground active:cursor-grabbing motion-reduce:transition-none"
+        ref={connectHandle}
+        type="button"
+        {...handleProps}
+      >
+        <svg aria-hidden="true" className="size-3" fill="currentColor" viewBox="0 0 24 24">
+          <circle cx="9" cy="5" r="2" /><circle cx="15" cy="5" r="2" />
+          <circle cx="9" cy="12" r="2" /><circle cx="15" cy="12" r="2" />
+          <circle cx="9" cy="19" r="2" /><circle cx="15" cy="19" r="2" />
+        </svg>
+      </button>}
+      {selected ? <span
+        aria-hidden="true"
+        className="absolute -right-2 -top-2 grid size-6 place-items-center rounded-full bg-primary text-primary-foreground shadow-warm"
+      >
+        <svg className="size-3.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.4} viewBox="0 0 24 24">
+          <path d="m5 12.5 4.5 4.5L19 7" />
+        </svg>
+      </span> : null}
+    </div>
+
+    <div className="mt-3">
+      <div className="flex items-baseline gap-2">
+        <span className="font-mono text-[13px] text-muted-foreground">{String(ordinal).padStart(2, "0")}</span>
+        <b className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" title={photo.filename}>{photo.filename}</b>
+      </div>
+      {photo.relativePath ? <p className="mt-1 truncate font-mono text-[13px] text-muted-foreground" title={photo.relativePath}>{photo.relativePath}</p> : null}
+    </div>
+  </li>;
+}
 
 export type PhotoTrayProps = {
   library: PhotoLibraryState;
@@ -183,49 +266,14 @@ export function PhotoTray({ library, onAction, disabled = false, className, onIm
           WebkitMaskImage: `linear-gradient(to right, ${edgeFade.left ? "transparent" : "#000"} 0, #000 5rem, #000 calc(100% - 5rem), ${edgeFade.right ? "transparent" : "#000"} 100%)`,
         }}
       >
-        {library.photos.map((photo, index) => {
-          const ordinal = index + 1;
-          const selected = photo.id === library.selectedPhotoId;
-          return <li className="w-44 shrink-0" key={photo.id}>
-            <div className="relative">
-              <PrintFrame
-                aspect="4 / 5"
-                className={cn("w-full", selected && "ring-2 ring-primary ring-offset-2 ring-offset-card")}
-                innerClassName="bg-surface-warm"
-                rotate
-              >
-                <button
-                  aria-current={selected ? "true" : undefined}
-                  aria-label={`Select image ${ordinal}: ${photo.filename}`}
-                  className="block size-full cursor-pointer disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={disabled}
-                  onClick={() => onAction({ type: "select", photoId: photo.id })}
-                  type="button"
-                >
-                  {/* Object URLs are browser-local and intentionally not optimized through a remote loader. */}
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img alt="" className="size-full object-cover" src={photo.previewURL} />
-                </button>
-              </PrintFrame>
-              {selected ? <span
-                aria-hidden="true"
-                className="absolute -right-2 -top-2 grid size-6 place-items-center rounded-full bg-primary text-primary-foreground shadow-warm"
-              >
-                <svg className="size-3.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.4} viewBox="0 0 24 24">
-                  <path d="m5 12.5 4.5 4.5L19 7" />
-                </svg>
-              </span> : null}
-            </div>
-
-            <div className="mt-3">
-              <div className="flex items-baseline gap-2">
-                <span className="font-mono text-[13px] text-muted-foreground">{String(ordinal).padStart(2, "0")}</span>
-                <b className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground" title={photo.filename}>{photo.filename}</b>
-              </div>
-              {photo.relativePath ? <p className="mt-1 truncate font-mono text-[13px] text-muted-foreground" title={photo.relativePath}>{photo.relativePath}</p> : null}
-            </div>
-          </li>;
-        })}
+        {library.photos.map((photo, index) => <TrayPhotoCard
+          disabled={disabled}
+          key={photo.id}
+          onSelect={() => onAction({ type: "select", photoId: photo.id })}
+          ordinal={index + 1}
+          photo={photo}
+          selected={photo.id === library.selectedPhotoId}
+        />)}
       </ol>
     </> : <div className="rounded-[14px] border border-dashed border-border-strong bg-background/60 px-6 py-10 text-center">
       <h2 className="text-base font-semibold text-foreground">No photographs loaded</h2>

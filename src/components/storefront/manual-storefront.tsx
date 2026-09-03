@@ -35,6 +35,7 @@ import {
 } from "@/lib/storefront/template-compatibility";
 import { BrowserTemplatePreview } from "@/components/storefront/browser-template-preview";
 import { FormatPicker } from "@/components/storefront/format-picker";
+import { PhotoDragProvider, type PhotoDropTarget } from "@/components/storefront/photo-drag";
 import { PhotoTray } from "@/components/storefront/photo-tray";
 import { PrepareStep } from "@/components/storefront/prepare-step";
 import { CartProposalStack } from "@/components/storefront/cart-proposal-stack";
@@ -1042,6 +1043,21 @@ export function ManualStorefront() {
     });
   }
 
+  /**
+   * Where a photograph dragged out of the tray lands.
+   *
+   * Both branches call the handler the equivalent click already calls, so a
+   * drag has no assignment path of its own to drift from the visible one.
+   */
+  function dropPhotoOnPrintTarget(photoId: string, target: PhotoDropTarget) {
+    if (target.kind === "direct_print") {
+      handlePhotoAction({ type: "select", photoId });
+      return;
+    }
+    noteShopperLookingAtSelectedDraft();
+    assignTemplatePhoto(target.slotKey, photoId);
+  }
+
   /** Live framing, shared by preview dragging and the prepare-step sliders, so
    *  each one shows what the other is doing. Nothing is committed yet. */
   function changeBrowserPreviewTransform(slotKey: string, transform: BrowserPreviewTransform) {
@@ -1733,7 +1749,7 @@ export function ManualStorefront() {
     })();
   }));
 
-  return <>
+  return <PhotoDragProvider onDropPhoto={dropPhotoOnPrintTarget} photos={photoLibrary.photos}>
     <StorefrontMasthead
       cartAcknowledgement={cartAcknowledgement}
       cartCount={cartPrintCount}
@@ -1832,5 +1848,5 @@ export function ManualStorefront() {
       onReject={(proposal) => resolveProposal(proposal, "reject")}
       previewFor={proposalPreviewBinding}
     />
-  </>;
+  </PhotoDragProvider>;
 }

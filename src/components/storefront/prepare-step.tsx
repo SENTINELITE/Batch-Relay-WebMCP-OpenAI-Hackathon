@@ -9,7 +9,9 @@ import {
   SelectField,
   Surface,
 } from "@/components/ui";
+import { photoDropTargetClassName, usePhotoDropTarget } from "@/components/storefront/photo-drag";
 import { TemplateSlotAssignment } from "@/components/storefront/template-slot-assignment";
+import { cn } from "@/lib/cn";
 import type {
   CatalogProduct,
   IngestedAsset,
@@ -124,6 +126,16 @@ export function PrepareStep({
     zoom: number;
   } | null>(null);
   const finishDirectDragRef = useRef<(pointerID: number, releasePointerCapture?: boolean) => void>(() => {});
+  // A direct print has no slots, so its crop frame stands in for one: a
+  // photograph dropped here becomes the tray selection this print uses. It
+  // accepts drops exactly while it is the frame on screen, which is the same
+  // condition that decides whether it is rendered at all.
+  const {
+    connect: connectDirectDrop,
+    isDragActive: directDropDragActive,
+    isOver: directDropIsOver,
+    settled: directDropSettled,
+  } = usePhotoDropTarget({ kind: "direct_print" }, templatePreviewIsPrimary);
 
   function finishDirectDrag(pointerID: number, releasePointerCapture = true) {
     const active = directDrag.current;
@@ -198,13 +210,21 @@ export function PrepareStep({
               <PrintFrame
                 aspect={crop === "5:7" ? "5 / 7" : "4 / 5"}
                 aria-label={cropZoom > 1 ? "Drag to pan the selected image crop" : "Selected image crop preview"}
-                className={cropZoom > 1 ? "w-full cursor-grab touch-none active:cursor-grabbing" : "w-full"}
+                className={cn(
+                  cropZoom > 1 ? "w-full cursor-grab touch-none active:cursor-grabbing" : "w-full",
+                  photoDropTargetClassName({
+                    isDragActive: directDropDragActive,
+                    isOver: directDropIsOver,
+                    settled: directDropSettled,
+                  }),
+                )}
                 innerClassName="relative bg-surface-warm"
                 onLostPointerCapture={(event) => finishDirectDrag(event.pointerId, false)}
                 onPointerCancel={(event) => finishDirectDrag(event.pointerId)}
                 onPointerDown={startDirectDrag}
                 onPointerMove={moveDirectDrag}
                 onPointerUp={(event) => finishDirectDrag(event.pointerId)}
+                ref={connectDirectDrop}
               >
                 {imagePreview ? (
                   <Image

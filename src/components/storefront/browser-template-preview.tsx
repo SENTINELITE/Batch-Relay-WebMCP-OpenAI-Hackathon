@@ -2,8 +2,9 @@
 
 /* eslint-disable @next/next/no-img-element -- local object URLs are browser-only preview state. */
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 
+import { photoDropTargetClassName, usePhotoDropTarget } from "@/components/storefront/photo-drag";
 import { Notice, PrintFrame, SelectField } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import {
@@ -79,6 +80,29 @@ function layerStyle(layer: BrowserPreviewLayer, canvas: NonNullable<ReturnType<t
     transform: layer.rotationDeg ? `rotate(${layer.rotationDeg}deg)` : undefined,
     transformOrigin: "center",
   };
+}
+
+type SlotDropSurfaceProps = ComponentPropsWithoutRef<"div"> & {
+  /** Null for a published asset layer, which no photograph may replace. */
+  slotKey: string | null;
+  isActive: boolean;
+};
+
+/**
+ * An image layer that also accepts a photograph dragged from the tray.
+ *
+ * Dropping only contributes a ref, never a pointer handler, so this layer's own
+ * pointer-down pan, its activation click, and its pointer capture all continue
+ * to run exactly as they did before.
+ */
+function SlotDropSurface({ children, className, isActive, slotKey, ...rest }: SlotDropSurfaceProps) {
+  const { connect, isDragActive, isOver, settled } = usePhotoDropTarget({ kind: "template_slot", slotKey: slotKey ?? "" }, slotKey === null);
+  const dropRing = isOver || settled || isDragActive;
+  return <div
+    {...rest}
+    className={cn(className, photoDropTargetClassName({ isDragActive, isOver, settled }), isActive && !dropRing && "ring-2 ring-primary")}
+    ref={connect}
+  >{children}</div>;
 }
 
 function transformsFor(slots: Record<string, LocalBrowserPreviewImage>): Record<string, BrowserPreviewTransform> {
@@ -325,7 +349,7 @@ export function BrowserTemplatePreview({
                 width: "100%",
               }
             : undefined;
-          if (layer.kind === "image") return <div aria-label={isLocalSlot ? `Select ${localSlotKey} image slot` : undefined} className={cn("absolute", !source && "border border-dashed border-border-strong bg-foreground/5", isActive && "ring-2 ring-primary")} key={layer.id} onClick={isLocalSlot ? () => selectLocalSlot(localSlotKey!) : undefined} onKeyDown={isLocalSlot ? (event) => selectLocalSlotFromKeyboard(event, localSlotKey!) : undefined} onLostPointerCapture={isLocalSlot ? loseDrag : undefined} onPointerDown={isLocalSlot ? (event) => { event.stopPropagation(); selectLocalSlot(localSlotKey!); startDrag(event, localSlotKey!); } : undefined} role={isLocalSlot ? "button" : undefined} style={style} tabIndex={isLocalSlot ? 0 : undefined}>
+          if (layer.kind === "image") return <SlotDropSurface aria-label={isLocalSlot ? `Select ${localSlotKey} image slot` : undefined} className={cn("absolute", !source && "border border-dashed border-border-strong bg-foreground/5")} isActive={isActive} key={layer.id} slotKey={isLocalSlot ? localSlotKey! : null} onClick={isLocalSlot ? () => selectLocalSlot(localSlotKey!) : undefined} onKeyDown={isLocalSlot ? (event) => selectLocalSlotFromKeyboard(event, localSlotKey!) : undefined} onLostPointerCapture={isLocalSlot ? loseDrag : undefined} onPointerDown={isLocalSlot ? (event) => { event.stopPropagation(); selectLocalSlot(localSlotKey!); startDrag(event, localSlotKey!); } : undefined} role={isLocalSlot ? "button" : undefined} style={style} tabIndex={isLocalSlot ? 0 : undefined}>
             {source ? <img alt={layer.assetRef ? "Published template artwork" : `Local preview for ${localSlotKey} image slot`} className={cn("block select-none", isLocalSlot && "absolute max-w-none")} draggable={false} onLoad={isLocalSlot ? (event) => {
               const { naturalHeight: height, naturalWidth: width } = event.currentTarget;
               if (!localImage || width <= 0 || height <= 0) return;
@@ -333,7 +357,7 @@ export function BrowserTemplatePreview({
                 ? sizes
                 : { ...sizes, [localImage.source]: { width, height } });
             } : undefined} src={source} style={localImageStyle ?? { height: "100%", objectFit: layer.fitMode === "contain" ? "contain" : "cover", transformOrigin: "center", width: "100%" }} /> : <span className="flex h-full items-center justify-center p-1.5 text-center text-[13px] leading-[1.3] text-muted-foreground">{isLocalSlot ? `No local photo assigned to ${localSlotKey}.` : "Published image content is unavailable."}</span>}
-          </div>;
+          </SlotDropSurface>;
           if (layer.kind === "shape") return <div aria-hidden key={layer.id} style={{ ...style, background: shapeBackground(layer) }} />;
           const value = textValues[layer.role] ?? layer.sample ?? "";
           return <div className="flex overflow-hidden leading-[1.12] whitespace-pre-wrap" key={layer.id} style={{ ...style, color: layer.color, fontFamily: layer.fontFamily, fontSize: `${(layer.typeSizePt ?? 12) / 72 / canvas.widthIn * 100}cqw`, fontWeight: layer.fontWeight, letterSpacing: `${layer.trackingEm ?? 0}em`, justifyContent: layer.verticalAlign === "bottom" ? "flex-end" : layer.verticalAlign === "middle" ? "center" : "flex-start", textAlign: layer.align }}>{value}</div>;

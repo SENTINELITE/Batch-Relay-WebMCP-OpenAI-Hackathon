@@ -1,5 +1,8 @@
 "use client";
 
+import type { ReactNode } from "react";
+
+import { photoDropTargetClassName, usePhotoDropTarget } from "@/components/storefront/photo-drag";
 import { fieldControlClassName } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import type { TemplateContract } from "@/lib/storefront/client";
@@ -30,6 +33,13 @@ const selectClassName = cn(
   "appearance-none bg-[image:var(--select-chevron)] bg-[position:right_16px_center] bg-[length:18px_18px] bg-no-repeat pr-11",
 );
 
+/** A slot row that accepts the same drag the live preview accepts, so the two
+ *  places a shopper can see a slot both answer to the photograph tray. */
+function ImageSlotRow({ children, slotKey }: { children: ReactNode; slotKey: string }) {
+  const { connect, isDragActive, isOver, settled } = usePhotoDropTarget({ kind: "template_slot", slotKey });
+  return <label className={cn(rowClassName, photoDropTargetClassName({ isDragActive, isOver, settled }))} ref={connect}>{children}</label>;
+}
+
 export function TemplateSlotAssignment({
   slots,
   photos,
@@ -45,7 +55,7 @@ export function TemplateSlotAssignment({
       <p className="text-base font-semibold text-foreground">Template inputs</p>
       <p className="text-sm text-muted-foreground">Assign photographs using the published stable slot keys. Nothing is matched by a guessed label.</p>
     </div>
-    {slots.map((slot) => slot.kind === "image" ? <label className={rowClassName} key={slot.key}>
+    {slots.map((slot) => slot.kind === "image" ? <ImageSlotRow key={slot.key} slotKey={slot.key}>
       <span className="grid min-w-0 gap-1">
         <span className="text-sm font-semibold text-foreground">{slot.suggested_label ?? `Image ${slot.ordinal + 1}`}{slot.required ? " *" : ""}</span>
         <span className="font-mono text-[13px] break-words text-muted-foreground">{slot.key}</span>
@@ -55,7 +65,7 @@ export function TemplateSlotAssignment({
         <option value="">Unassigned</option>
         {photos.map((photo, index) => <option key={photo.id} value={photo.id}>{String(index + 1).padStart(2, "0")} · {photo.filename}</option>)}
       </select>
-    </label> : <label className={rowClassName} key={slot.key}>
+    </ImageSlotRow> : <label className={rowClassName} key={slot.key}>
       <span className="grid min-w-0 gap-1">
         <span className="text-sm font-semibold text-foreground">{slot.suggested_label ?? `Text ${slot.ordinal + 1}`}{slot.required ? " *" : ""}</span>
         <span className="font-mono text-[13px] break-words text-muted-foreground">{slot.key}</span>
