@@ -5,6 +5,12 @@ import { useDraggablePhoto } from "@/components/storefront/photo-drag";
 import { PrintFrame } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import {
+  coverOverlayRect,
+  faceDebugBadge,
+  type FaceDebugEntry,
+  type FaceDebugMap,
+} from "@/lib/storefront/debug-flags";
+import {
   createBrowserPhotos,
   filesFromPhotoFolder,
   rememberedPhotoFolderHandle,
@@ -16,11 +22,64 @@ import {
 
 type TrayPhotoCardProps = {
   disabled: boolean;
+  /** Present only under the localhost-gated `?debug=faces` overlay. */
+  faceDebug?: FaceDebugEntry;
   onSelect: () => void;
   ordinal: number;
   photo: BrowserPhoto;
   selected: boolean;
 };
+
+/** The aspect of the tray thumbnail window, as handed to `PrintFrame`. */
+const TRAY_THUMBNAIL_ASPECT = 4 / 5;
+
+function percentageBox(rect: { left: number; top: number; width: number; height: number }) {
+  return {
+    left: `${rect.left}%`,
+    top: `${rect.top}%`,
+    width: `${rect.width}%`,
+    height: `${rect.height}%`,
+  };
+}
+
+/**
+ * The developer-only face overlay for one thumbnail.
+ *
+ * Deliberately garish and deliberately unstyled by the design system: magenta
+ * and lime read at a glance as "this is a tool, not the storefront". It is
+ * inert — `pointer-events-none` throughout — so selecting, the drag grip and
+ * dnd all behave exactly as they do with the overlay off.
+ */
+function FaceDebugLayer({ entry, sourceAspectRatio }: { entry: FaceDebugEntry; sourceAspectRatio: number | null }) {
+  const mapped = sourceAspectRatio === null
+    ? []
+    : entry.faces.map((face) => ({ face, rect: coverOverlayRect(face, sourceAspectRatio, TRAY_THUMBNAIL_ASPECT) }));
+  const subject = sourceAspectRatio === null || !entry.subject
+    ? null
+    : coverOverlayRect(entry.subject, sourceAspectRatio, TRAY_THUMBNAIL_ASPECT);
+  return <span
+    aria-hidden="true"
+    className="pointer-events-none absolute inset-0 block overflow-hidden"
+    data-face-debug={entry.state}
+  >
+    {subject ? <span
+      className="absolute block border border-dotted border-[#39ff14]"
+      style={percentageBox(subject)}
+    /> : null}
+    {mapped.map(({ face, rect }, index) => rect === null ? null : <span
+      className="absolute block border-2 border-dashed border-[#ff00c8]"
+      key={index}
+      style={percentageBox(rect)}
+    >
+      <span className="absolute left-0 top-0 bg-black/70 px-0.5 font-mono text-[9px] leading-[1.2] text-[#ff00c8]">
+        {face.confidence.toFixed(2)}
+      </span>
+    </span>)}
+    <span className="absolute bottom-1 right-1 rounded bg-black/75 px-1 py-px font-mono text-[10px] leading-[1.4] text-[#ff00c8]">
+      {faceDebugBadge(entry)}
+    </span>
+  </span>;
+}
 
 /**
  * One tray photograph: a click selects it, and a drag carries it to a print
@@ -31,8 +90,17 @@ type TrayPhotoCardProps = {
  * a click. Keyboard dragging lives on its own handle instead, since Space on
  * the thumbnail must keep selecting.
  */
-function TrayPhotoCard({ disabled, onSelect, ordinal, photo, selected }: TrayPhotoCardProps) {
+function TrayPhotoCard({ disabled, faceDebug, onSelect, ordinal, photo, selected }: TrayPhotoCardProps) {
   const { bodyProps, connect, connectHandle, handleProps, isDragging } = useDraggablePhoto(photo, disabled);
+  // The thumbnail crops with object-cover, so placing a box normalised to the
+  // photograph needs the photograph's own aspect. Measured from the element
+  // that is already on screen rather than by decoding the file a second time.
+  const [sourceAspectRatio, setSourceAspectRatio] = useState<number | null>(null);
+  const measure = (node: HTMLImageElement | null) => {
+    if (!node || !node.complete || node.naturalWidth <= 0 || node.naturalHeight <= 0) return;
+    const aspect = node.naturalWidth / node.naturalHeight;
+    setSourceAspectRatio((current) => current === aspect ? current : aspect);
+  };
   return <li className="w-44 shrink-0">
     <div className="group relative">
       <PrintFrame
@@ -49,7 +117,10 @@ function TrayPhotoCard({ disabled, onSelect, ordinal, photo, selected }: TrayPho
         <button
           aria-current={selected ? "true" : undefined}
           aria-label={`Select image ${ordinal}: ${photo.filename}`}
-          className="block size-full cursor-grab active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-60"
+          className={cn(
+            "block size-full cursor-grab active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-60",
+            faceDebug && "relative",
+          )}
           disabled={disabled}
           onClick={onSelect}
           // The tray scrolls horizontally by touch, so the body deliberately
@@ -59,7 +130,15 @@ function TrayPhotoCard({ disabled, onSelect, ordinal, photo, selected }: TrayPho
         >
           {/* Object URLs are browser-local and intentionally not optimized through a remote loader. */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img alt="" className="size-full object-cover" draggable={false} src={photo.previewURL} />
+          <img
+            alt=""
+            className="size-full object-cover"
+            draggable={false}
+            onLoad={faceDebug ? (event) => measure(event.currentTarget) : undefined}
+            ref={faceDebug ? measure : undefined}
+            src={photo.previewURL}
+          />
+          {faceDebug ? <FaceDebugLayer entry={faceDebug} sourceAspectRatio={sourceAspectRatio} /> : null}
         </button>
       </PrintFrame>
       {disabled ? null : <button
@@ -101,6 +180,13 @@ export type PhotoTrayProps = {
   disabled?: boolean;
   className?: string;
   onImportError?: (message: string) => void;
+  /**
+   * Face boxes to draw over the thumbnails, by photo id. Supplied only when the
+   * localhost-gated `?debug=faces` overlay is on; left undefined the tray
+   * renders exactly as it always has. This never triggers detection — it shows
+   * what the existing lazy pass has already found.
+   */
+  faceDebug?: FaceDebugMap;
 };
 
 const hiddenInputStyle = {
@@ -116,7 +202,7 @@ const hiddenInputStyle = {
 const pickerActionClassName =
   "cursor-pointer text-[15px] font-medium text-foreground underline decoration-border-strong underline-offset-[5px] transition-colors duration-200 ease-[var(--ease-out-expo)] hover:decoration-foreground disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none";
 
-export function PhotoTray({ library, onAction, disabled = false, className, onImportError }: PhotoTrayProps) {
+export function PhotoTray({ library, onAction, disabled = false, className, onImportError, faceDebug }: PhotoTrayProps) {
   const [dropActive, setDropActive] = useState(false);
   const [error, setError] = useState("");
   const [edgeFade, setEdgeFade] = useState({ left: false, right: false });
@@ -268,6 +354,7 @@ export function PhotoTray({ library, onAction, disabled = false, className, onIm
       >
         {library.photos.map((photo, index) => <TrayPhotoCard
           disabled={disabled}
+          faceDebug={faceDebug?.[photo.id]}
           key={photo.id}
           onSelect={() => onAction({ type: "select", photoId: photo.id })}
           ordinal={index + 1}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import {
   type CatalogProduct,
   type IngestedAsset,
@@ -79,6 +79,7 @@ import {
   type ReviewSlot,
 } from "@/lib/storefront/print-review";
 import { detectFaces, faceDetectionAvailable, type FaceBox } from "@/lib/storefront/face-detection";
+import { faceDebugEnabled, type FaceDebugEntry, type FaceDebugMap } from "@/lib/storefront/debug-flags";
 import {
   agentDraftPlacement,
   emptyShopperViewContext,
@@ -326,6 +327,19 @@ function rememberTemplatePreference(product: CatalogProduct, templateId: string,
   }
 }
 
+/**
+ * The URL cannot change under this page without a reload, so the store has
+ * nothing to publish and the unsubscribe is a no-op.
+ */
+function subscribeToNothing(): () => void {
+  return () => {};
+}
+
+/** Whether the developer face overlay may run here. Never true on the server. */
+function readFaceDebugFlag(): boolean {
+  return typeof window === "undefined" ? false : faceDebugEnabled(window.location);
+}
+
 export function ManualStorefront() {
   const [catalog, setCatalog] = useState<CatalogProduct[]>([]);
   const [catalogState, setCatalogState] = useState<"loading" | "ready" | "error">("loading");
@@ -390,6 +404,19 @@ export function ManualStorefront() {
   // report those two as different answers, so readiness is tracked separately.
   const photoFaceJobsRef = useRef<Record<string, Promise<readonly FaceBox[]>>>({});
   const photoFacesResolvedRef = useRef<Record<string, true>>({});
+  // The localhost-only face overlay (`?debug=faces`). Decided once, after
+  // mount, because the gate reads the host actually serving the page and the
+  // server has no opinion about that. Off means the tray is handed nothing.
+  // Read through useSyncExternalStore rather than an effect: the URL is an
+  // external value that never changes for the life of this page, so there is
+  // one client answer, one server answer (never on), and no render cascade.
+  const faceDebugOn = useSyncExternalStore(subscribeToNothing, readFaceDebugFlag, () => false);
+  const faceDebugRef = useRef(false);
+  useEffect(() => { faceDebugRef.current = faceDebugOn; }, [faceDebugOn]);
+  // Detection results live in refs, so a pass finishing does not by itself
+  // repaint anything. This exists only to nudge a render while the overlay is
+  // on; its value is never read, exactly like `setPhotoFaces` above.
+  const [, setFaceDebugRevision] = useState(0);
   // Which drafts were made behind the shopper's screen, so a proposal card can
   // say the print was found in the catalog rather than chosen on screen.
   const backgroundDraftIds = useRef<Set<string>>(new Set());
@@ -569,6 +596,9 @@ export function ManualStorefront() {
         // refs outlive the effect deliberately: a re-render must not turn a
         // finished answer back into "not ready".
         photoFacesResolvedRef.current[photo.id] = true;
+        // "Looked at and found nobody" is invisible without this: it publishes
+        // no faces, so only the debug overlay has any reason to repaint.
+        if (live && faceDebugRef.current) setFaceDebugRevision((revision) => revision + 1);
         return faces;
       });
       photoFaceJobsRef.current[photo.id] = job;
@@ -3093,6 +3123,26 @@ export function ManualStorefront() {
     })();
   }));
 
+  /**
+   * What the tray should draw over each thumbnail, read straight from the
+   * detection refs. It never starts a detection pass — a photograph the lazy
+   * pass has not reached yet simply reads as pending.
+   */
+  function buildFaceDebugMap(): FaceDebugMap {
+    const entries: Record<string, FaceDebugEntry> = {};
+    for (const photo of photoLibrary.photos) {
+      const faces = photoFacesRef.current[photo.id] ?? null;
+      const resolved = photoFacesResolvedRef.current[photo.id] === true;
+      const state: FaceDebugEntry["state"] = faces && faces.length > 0
+        ? "faces"
+        : !resolved
+          ? "pending"
+          : faceDetectionAvailable() ? "none" : "unavailable";
+      entries[photo.id] = { faces: faces ?? [], state, subject: subjectRegionFromFaces(faces) };
+    }
+    return entries;
+  }
+
   return <PhotoDragProvider onDropPhoto={dropPhotoOnPrintTarget} photos={photoLibrary.photos}>
     <StorefrontMasthead
       cartAcknowledgement={cartAcknowledgement}
@@ -3101,7 +3151,12 @@ export function ManualStorefront() {
       onOpenCart={() => setCartOpen(true)}
       onOpenHome={() => setStep("catalog")}
     />
-    <PhotoTray library={photoLibrary} onAction={handlePhotoAction} onImportError={(message) => setNotice({ tone: "error", message })} />
+    <PhotoTray
+      faceDebug={faceDebugOn ? buildFaceDebugMap() : undefined}
+      library={photoLibrary}
+      onAction={handlePhotoAction}
+      onImportError={(message) => setNotice({ tone: "error", message })}
+    />
 
     <main className="mx-auto w-full max-w-[1400px] px-5 pb-16 sm:px-8 lg:px-12">
 
