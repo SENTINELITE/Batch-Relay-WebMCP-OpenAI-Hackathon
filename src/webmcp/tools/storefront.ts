@@ -1,6 +1,10 @@
 import { defineTool } from "@nekuda/webmcp-sdk";
 
 import {
+  requireIdentifierAlias,
+  withResolvedIdentifierAliases,
+} from "../../lib/storefront/tool-input";
+import {
   getStorefrontWebMcpState,
   requestStorefrontWebMcpAction,
 } from "../storefront-bridge";
@@ -40,6 +44,8 @@ type DirectCrop = {
 
 type ConfigurePrintInput = {
   draftId?: string;
+  /** Alias for draftId, the name it is returned under. */
+  draft_id?: string;
   trayRevision: number;
   productId?: string;
   productQuery?: string;
@@ -52,13 +58,17 @@ type ConfigurePrintInput = {
 };
 
 type AddToCartInput = {
-  draftId: string;
+  draftId?: string;
+  /** Alias for draftId, the name it is returned under. */
+  draft_id?: string;
   quantity?: number;
 };
 
 type ResolveCartProposalInput = {
-  proposalId: string;
-  decision: "accept" | "reject";
+  proposalId?: string;
+  /** Alias for proposalId, the name it is returned under. */
+  proposal_id?: string;
+  decision: "accept" | "reject" | "accept_all" | "reject_all";
   shopperConfirmation: string;
 };
 
@@ -129,11 +139,12 @@ export const configurePrint = defineTool<ConfigurePrintInput>({
   name: "configure_print",
   title: "Configure a print from the photo tray",
   description:
-    "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
+    "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. It never takes the screen away from a shopper who is customizing a print by hand: a new draft made while they are working on another one waits in the draft rail instead, and the response says which happened with placed on_screen or draft_rail and a matching visible flag. Narrate that honestly — when a draft was placed in the draft rail, do not tell the shopper they are looking at it; adding it will show them a proposal card carrying its own live preview. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
   inputSchema: {
     type: "object",
     properties: {
       draftId: { type: "string", minLength: 1 },
+      draft_id: { type: "string", minLength: 1 },
       trayRevision: { type: "integer", minimum: 0 },
       photoRefs: {
         type: "array",
@@ -199,23 +210,24 @@ export const configurePrint = defineTool<ConfigurePrintInput>({
       "configure a print from the visible photo tray",
     );
     requireCurrentTrayRevision(input.trayRevision);
-    return requestStorefrontWebMcpAction("configure_print", input);
+    return requestStorefrontWebMcpAction("configure_print", withResolvedIdentifierAliases(input, [["draftId", "draft_id"]]));
   },
 });
 
 export const addToCart = defineTool<AddToCartInput>({
   stableKey: "storefront.add_to_cart",
   name: "add_to_cart",
-  title: "Propose a prepared print for the demo cart",
+  title: "Add or propose a prepared print for the demo cart",
   description:
-    "Use when a shopper wants a complete visible print draft added to this browser's demo cart. Takes the draft_id returned by configure_print or listed by ask_storefront, and works from whichever step the shopper is already looking at without navigating them anywhere. Shows a picture-in-picture proposal card with a live preview and returns immediately without waiting: this only proposes, and the proposal now awaits the SHOPPER's decision, made by clicking the card or saying so in their own words. Stop here and tell the shopper the card is waiting; asking you to add something to the cart is a request for this proposal, never confirmation of it, so you must not resolve your own proposal. It never renders fulfillment artwork, charges a card, or creates an order.",
+    "Use when a shopper wants a complete visible print draft added to this browser's demo cart. Takes the draft_id returned by configure_print or listed by ask_storefront — either draftId or draft_id is accepted, so the ID can be copied straight out of the response it came from — and works from whichever step the shopper is already looking at without navigating them anywhere. What happens next depends on what the shopper can see, and the returned status says which: when the named draft is the one whose live preview they already have on screen, the print is added outright, returning status added, because that preview was the pre-visualization, and the masthead cart chip flashes the new count. When it is any other draft, a print they have not seen, this only proposes, returning status awaiting_shopper_confirmation with a proposal_id and the resulting pending_proposal_count: a picture-in-picture card shows them the print and the call returns immediately without waiting, and that proposal awaits the SHOPPER's decision, made by clicking the card or saying so in their own words. Proposals stack, so you may propose several prints in a row without resolving each one first; every card in the stack waits on the shopper individually. Proposing a draft that already has a card waiting returns that same card rather than a duplicate. On a proposal, stop and tell the shopper the card is waiting; asking you to add something to the cart is a request for that proposal, never confirmation of it, so you must not resolve your own proposal. It never renders fulfillment artwork, charges a card, or creates an order.",
   inputSchema: {
     type: "object",
     properties: {
       draftId: { type: "string", minLength: 1 },
+      draft_id: { type: "string", minLength: 1 },
       quantity: { type: "integer", minimum: 1, maximum: 99, default: 1 },
     },
-    required: ["draftId"],
+    anyOf: [{ required: ["draftId"] }, { required: ["draft_id"] }],
     additionalProperties: false,
   },
   async execute(input) {
@@ -223,11 +235,15 @@ export const addToCart = defineTool<AddToCartInput>({
     // draft, which can name the exact missing slot. Refusing here on the
     // whole-storefront canAddToCart flag would only turn that into a vaguer
     // error, and would wrongly refuse the first draft of a session.
-    const state = getStorefrontWebMcpState();
-    if (state.pendingProposal) {
-      throw new Error("A cart proposal is already waiting on the shopper; resolve it with resolve_cart_proposal first.");
-    }
-    return requestStorefrontWebMcpAction("add_to_cart", input);
+    //
+    // Nothing here refuses a second proposal either: the cards stack, and the
+    // shopper answers each one. Blocking on a card already waiting made a
+    // perfectly reasonable "add both of these" impossible to carry out.
+    const raw = input as unknown as Record<string, unknown>;
+    // Checked here so a missing ID is refused in words naming both spellings,
+    // rather than by the schema's opaque "Tool requires: draftId".
+    requireIdentifierAlias(raw, "draftId", "draft_id", "add_to_cart needs the ID of the visible draft to add or propose.");
+    return requestStorefrontWebMcpAction("add_to_cart", withResolvedIdentifierAliases(raw, [["draftId", "draft_id"]]));
   },
 });
 
@@ -236,20 +252,21 @@ export const resolveCartProposal = defineTool<ResolveCartProposalInput>({
   name: "resolve_cart_proposal",
   title: "Resolve a pending cart proposal",
   description:
-    "Use exclusively to relay the shopper's own explicit decision about the visible picture-in-picture proposal card, spoken by them after that card appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Acts exactly as the two visible buttons would and returns the resulting cart state.",
+    "Use exclusively to relay the shopper's own explicit decision about the picture-in-picture proposal cards stacked in the corner, spoken by them after those cards appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Use decision accept or reject with the proposalId of one card — either proposalId or proposal_id is accepted, so the ID can be copied straight out of the response it came from — and that card alone is resolved while the rest keep waiting. When the shopper answers the whole stack at once, in words like add them all or none of those, use decision accept_all or reject_all and leave proposalId out; their words still go in shopperConfirmation and apply to the batch. Acts exactly as the visible buttons would, and returns every proposal it resolved plus the resulting cart state.",
   inputSchema: {
     type: "object",
     properties: {
       proposalId: { type: "string", minLength: 1 },
-      decision: { type: "string", enum: ["accept", "reject"] },
+      proposal_id: { type: "string", minLength: 1 },
+      decision: { type: "string", enum: ["accept", "reject", "accept_all", "reject_all"] },
       shopperConfirmation: { type: "string", minLength: 1 },
     },
-    required: ["proposalId", "decision", "shopperConfirmation"],
+    required: ["decision", "shopperConfirmation"],
     additionalProperties: false,
   },
   async execute(input) {
     requireVisibleCapability(
-      getStorefrontWebMcpState().pendingProposal,
+      getStorefrontWebMcpState().pendingProposalCount > 0,
       "resolve a cart proposal while none is visible",
     );
     // The quote is the whole point of the parameter: an empty one means the
@@ -259,7 +276,18 @@ export const resolveCartProposal = defineTool<ResolveCartProposalInput>({
         "shopperConfirmation must quote the shopper's own words accepting or declining the visible proposal. If they have not answered yet, ask them and wait.",
       );
     }
-    return requestStorefrontWebMcpAction("resolve_cart_proposal", input);
+    const raw = input as unknown as Record<string, unknown>;
+    // A single-card decision needs to say which card; accept_all and reject_all
+    // are the shopper answering the whole stack, so they take no ID.
+    if (input.decision === "accept" || input.decision === "reject") {
+      requireIdentifierAlias(
+        raw,
+        "proposalId",
+        "proposal_id",
+        `resolve_cart_proposal with decision ${input.decision} needs the ID of the one card being answered; use accept_all or reject_all for the whole stack.`,
+      );
+    }
+    return requestStorefrontWebMcpAction("resolve_cart_proposal", withResolvedIdentifierAliases(raw, [["proposalId", "proposal_id"]]));
   },
 });
 

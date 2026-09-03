@@ -14,6 +14,7 @@ export type CartSheetProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onRemoveItem: (itemId: string) => void;
+  onUpdateQuantity: (itemId: string, quantity: number) => void;
   onConfirmCheckout: () => void;
 };
 
@@ -47,6 +48,7 @@ export function CartSheet({
   open,
   onOpenChange,
   onRemoveItem,
+  onUpdateQuantity,
   onConfirmCheckout,
 }: CartSheetProps) {
   const [checkingOut, setCheckingOut] = useState(false);
@@ -193,8 +195,27 @@ export function CartSheet({
                       <div className="min-w-0 flex-1">
                         <b className="block truncate text-[14px] font-semibold">{item.productName}</b>
                         <small className="block text-[13px] text-muted-foreground">
-                          Qty {item.quantity} · {item.source}
+                          {item.source}
                         </small>
+                      </div>
+                      <div aria-label={`Quantity for ${item.productName}`} className="flex items-center gap-1" role="group">
+                        <Button
+                          aria-label={`Decrease ${item.productName} quantity`}
+                          disabled={item.quantity <= 1}
+                          onClick={() => onUpdateQuantity(item.id, item.quantity - 1)}
+                          variant="ghost"
+                        >
+                          −
+                        </Button>
+                        <span className="min-w-7 text-center font-mono text-[13px]" aria-live="polite">{item.quantity}</span>
+                        <Button
+                          aria-label={`Increase ${item.productName} quantity`}
+                          disabled={item.quantity >= 99}
+                          onClick={() => onUpdateQuantity(item.id, item.quantity + 1)}
+                          variant="ghost"
+                        >
+                          +
+                        </Button>
                       </div>
                       <Button
                         aria-label={`Remove ${item.productName}`}

@@ -106,22 +106,22 @@ const approvedTools = [
     exportName: "configurePrint",
     stableKey: "storefront.prepare_print_images",
     name: "configure_print",
-    description: "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
-    fields: ["draftId", "trayRevision", "photoRefs", "productId", "productQuery", "templateId", "outputId", "orientation", "slotPatches", "directCrop"],
+    description: "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. It never takes the screen away from a shopper who is customizing a print by hand: a new draft made while they are working on another one waits in the draft rail instead, and the response says which happened with placed on_screen or draft_rail and a matching visible flag. Narrate that honestly — when a draft was placed in the draft rail, do not tell the shopper they are looking at it; adding it will show them a proposal card carrying its own live preview. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
+    fields: ["draftId", "draft_id", "trayRevision", "photoRefs", "productId", "productQuery", "templateId", "outputId", "orientation", "slotPatches", "directCrop"],
   },
   {
     exportName: "addToCart",
     stableKey: "storefront.add_to_cart",
     name: "add_to_cart",
-    description: "Use when a shopper wants a complete visible print draft added to this browser's demo cart. Takes the draft_id returned by configure_print or listed by ask_storefront, and works from whichever step the shopper is already looking at without navigating them anywhere. Shows a picture-in-picture proposal card with a live preview and returns immediately without waiting: this only proposes, and the proposal now awaits the SHOPPER's decision, made by clicking the card or saying so in their own words. Stop here and tell the shopper the card is waiting; asking you to add something to the cart is a request for this proposal, never confirmation of it, so you must not resolve your own proposal. It never renders fulfillment artwork, charges a card, or creates an order.",
-    fields: ["draftId", "quantity"],
+    description: "Use when a shopper wants a complete visible print draft added to this browser's demo cart. Takes the draft_id returned by configure_print or listed by ask_storefront — either draftId or draft_id is accepted, so the ID can be copied straight out of the response it came from — and works from whichever step the shopper is already looking at without navigating them anywhere. What happens next depends on what the shopper can see, and the returned status says which: when the named draft is the one whose live preview they already have on screen, the print is added outright, returning status added, because that preview was the pre-visualization, and the masthead cart chip flashes the new count. When it is any other draft, a print they have not seen, this only proposes, returning status awaiting_shopper_confirmation with a proposal_id and the resulting pending_proposal_count: a picture-in-picture card shows them the print and the call returns immediately without waiting, and that proposal awaits the SHOPPER's decision, made by clicking the card or saying so in their own words. Proposals stack, so you may propose several prints in a row without resolving each one first; every card in the stack waits on the shopper individually. Proposing a draft that already has a card waiting returns that same card rather than a duplicate. On a proposal, stop and tell the shopper the card is waiting; asking you to add something to the cart is a request for that proposal, never confirmation of it, so you must not resolve your own proposal. It never renders fulfillment artwork, charges a card, or creates an order.",
+    fields: ["draftId", "draft_id", "quantity"],
   },
   {
     exportName: "resolveCartProposal",
     stableKey: "storefront.resolve_cart_proposal",
     name: "resolve_cart_proposal",
-    description: "Use exclusively to relay the shopper's own explicit decision about the visible picture-in-picture proposal card, spoken by them after that card appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Acts exactly as the two visible buttons would and returns the resulting cart state.",
-    fields: ["proposalId", "decision", "shopperConfirmation"],
+    description: "Use exclusively to relay the shopper's own explicit decision about the picture-in-picture proposal cards stacked in the corner, spoken by them after those cards appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Use decision accept or reject with the proposalId of one card — either proposalId or proposal_id is accepted, so the ID can be copied straight out of the response it came from — and that card alone is resolved while the rest keep waiting. When the shopper answers the whole stack at once, in words like add them all or none of those, use decision accept_all or reject_all and leave proposalId out; their words still go in shopperConfirmation and apply to the batch. Acts exactly as the visible buttons would, and returns every proposal it resolved plus the resulting cart state.",
+    fields: ["proposalId", "proposal_id", "decision", "shopperConfirmation"],
   },
   {
     exportName: "manageCart",
@@ -177,20 +177,84 @@ test("cart proposals use completed visible draft IDs, not product or offer ident
   const source = await read("src/webmcp/tools/storefront.ts");
   const cart = toolDefinition(source, "addToCart");
   const resolve = toolDefinition(source, "resolveCartProposal");
-  assert.match(inputSchema(cart), /required:\s*\["draftId"\]/);
+  // Either spelling satisfies the schema, so an ID copied out of a response
+  // that reports draft_id is not rejected for saying draft_id.
+  assert.match(inputSchema(cart), /anyOf:\s*\[\{\s*required:\s*\["draftId"\]\s*\},\s*\{\s*required:\s*\["draft_id"\]\s*\}\]/);
   assert.doesNotMatch(inputSchema(cart), /\b(?:productId|offerId)\b/);
   assert.match(inputSchema(cart), /quantity:\s*\{\s*type:\s*"integer",\s*minimum:\s*1,\s*maximum:\s*99,\s*default:\s*1\s*\}/);
-  assert.match(inputSchema(resolve), /required:\s*\["proposalId",\s*"decision",\s*"shopperConfirmation"\]/);
-  assert.match(inputSchema(resolve), /decision:\s*\{\s*type:\s*"string",\s*enum:\s*\["accept",\s*"reject"\]\s*\}/);
+  // proposalId is required only for a single-card decision; accept_all and
+  // reject_all answer the whole stack and name no card. The handler enforces
+  // that, so it can say which of the two mistakes was made.
+  assert.match(inputSchema(resolve), /required:\s*\["decision",\s*"shopperConfirmation"\]/);
+  assert.match(inputSchema(resolve), /decision:\s*\{\s*type:\s*"string",\s*enum:\s*\["accept",\s*"reject",\s*"accept_all",\s*"reject_all"\]\s*\}/);
+  assert.match(resolve, /requireIdentifierAlias\(\s*raw,\s*"proposalId",\s*"proposal_id"/);
   assert.doesNotMatch(source, /name:\s*"render_template_preview"/);
 });
 
-test("add_to_cart returns without blocking and refuses to stack proposals", async () => {
+test("add_to_cart returns without blocking and stacks a second proposal instead of refusing it", async () => {
+  // Refusing while a card was already waiting made "add both of these" a
+  // request the agent could not carry out: the first proposal blocked the
+  // second, and only the shopper could unblock it. The cards stack instead,
+  // and each one waits on the shopper individually.
   const source = await read("src/webmcp/tools/storefront.ts");
   const cart = toolDefinition(source, "addToCart");
-  assert.match(cart, /state\.pendingProposal/);
-  assert.match(cart, /resolve_cart_proposal first/);
-  assert.match(toolDefinition(source, "resolveCartProposal"), /getStorefrontWebMcpState\(\)\.pendingProposal/);
+  assert.doesNotMatch(cart, /pendingProposal/);
+  assert.doesNotMatch(cart, /resolve_cart_proposal first/);
+  assert.match(cart, /Proposals stack/);
+  // Resolving still needs at least one visible card to answer.
+  assert.match(toolDefinition(source, "resolveCartProposal"), /getStorefrontWebMcpState\(\)\.pendingProposalCount > 0/);
+
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  const handler = ui.slice(ui.indexOf('request.action === "add_to_cart"'), ui.indexOf('request.action === "resolve_cart_proposal"'));
+  assert.doesNotMatch(handler, /is still waiting on the shopper/);
+  // A second card for a draft that already has one asks nothing new, so the
+  // standing proposal is returned rather than a twin.
+  assert.match(ui, /pendingCartProposalForDraft\(proposalStack, draft\.id\)/);
+  assert.match(handler, /duplicate_of_pending_proposal: duplicate/);
+  assert.match(handler, /pending_proposal_count: stackCount/);
+});
+
+test("either casing of an ID is accepted, because that is the casing the responses use", async () => {
+  // A real failure: the responses report draft_id and proposal_id, the schemas
+  // wanted draftId and proposalId, and an agent copying an ID out of the
+  // response it had just read was rejected with only "Tool requires: draftId".
+  const [tools, ui, aliases] = await Promise.all([
+    read("src/webmcp/tools/storefront.ts"),
+    read("src/components/storefront/manual-storefront.tsx"),
+    read("src/lib/storefront/tool-input.ts"),
+  ]);
+  for (const [exportName, camelCase, snakeCase] of [
+    ["configurePrint", "draftId", "draft_id"],
+    ["addToCart", "draftId", "draft_id"],
+    ["resolveCartProposal", "proposalId", "proposal_id"],
+  ]) {
+    const schema = inputSchema(toolDefinition(tools, exportName));
+    assert.match(schema, new RegExp(String.raw`${camelCase}:\s*\{\s*type:\s*"string"`));
+    assert.match(schema, new RegExp(String.raw`${snakeCase}:\s*\{\s*type:\s*"string"`));
+    // Exactly one spelling reaches the workbench.
+    assert.match(toolDefinition(tools, exportName), new RegExp(String.raw`withResolvedIdentifierAliases\([\s\S]*?\["${camelCase}", "${snakeCase}"\]`));
+  }
+  // Two different values under the two names is a real mistake, not a casing
+  // accident, and is named as one.
+  assert.match(aliases, /provide exactly one/);
+  // The workbench reads both spellings too, so neither entry point is stricter.
+  assert.match(ui, /requireIdentifierAlias\(\s*request\.input,\s*"draftId",\s*"draft_id"/);
+  assert.match(ui, /readIdentifierAlias\(request\.input, "proposalId", "proposal_id"\)/);
+});
+
+test("the shopper can answer the whole stack in one sentence", async () => {
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  const handler = ui.slice(ui.indexOf('request.action === "resolve_cart_proposal"'), ui.indexOf("const action = request.input.action;"));
+  // accept_all and reject_all are the shopper's own "add them all", so they
+  // still demand their words; the quote applies to the batch.
+  assert.match(handler, /const bulk = requestedDecision === "accept_all" \|\| requestedDecision === "reject_all"/);
+  assert.match(handler, /shopperConfirmation/);
+  assert.match(handler, /targets = pendingProposals;/);
+  // A single decision must name the card it answers.
+  assert.match(handler, /pendingProposals\.find\(\(candidate\) => candidate\.id === proposalId\)/);
+  // The response says what it resolved and what is left waiting.
+  assert.match(handler, /resolved: targets\.map\(/);
+  assert.match(handler, /pending_proposal_count: remaining/);
 });
 
 test("only the shopper resolves a proposal, and their own words must be quoted", async () => {
@@ -216,6 +280,46 @@ test("only the shopper resolves a proposal, and their own words must be quoted",
   assert.match(handler, /request\.input\.shopperConfirmation/);
   assert.match(handler, /shopper_confirmation: shopperConfirmation/);
   assert.match(handler, /decided_by: "shopper"/);
+});
+
+test("add_to_cart adds outright only for the draft the shopper is already watching", async () => {
+  // "Add the memory mate" while looking at the memory mate is answered by the
+  // preview on screen, so a card asking about it is ceremony. "Also add a 5x7 of
+  // image 13" names a print the shopper has never seen, so that one still has to
+  // be shown to them before it can enter the cart.
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  const addToCart = ui.slice(ui.indexOf('request.action === "add_to_cart"'), ui.indexOf('request.action === "resolve_cart_proposal"'));
+  assert.match(addToCart, /isShopperVisibleDraft\(shopperViewRef\.current, draft\.id, Date\.now\(\)\)/);
+  assert.match(addToCart, /status: "added"/);
+  assert.match(addToCart, /decided_by: "shopper_visible_context"/);
+  assert.match(addToCart, /addDraftToCart\(draft, requestedQuantity\)/);
+  // The unseen print keeps the whole proposal protocol.
+  assert.match(addToCart, /proposeDraft\(draft, requestedQuantity\)/);
+  assert.match(addToCart, /status: "awaiting_shopper_confirmation"/);
+
+  // A draft only counts as watched after the shopper interacts with the
+  // current push/pop workbench. Agent configuration never creates that proof,
+  // and there is deliberately no visible-draft rail to switch between drafts.
+  const configure = ui.slice(ui.indexOf('request.action === "configure_print"'), ui.indexOf('request.action === "add_to_cart"'));
+  assert.match(configure, /noteVisibleDraft\(draft\.id, "agent"\)/);
+  assert.match(ui, /function noteShopperLookingAtSelectedDraft\(\) \{[\s\S]*?noteVisibleDraft\(selectedDraftId, "shopper"\)/);
+  assert.doesNotMatch(ui, /DraftRail|function selectDraft\(/);
+});
+
+test("the shopper's own Add to cart button adds without a proposal card", async () => {
+  const [ui, prepare] = await Promise.all([
+    read("src/components/storefront/manual-storefront.tsx"),
+    read("src/components/storefront/prepare-step.tsx"),
+  ]);
+  assert.match(prepare, /onClick=\{onAddPreparedLine\}[\s\S]*?>\s*Add to cart\s*</);
+  assert.doesNotMatch(prepare, /Propose this print/);
+  const handler = ui.slice(ui.indexOf("onAddPreparedLine="), ui.indexOf("onAssignTemplatePhoto="));
+  assert.match(handler, /addDraftToCart\(selectedDraft, 1\)/);
+  assert.doesNotMatch(handler, /proposeDraft\(/);
+  // The chip pulse is the acknowledgment, and no sheet steals the step.
+  const add = ui.slice(ui.indexOf("function addDraftToCart("), ui.indexOf("function proposeDraft("));
+  assert.match(add, /setCartAcknowledgement\(/);
+  assert.doesNotMatch(add, /setCartOpen\(|setPendingProposal\(/);
 });
 
 test("a proposal returns as a question for the shopper, not a step the agent may finish", async () => {
@@ -271,7 +375,8 @@ test("readiness is enforced by the tool and the workbench, never by the tool bei
   // which slot is missing; the storefront-wide flag would wrongly refuse the
   // first draft of a session.
   assert.doesNotMatch(addToCart, /requireVisibleCapability\(/);
-  assert.match(addToCart, /state\.pendingProposal/);
+  // Nor by a card already waiting: proposals stack.
+  assert.doesNotMatch(addToCart, /pendingProposal/);
   assert.match(toolDefinition(tools, "configurePrint"), /state\.canConfigurePrint\s*&&\s*state\.photoCount\s*>\s*0/);
 });
 
@@ -310,9 +415,15 @@ test("the masthead cart chip is the only opener of the cart sheet", async () => 
   assert.match(cartSheet, /aria-label="Close demo cart"/);
   assert.match(cartSheet, /onClick=\{close\}/);
   assert.match(cartSheet, /onOpenChange\(false\);/);
+  assert.match(cartSheet, /onUpdateQuantity: \(itemId: string, quantity: number\) => void;/);
+  assert.match(cartSheet, /Decrease \$\{item\.productName\} quantity/);
+  assert.match(cartSheet, /Increase \$\{item\.productName\} quantity/);
+  assert.match(cartSheet, /disabled=\{item\.quantity <= 1\}/);
+  assert.match(cartSheet, /disabled=\{item\.quantity >= 99\}/);
 
   assert.match(ui, /onOpenCart=\{\(\) => setCartOpen\(true\)\}/);
   assert.match(ui, /open=\{cartOpen\}/);
+  assert.match(ui, /onUpdateQuantity=\{\(itemId, quantity\) => setCart\(/);
   // No persistent cart lives in a page corner any more.
   assert.doesNotMatch(ui, /FloatingCartBar|fixed bottom-5 right-5/);
 });
@@ -322,8 +433,8 @@ test("accepting a proposal acknowledges on the chip without opening the cart", a
     read("src/components/storefront/storefront-masthead.tsx"),
     read("src/components/storefront/manual-storefront.tsx"),
   ]);
-  const resolve = ui.slice(ui.indexOf("function resolveProposal("), ui.indexOf("publishStorefrontWebMcpState({"));
-  assert.ok(resolve.length > 0, "expected a resolveProposal body");
+  const resolve = ui.slice(ui.indexOf("function resolveProposals("), ui.indexOf("publishStorefrontWebMcpState({"));
+  assert.ok(resolve.length > 0, "expected a resolveProposals body");
   assert.match(resolve, /setCartAcknowledgement\(/);
   assert.doesNotMatch(resolve, /setCartOpen\(/);
   assert.match(masthead, /animate-cart-ack/);
@@ -345,4 +456,145 @@ test("WebMCP does not expose photo reorder or deletion operations", async () => 
   const browserContract = `${tools}\n${bridge}\n${registrar}`;
   assert.doesNotMatch(browserContract, /["'](?:reorder|delete|remove|move)_(?:photo|photos|tray)["']/);
   assert.doesNotMatch(browserContract, /stableKey:\s*["']storefront\.(?:reorder|delete|remove|move)[_.](?:photo|photos|tray)["']/);
+});
+
+test("an agent-created draft never takes the screen from a shopper customizing one by hand", async () => {
+  const source = await read("src/components/storefront/manual-storefront.tsx");
+  // The placement decision is the pure rule, asked before anything moves.
+  assert.match(source, /const placement: DraftPlacement = agentDraftPlacement\(shopperViewRef\.current, selectedDraftId, draft\.id\)/);
+  assert.match(source, /const onScreen = placement === "on_screen"/);
+  // Selecting the draft, loading the product into the workbench and moving the
+  // tray selection are all gated on that decision.
+  const configureBlock = source.slice(source.indexOf("const placement: DraftPlacement"));
+  const gated = configureBlock.slice(0, configureBlock.indexOf("const directCrop"));
+  assert.match(gated, /if \(onScreen\) \{[\s\S]*setSelectedDraftId\(draft\.id\)/);
+  assert.match(gated, /if \(onScreen\) \{[\s\S]*selectProduct\(product, false, false\)/);
+  assert.match(gated, /if \(onScreen\) \{[\s\S]*dispatchPhotoLibrary\(\{ type: "select"/);
+  // A background draft resolves its template as a pure read, so no workbench
+  // state is disturbed while the shopper works.
+  assert.match(source, /offScreenTemplate = await resolveTemplateOffScreen\(product, draft, \{/);
+  // And the tool says which happened, so the agent can narrate honestly.
+  assert.match(source, /placed: placement/);
+  assert.match(source, /visible: onScreen/);
+});
+
+test("a background draft leaves the shopper-view context alone so add_to_cart still proposes", async () => {
+  const source = await read("src/components/storefront/manual-storefront.tsx");
+  const configureBlock = source.slice(source.indexOf("const placement: DraftPlacement"));
+  const gated = configureBlock.slice(0, configureBlock.indexOf("const directCrop"));
+  // noteVisibleDraft is reached only on the on-screen path. Leaving the context
+  // pointing at the shopper's own draft is what makes the new one off-screen for
+  // add_to_cart: its dwell never starts, so it lands on the proposal card.
+  assert.match(gated, /if \(onScreen\) \{[\s\S]*noteVisibleDraft\(draft\.id, "agent"\)/);
+  assert.doesNotMatch(gated.replace(/if \(onScreen\) \{[\s\S]*?\n {10}\}/, ""), /noteVisibleDraft/);
+});
+
+test("the proposal card paints the proposed draft itself, not whatever is selected", async () => {
+  const [source, stack] = await Promise.all([
+    read("src/components/storefront/manual-storefront.tsx"),
+    read("src/components/storefront/cart-proposal-stack.tsx"),
+  ]);
+  const binding = source.slice(
+    source.indexOf("function proposalPreviewBinding("),
+    source.indexOf("// Safety net for proposed template drafts"),
+  );
+  assert.ok(binding.length > 0, "expected a per-proposal preview binding");
+  // The old binding showed a preview only when the proposed draft happened to
+  // be the selected one, which is never true for the print worth proposing.
+  assert.doesNotMatch(binding, /selectedDraftId/);
+  assert.doesNotMatch(binding, /browserPreviewDocument/);
+  // It binds its own document, its own assets, and the draft's own snapshot of
+  // slot assignments, framing and text.
+  assert.match(binding, /document=\{proposalPreviewDocument\}/);
+  assert.match(binding, /assetURLs=\{proposalPreviewAssetURLs\}/);
+  assert.match(binding, /localImageSlots=\{proposalPreviewImageSlots\}/);
+  assert.match(binding, /textValues=\{proposal\.draft\.textValues\}/);
+  assert.match(binding, /previewImageSlots\(\s*proposal\.draft\.slotAssignments,\s*proposal\.draft\.slotTransforms,\s*photoLibrary\.photos,?\s*\)/);
+  // Every card is bound the same way, one per proposal.
+  assert.match(source, /previewFor=\{proposalPreviewBinding\}/);
+  assert.match(stack, /const \{ aspect, templatePreview \} = previewFor\(proposal\)/);
+  assert.doesNotMatch(stack, /selectedDraftId|browserPreviewDocument/);
+});
+
+test("proposals stack as an overlapping deck that promotes the next card when one is answered", async () => {
+  const [stack, card, ui, cartModel, css] = await Promise.all([
+    read("src/components/storefront/cart-proposal-stack.tsx"),
+    read("src/components/storefront/cart-proposal-card.tsx"),
+    read("src/components/storefront/manual-storefront.tsx"),
+    read("src/lib/storefront/local-cart.ts"),
+    read("src/app/globals.css"),
+  ]);
+  // Anchored to the corner, and every card dealt onto the same spot: the deck's
+  // footprint is one card wide and one card tall however many are waiting, so a
+  // third proposal cannot eat the left edge of the screen.
+  assert.match(stack, /fixed bottom-5 left-5 z-50 w-\[min\(92vw,300px\)\]/);
+  assert.doesNotMatch(stack, /flex-col/);
+  assert.match(stack, /absolute bottom-0 left-0 w-full origin-bottom-left/);
+  assert.match(ui, /setProposalStack\(\(entries\) => \[\.\.\.entries, \{ proposal, exit: null \}\]\)/);
+  assert.match(stack, /entries\.map\(\(entry, index\) =>/);
+
+  // The newest card is on top at full scale; the ones behind peek out, scaled
+  // down and dimmed, and are the only ones counted past the visible depth.
+  assert.match(cartModel, /CART_PROPOSAL_VISIBLE_DEPTH = 3/);
+  assert.match(stack, /const pendingIds = entries\.filter\(\(entry\) => !entry\.exit\)/);
+  assert.match(stack, /pendingCount - 1 - pendingIds\.indexOf\(proposal\.id\)/);
+  assert.match(stack, /if \(depth >= CART_PROPOSAL_VISIBLE_DEPTH\) return null/);
+  assert.match(stack, /const scale = 1 - SCALE_STEP \* depth/);
+  assert.match(stack, /opacity: 1 - 0\.2 \* depth/);
+  assert.match(stack, /moreCount = Math\.max\(0, pendingCount - CART_PROPOSAL_VISIBLE_DEPTH\)/);
+  assert.match(card, /\+\{moreCount\} more/);
+  // Only the card on top can be clicked or tabbed into.
+  assert.match(stack, /onTop && !exit \? "pointer-events-auto" : "pointer-events-none"/);
+  assert.match(stack, /inert=\{!onTop \|\| Boolean\(exit\)\}/);
+  assert.match(card, /disabled=\{Boolean\(exit\) \|\| !onTop\}/);
+
+  // An answered card keeps its place while it animates away, so "waiting" is
+  // the pending list and not the rendered one.
+  assert.match(cartModel, /export function pendingCartProposals\(/);
+  assert.match(ui, /const pendingProposals = useMemo\(\(\) => pendingCartProposals\(proposalStack\)/);
+  assert.match(ui, /entry\.exit \? \{ \.\.\.entry, exit: decision \} : entry/);
+  assert.match(ui, /CART_PROPOSAL_EXIT_MS\[decision\]/);
+  assert.match(ui, /pendingProposalCount: pendingProposals\.length/);
+
+  // Enter from the left it is anchored to; accept toward the masthead cart
+  // chip after a beat of affirmation; reject back out the way it came.
+  for (const keyframe of ["proposal-in", "proposal-accept", "proposal-reject"]) {
+    assert.match(css, new RegExp(String.raw`@keyframes ${keyframe} \{`));
+    assert.match(css, new RegExp(String.raw`--animate-${keyframe}:[^;]*var\(--ease-out-expo\)`));
+  }
+  assert.match(card, /animate-proposal-in motion-reduce:animate-none/);
+  assert.match(card, /animate-proposal-accept/);
+  assert.match(card, /animate-proposal-reject/);
+  // Depth is counted over the proposals still waiting, so the card behind rises
+  // into the top spot while the answered one is still flying away, and a card
+  // resolved out of the middle fades where it stands.
+  assert.match(stack, /transition-\[transform,opacity\] duration-300 ease-\[var\(--ease-out-expo\)\] motion-reduce:transition-none/);
+  assert.match(stack, /entries\.length - 1 - index/);
+  assert.match(stack, /\{ \.\.\.layerStyle\(depth\), opacity: 0 \}/);
+});
+
+test("a proposal preview resolves live artwork, then the bundled copy, then a synthesized layout", async () => {
+  const source = await read("src/components/storefront/manual-storefront.tsx");
+  const resolver = source.slice(
+    source.indexOf("async function resolvePreviewDocument"),
+    source.indexOf("/** Records the draft now occupying the prepare step"),
+  );
+  // Reuses anything already resolved rather than refetching the same artwork.
+  assert.match(resolver, /previewDocumentsRef\.current\[key\]/);
+  // A failed live fetch degrades to the bundled published copy and then to a
+  // layout built from the contract — never to an empty card.
+  assert.match(resolver, /storefrontClient\.browserPreviewDocument\([\s\S]*\.catch\(\(\) => \{/);
+  assert.match(resolver, /bundledTemplateSpec\(templateID\)/);
+  assert.match(resolver, /specBrowserPreviewDocument\(\{ spec, contract, output \}\)/);
+  assert.match(resolver, /fallbackBrowserPreviewDocument\(\{ templateID, contract, output \}\)/);
+});
+
+test("a background draft derives its slot aliases from its own artwork", async () => {
+  const source = await read("src/components/storefront/manual-storefront.tsx");
+  // The workbench document belongs to the print the shopper is holding, so the
+  // background draft's response must read its own document instead.
+  assert.match(source, /const responseDocument: BrowserPreviewDocument \| null = onScreen\s*\?\s*browserPreviewDocumentRef\.current\s*:\s*offScreenTemplate\?\.document \?\? null/);
+  assert.match(source, /imageSlotAliasesForContract\(responseContract, responseDocument\)/);
+  assert.match(source, /imageSlotAliasesForContract\(contract, responseDocument\)/);
+  assert.match(source, /imageSlotRoles\(contract\.slots, contractSlotBoxes\(contract, responseDocument\)\)/);
 });

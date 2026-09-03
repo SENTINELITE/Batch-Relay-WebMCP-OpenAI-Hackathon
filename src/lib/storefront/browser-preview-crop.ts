@@ -22,13 +22,14 @@ export function browserPreviewCropRect(
   }
   const baseWidth = source.width / source.height > targetAspectRatio ? source.height * targetAspectRatio : source.width;
   const baseHeight = source.width / source.height > targetAspectRatio ? source.height : source.width / targetAspectRatio;
-  const baseLeft = (source.width - baseWidth) / 2;
-  const baseTop = (source.height - baseHeight) / 2;
-  const normalized = clampBrowserPreviewTransform(transform);
+  const normalized = clampBrowserPreviewTransform(transform, source, targetAspectRatio);
   const width = baseWidth / normalized.zoom;
   const height = baseHeight / normalized.zoom;
-  const unclampedLeft = baseLeft + (baseWidth - width) / 2 - (normalized.offsetX / 100) * (baseWidth / normalized.zoom);
-  const unclampedTop = baseTop + (baseHeight - height) / 2 - (normalized.offsetY / 100) * (baseHeight / normalized.zoom);
+  // CSS translates the cover-fitted source image by a percentage of its own
+  // dimensions. Convert that exact movement back into source coordinates so
+  // proofing and the browser mask agree at every pan limit.
+  const unclampedLeft = (source.width - width) / 2 - (normalized.offsetX / 100) * source.width;
+  const unclampedTop = (source.height - height) / 2 - (normalized.offsetY / 100) * source.height;
   return {
     left: Math.min(source.width - width, Math.max(0, unclampedLeft)),
     top: Math.min(source.height - height, Math.max(0, unclampedTop)),

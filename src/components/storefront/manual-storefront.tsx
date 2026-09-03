@@ -5,10 +5,9 @@ import {
   type CatalogProduct,
   type IngestedAsset,
   type PublishedTemplate,
-  type ProviderOffer,
   type TemplateContract,
   type TemplateOutput,
-  type TemplateRender,
+  type TemplateOutputs,
   storefrontClient,
 } from "@/lib/storefront/client";
 import { type TemplateState } from "@/lib/storefront/customization";
@@ -35,26 +34,43 @@ import {
   visibleStorefrontProducts,
 } from "@/lib/storefront/template-compatibility";
 import { BrowserTemplatePreview } from "@/components/storefront/browser-template-preview";
-import { DraftRail } from "@/components/storefront/draft-rail";
 import { FormatPicker } from "@/components/storefront/format-picker";
 import { PhotoTray } from "@/components/storefront/photo-tray";
 import { PrepareStep } from "@/components/storefront/prepare-step";
-import { CartProposalCard } from "@/components/storefront/cart-proposal-card";
+import { CartProposalStack } from "@/components/storefront/cart-proposal-stack";
 import { CartSheet } from "@/components/storefront/cart-sheet";
 import { StorefrontMasthead, type CartAcknowledgement } from "@/components/storefront/storefront-masthead";
 import {
+  CART_PROPOSAL_EXIT_MS,
   cartItemFromProposal,
   cartProposalOutcome,
+  cartProposalWireItems,
+  createCartItem,
+  localCartPrintCount,
   createCartProposal,
   localCartWireItems,
+  mergeLocalCartItem,
+  pendingCartProposalForDraft,
+  pendingCartProposals,
   type CartProposal,
   type CartProposalOutcome,
+  type CartProposalStackEntry,
   type LocalCartItem,
 } from "@/lib/storefront/local-cart";
+import { readIdentifierAlias, requireIdentifierAlias } from "@/lib/storefront/tool-input";
+import {
+  agentDraftPlacement,
+  emptyShopperViewContext,
+  isShopperVisibleDraft,
+  shopperViewContext,
+  type DraftPlacement,
+  type ShopperViewContext,
+} from "@/lib/storefront/shopper-view";
 import {
   browserPreviewCanvas,
   initialBrowserPreviewTransform,
   type BrowserPreviewDocument,
+  type BrowserPreviewPanLimits,
   type BrowserPreviewTransform,
 } from "@/lib/storefront/browser-preview";
 import { fallbackBrowserPreviewDocument } from "@/lib/storefront/preview-fallback";
@@ -95,7 +111,24 @@ import {
 } from "@/webmcp/storefront-bridge";
 
 type Notice = { tone: "error" | "info"; message: string } | null;
+/** Everything a draft configured behind the shopper's screen needs, resolved
+ *  without touching any workbench state. */
+type OffScreenTemplate = {
+  template: NonNullable<PrintDraft["template"]>;
+  contract: TemplateContract;
+  document: BrowserPreviewDocument | null;
+  assignments: Record<string, string>;
+  prefills: SlotPrefill[];
+};
 type ActiveStep = "catalog" | "prepare";
+type PreloadedTemplatePreview = {
+  templateId: string;
+  compatibleOutputs: TemplateOutput[];
+  outputRevisionId: string;
+  output: TemplateOutput;
+  contract: TemplateContract;
+  document: BrowserPreviewDocument;
+};
 
 const productSelectionKey = (product: Pick<CatalogProduct, "id" | "revision">) =>
   JSON.stringify([product.id, product.revision]);
@@ -117,6 +150,48 @@ function browserPreviewSlotBoxes(document: BrowserPreviewDocument | null): Recor
   return imageSlotBoxesFromCanvases(document.output.surfaces.flatMap((surface) => {
     const canvas = browserPreviewCanvas(browserDocumentJSON, surface.id, surface.variant_id, document.input_slots ?? []);
     return canvas ? [canvas] : [];
+  }));
+}
+
+/**
+ * Identity of one published output's artwork, so a document already resolved
+ * for the workbench can be reused by the proposal card without refetching.
+ *
+ * The template and output alone name it. A draft records the template revision
+ * from its contract while the preview is fetched at the outputs revision, so
+ * those two revisions are not the same string and cannot key a shared store;
+ * within one page session each output is read at one revision anyway.
+ */
+const previewDocumentKey = (templateID: string, outputID: string) => `${templateID}|${outputID}`;
+
+const draftPreviewDocumentKey = (draft: PrintDraft): string | null => draft.template
+  ? previewDocumentKey(draft.template.id, draft.template.outputId)
+  : null;
+
+/**
+ * Resolvable URLs for a preview document's artwork. API-issued assets go
+ * through the credentialed same-origin proxy; public template art from a
+ * bundled spec is already an absolute URL on a trusted image host and is used
+ * directly, never proxied.
+ */
+function previewAssetURLs(document: BrowserPreviewDocument | null): Record<string, string> {
+  if (!document) return {};
+  return Object.fromEntries(document.assets.flatMap((asset) => {
+    const url = storefrontClient.browserPreviewAssetProxyURL(asset.content_url) ?? publicTemplateAssetURL(asset.content_url);
+    return url ? [[asset.asset_ref, url]] : [];
+  }));
+}
+
+/** Binds a draft's slot assignments and framing to the tray photographs it
+ *  names, which is everything a template preview needs to paint. */
+function previewImageSlots(
+  assignments: Record<string, string>,
+  transforms: Record<string, BrowserPreviewTransform>,
+  photos: { id: string; previewURL: string }[],
+): Record<string, { source: string; transform: BrowserPreviewTransform }> {
+  return Object.fromEntries(Object.entries(assignments).flatMap(([slotKey, photoId]) => {
+    const photo = photos.find((candidate) => candidate.id === photoId);
+    return photo ? [[slotKey, { source: photo.previewURL, transform: transforms[slotKey] ?? initialBrowserPreviewTransform }]] : [];
   }));
 }
 
@@ -172,9 +247,6 @@ export function ManualStorefront() {
   const [cropZoom, setCropZoom] = useState(1);
   const [managedAsset, setManagedAsset] = useState<IngestedAsset | null>(null);
   const [preparing, setPreparing] = useState(false);
-  const [offers, setOffers] = useState<ProviderOffer[]>([]);
-  const [offerState, setOfferState] = useState<"idle" | "loading" | "error" | "ready">("idle");
-  const [selectedOfferId, setSelectedOfferId] = useState("");
   const [templates, setTemplates] = useState<PublishedTemplate[]>([]);
   const [, setTemplateState] = useState<TemplateState>("idle");
   const [, setTemplateNotice] = useState<Notice>(null);
@@ -186,35 +258,93 @@ export function ManualStorefront() {
   const [templateContract, setTemplateContract] = useState<TemplateContract | null>(null);
   const [templateInputs, setTemplateInputs] = useState<Record<string, string>>({});
   const [templateAssignments, setTemplateAssignments] = useState<Record<string, string>>({});
-  const [templateManagedAssets, setTemplateManagedAssets] = useState<Record<string, IngestedAsset>>({});
   const [slotTransforms, setSlotTransforms] = useState<Record<string, BrowserPreviewTransform>>({});
   const [activeImageSlotKey, setActiveImageSlotKey] = useState<string | null>(null);
-  const [templateRender, setTemplateRender] = useState<TemplateRender | null>(null);
+  const [activeSlotPanLimits, setActiveSlotPanLimits] = useState<BrowserPreviewPanLimits>({ x: 0, y: 0 });
   const [browserPreviewDocument, setBrowserPreviewDocument] = useState<BrowserPreviewDocument | null>(null);
   const [selectedBrowserPreviewSurfaceID, setSelectedBrowserPreviewSurfaceID] = useState("");
-  const [rendering, setRendering] = useState(false);
   const [customization, setCustomization] = useState<"direct" | "template">("direct");
   const [cart, setCart] = useState<LocalCartItem[]>([]);
+  const cartPrintCount = localCartPrintCount(cart);
   // The demo cart is a sheet over the current step, so the masthead chip can
   // show cart contents from any step without navigating. Nothing else opens it.
   const [cartOpen, setCartOpen] = useState(false);
   // An accepted proposal never opens the sheet; it flashes the masthead chip.
   const [cartAcknowledgement, setCartAcknowledgement] = useState<CartAcknowledgement | null>(null);
-  const [pendingProposal, setPendingProposal] = useState<CartProposal | null>(null);
+  // Proposals stack: several prints can be waiting on the shopper at once, each
+  // with its own card. Entries stay in place while their exit animation plays,
+  // so `pendingCartProposals` — not this array — is what "waiting" means.
+  const [proposalStack, setProposalStack] = useState<CartProposalStackEntry[]>([]);
+  const proposalExitTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [lastProposalOutcome, setLastProposalOutcome] = useState<CartProposalOutcome | null>(null);
   const [drafts, setDrafts] = useState<PrintDraft[]>([]);
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
+  // Every preview document resolved so far, by published output. The proposal
+  // card paints an off-screen draft from this, so it never depends on that
+  // draft being selected and never refetches artwork the workbench already has.
+  const [previewDocuments, setPreviewDocuments] = useState<Record<string, BrowserPreviewDocument>>({});
+  const previewDocumentsRef = useRef<Record<string, BrowserPreviewDocument>>({});
   // Which tray photograph the shopper last chose for each semantic role. It
   // lives for the session only and is never persisted or sent anywhere.
   const photoRoleMemory = useRef<PhotoRoleMemory>(emptyPhotoRoleMemory);
   const [prefilledSlots, setPrefilledSlots] = useState<Record<string, PhotoRole>>({});
   const lastSlotPrefills = useRef<{ assignments: Record<string, string>; prefills: SlotPrefill[] }>({ assignments: {}, prefills: [] });
   const templateRequestVersion = useRef(0);
-  const browserPreviewRequestVersion = useRef(0);
+  const preloadedTemplatePreviews = useRef(new Map<string, PreloadedTemplatePreview>());
+  const templateOutputRequests = useRef(new Map<string, Promise<TemplateOutputs>>());
   const lastBrowserPreviewTransforms = useRef<Record<string, BrowserPreviewTransform>>({});
   const photoLibraryRef = useRef(photoLibrary);
   const draftsRef = useRef(drafts);
   const browserPreviewDocumentRef = useRef<BrowserPreviewDocument | null>(browserPreviewDocument);
+  // Which draft's preview the shopper actually has in front of them, and how it
+  // got there. add_to_cart adds straight to the cart for this draft and asks
+  // with the proposal card for any other. A ref, not state: nothing renders
+  // from it, and add_to_cart must read the value as of the moment it is called.
+  const shopperViewRef = useRef<ShopperViewContext>(emptyShopperViewContext);
+
+  /** Files a resolved preview document under its published output, so any other
+   *  surface — notably the proposal card — can paint from it directly. */
+  function rememberPreviewDocument(key: string, document: BrowserPreviewDocument | null) {
+    if (!document || previewDocumentsRef.current[key]) return;
+    previewDocumentsRef.current = { ...previewDocumentsRef.current, [key]: document };
+    setPreviewDocuments(previewDocumentsRef.current);
+  }
+
+  /**
+   * The published artwork for one output, preferring anything already resolved.
+   * A failed live fetch degrades to the bundled published copy and then to a
+   * layout synthesized from the contract — never to nothing.
+   */
+  async function resolvePreviewDocument(
+    templateID: string,
+    output: TemplateOutput,
+    revisionID: string,
+    contract: TemplateContract,
+  ): Promise<BrowserPreviewDocument | null> {
+    const key = previewDocumentKey(templateID, output.id);
+    const known = previewDocumentsRef.current[key];
+    if (known) return known;
+    const document = await storefrontClient.browserPreviewDocument(templateID, output.id, revisionID).catch(() => {
+      const spec = bundledTemplateSpec(templateID);
+      return (spec ? specBrowserPreviewDocument({ spec, contract, output }) : null)
+        ?? fallbackBrowserPreviewDocument({ templateID, contract, output });
+    });
+    rememberPreviewDocument(key, document);
+    return document;
+  }
+
+  /** Records the draft now occupying the prepare step, and who put it there. */
+  function noteVisibleDraft(draftId: string | null, origin: ShopperViewContext["origin"]) {
+    shopperViewRef.current = shopperViewContext(draftId, origin, Date.now());
+  }
+
+  /**
+   * Any hands-on edit is proof the shopper is looking at the selected draft, so
+   * it promotes an agent-selected draft to shopper-visible without waiting.
+   */
+  function noteShopperLookingAtSelectedDraft() {
+    if (selectedDraftId) noteVisibleDraft(selectedDraftId, "shopper");
+  }
 
   useEffect(() => {
     let live = true;
@@ -236,6 +366,56 @@ export function ManualStorefront() {
     void discoverTemplates();
   }, []);
 
+  useEffect(() => {
+    if (catalog.length === 0 || templates.length === 0) return;
+    let cancelled = false;
+    preloadedTemplatePreviews.current.clear();
+    templateOutputRequests.current.clear();
+
+    const outputsFor = (templateId: string) => {
+      const existing = templateOutputRequests.current.get(templateId);
+      if (existing) return existing;
+      const request = storefrontClient.templateOutputs(templateId);
+      templateOutputRequests.current.set(templateId, request);
+      return request;
+    };
+
+    const preload = async (product: CatalogProduct) => {
+      if (product.template_requirement === "unsupported") return;
+      for (const template of templates) {
+        try {
+          const outputs = await outputsFor(template.id);
+          const compatibleOutputs = compatibleTemplateOutputs(outputs.outputs, product);
+          const output = compatibleOutputs[0];
+          if (!output) continue;
+          const contract = await storefrontClient.templateContract(template.id, output.id, outputs.revision_id);
+          const document = await storefrontClient.browserPreviewDocument(template.id, output.id, outputs.revision_id).catch(() => {
+            const spec = bundledTemplateSpec(template.id);
+            return (spec ? specBrowserPreviewDocument({ spec, contract, output }) : null)
+              ?? fallbackBrowserPreviewDocument({ templateID: template.id, contract, output });
+          });
+          if (cancelled || !document) return;
+          rememberPreviewDocument(previewDocumentKey(template.id, output.id), document);
+          preloadedTemplatePreviews.current.set(productSelectionKey(product), {
+            templateId: template.id,
+            compatibleOutputs,
+            outputRevisionId: outputs.revision_id,
+            output,
+            contract,
+            document,
+          });
+          return;
+        } catch {
+          // Try the next published template. The selected print will still use
+          // the normal request path if none can be warmed successfully.
+        }
+      }
+    };
+
+    void Promise.all(catalog.map(preload));
+    return () => { cancelled = true; };
+  }, [catalog, templates]);
+
   useEffect(() => { photoLibraryRef.current = photoLibrary; }, [photoLibrary]);
   useEffect(() => { draftsRef.current = drafts; }, [drafts]);
   useEffect(() => { browserPreviewDocumentRef.current = browserPreviewDocument; }, [browserPreviewDocument]);
@@ -253,20 +433,10 @@ export function ManualStorefront() {
   const imageName = selectedPhoto?.filename ?? null;
   const localImage = selectedPhoto?.file ?? null;
   const selectedProductId = selectedProduct?.id ?? null;
-  const selectedOffer = offers.find((offer) => offer.id === selectedOfferId) ?? null;
   const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
   const selectedDraft = drafts.find((draft) => draft.id === selectedDraftId) ?? null;
-  const browserPreviewAssetURLs = useMemo(() => browserPreviewDocument
-    ? Object.fromEntries(browserPreviewDocument.assets.flatMap((asset) => {
-      // API-issued assets go through the credentialed same-origin proxy.
-      // Public template art from a bundled spec is already an absolute URL on
-      // a trusted image host and is used directly, never proxied.
-      const url = storefrontClient.browserPreviewAssetProxyURL(asset.content_url) ?? publicTemplateAssetURL(asset.content_url);
-      return url ? [[asset.asset_ref, url]] : [];
-    }))
-    : {}, [browserPreviewDocument]);
+  const browserPreviewAssetURLs = useMemo(() => previewAssetURLs(browserPreviewDocument), [browserPreviewDocument]);
   const crop = selectedProduct ? cropFor(selectedProduct) : "4:5";
-  const renderArtifact = templateRender?.status === "succeeded" ? templateRender.artifacts[0] : undefined;
   const visibleTemplateSlots = useMemo(() => templateContract?.slots.map((slot) => ({
     ...slot,
     required: selectedProduct ? effectiveTemplateSlotRequired(selectedProduct, slot) : slot.required,
@@ -289,10 +459,10 @@ export function ManualStorefront() {
   const activeSlotTransform = activeImageSlotKey && templateAssignments[activeImageSlotKey]
     ? slotTransforms[activeImageSlotKey] ?? initialBrowserPreviewTransform
     : null;
-  const browserPreviewImageSlots = useMemo(() => Object.fromEntries(Object.entries(templateAssignments).flatMap(([slotKey, photoId]) => {
-    const photo = photoLibrary.photos.find((candidate) => candidate.id === photoId);
-    return photo ? [[slotKey, { source: photo.previewURL, transform: slotTransforms[slotKey] ?? initialBrowserPreviewTransform }]] : [];
-  })), [photoLibrary.photos, slotTransforms, templateAssignments]);
+  const browserPreviewImageSlots = useMemo(
+    () => previewImageSlots(templateAssignments, slotTransforms, photoLibrary.photos),
+    [photoLibrary.photos, slotTransforms, templateAssignments],
+  );
   const productForDraft = (draft: PrintDraft) => catalog.find((candidate) =>
     candidate.id === draft.productId && candidate.revision === draft.productRevision) ?? null;
   const isAddableDraft = (draft: PrintDraft) => {
@@ -302,58 +472,113 @@ export function ManualStorefront() {
       : Boolean(product && product.template_requirement !== "required" && draft.photoIds.length > 0);
   };
   const canAddAnyVisibleDraft = drafts.some(isAddableDraft);
-  const proposalProduct = pendingProposal
-    ? catalog.find((candidate) => candidate.id === pendingProposal.productId) ?? null
-    : null;
-  const proposalAspect = proposalProduct?.physical_output
-    ? `${proposalProduct.physical_output.width} / ${proposalProduct.physical_output.height}`
-    : "4 / 5";
+  // The proposals still awaiting an answer, oldest first. A card on its way out
+  // has already been answered, so it is not one of these.
+  const pendingProposals = useMemo(() => pendingCartProposals(proposalStack), [proposalStack]);
+
+  /**
+   * Everything one card needs to paint itself.
+   *
+   * Each card is bound to its own proposed draft — that draft's own artwork,
+   * slot assignments, framing and text — and never to the workbench's document,
+   * because the print worth proposing is precisely the one not on screen: the
+   * card is the shopper's first and only look at it. With a stack, that binding
+   * has to be per proposal rather than one set of component-wide values.
+   */
+  function proposalPreviewBinding(proposal: CartProposal) {
+    const product = catalog.find((candidate) => candidate.id === proposal.productId) ?? null;
+    const previewKey = proposal.source === "template" ? draftPreviewDocumentKey(proposal.draft) : null;
+    const document = previewKey ? previewDocuments[previewKey] ?? null : null;
+    const proposalPreviewDocument = document;
+    const proposalPreviewAssetURLs = previewAssetURLs(proposalPreviewDocument);
+    const proposalPreviewImageSlots = previewImageSlots(
+      proposal.draft.slotAssignments,
+      proposal.draft.slotTransforms,
+      photoLibrary.photos,
+    );
+    return {
+      aspect: product?.physical_output
+        ? `${product.physical_output.width} / ${product.physical_output.height}`
+        : "4 / 5",
+      templatePreview: proposalPreviewDocument
+        ? <BrowserTemplatePreview
+          activeImageSlotKey={null}
+          assetURLs={proposalPreviewAssetURLs}
+          document={proposalPreviewDocument}
+          localImageSlots={proposalPreviewImageSlots}
+          onActiveImageSlotChange={() => undefined}
+          onSurfaceChange={() => undefined}
+          selectedSurfaceID={proposalPreviewDocument.output.surfaces[0]?.id ?? ""}
+          serverProof={null}
+          textValues={proposal.draft.textValues}
+        />
+        : null,
+    };
+  }
+
+  // Safety net for proposed template drafts whose artwork was never resolved.
+  // Both paths that create such a draft already file the document, so this
+  // normally does nothing; when it does run, a failed fetch still lands on the
+  // bundled or synthesized layout rather than leaving a card blank.
+  const proposalTemplates = useMemo(() => {
+    const targets = new Map<string, { id: string; outputId: string }>();
+    for (const proposal of pendingProposals) {
+      const template = proposal.source === "template" ? proposal.draft.template ?? null : null;
+      if (!template) continue;
+      targets.set(previewDocumentKey(template.id, template.outputId), { id: template.id, outputId: template.outputId });
+    }
+    return [...targets.values()];
+  }, [pendingProposals]);
+  const proposalTemplateSignature = proposalTemplates
+    .map((template) => previewDocumentKey(template.id, template.outputId))
+    .join("|");
+  useEffect(() => {
+    let live = true;
+    for (const template of proposalTemplates) {
+      if (previewDocumentsRef.current[previewDocumentKey(template.id, template.outputId)]) continue;
+      void (async () => {
+        try {
+          const outputs = await storefrontClient.templateOutputs(template.id);
+          const published: TemplateOutput[] = outputs.outputs;
+          const output = published.find((candidate) => candidate.id === template.outputId);
+          if (!output || !live) return;
+          const contract = await storefrontClient.templateContract(template.id, output.id, outputs.revision_id);
+          if (!live) return;
+          await resolvePreviewDocument(template.id, output, outputs.revision_id, contract);
+        } catch {
+          // The card keeps its cropped-photograph window rather than going blank.
+        }
+      })();
+    }
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by the resolved output list; resolvePreviewDocument is a stable component-body helper reading refs.
+  }, [proposalTemplateSignature]);
 
   /**
    * The loaded browser preview is only a geometry source for the contract it
    * belongs to; a stale document must never name another template's slots.
    */
-  function contractSlotBoxes(contract: TemplateContract): Record<string, SlotBox> {
-    const document = browserPreviewDocumentRef.current;
+  function contractSlotBoxes(
+    contract: TemplateContract,
+    document: BrowserPreviewDocument | null = browserPreviewDocumentRef.current,
+  ): Record<string, SlotBox> {
     const matches = document?.template.id === contract.template.id
       && document.template.revision_id === contract.template.revision_id;
     return matches ? browserPreviewSlotBoxes(document) : {};
   }
 
-  function imageSlotAliasesForContract(contract: TemplateContract): Record<string, string[]> {
+  function imageSlotAliasesForContract(
+    contract: TemplateContract,
+    document?: BrowserPreviewDocument | null,
+  ): Record<string, string[]> {
     return deriveImageSlotAliases(
       contract.slots.filter((slot) => slot.kind === "image"),
-      contractSlotBoxes(contract),
+      contractSlotBoxes(contract, document === undefined ? browserPreviewDocumentRef.current : document),
     );
   }
 
   function patchDraft(draftId: string, patch: Parameters<typeof patchPrintDraft>[1]) {
     setDrafts((items) => items.map((draft) => draft.id === draftId ? patchPrintDraft(draft, patch) : draft));
-  }
-
-  function selectDraft(draft: PrintDraft) {
-    setSelectedDraftId(draft.id);
-    const product = catalog.find((candidate) => candidate.id === draft.productId && candidate.revision === draft.productRevision);
-    if (product) selectProduct(product, false);
-    const firstPhoto = draft.photoIds[0];
-    if (firstPhoto) dispatchPhotoLibrary({ type: "select", photoId: firstPhoto });
-    setTemplateAssignments(draft.slotAssignments);
-    setTemplateInputs(draft.textValues);
-    setSlotTransforms(draft.slotTransforms);
-    setCropZoom(draft.directCrop.zoom);
-    setCropX(draft.directCrop.focusX);
-    setCropY(draft.directCrop.focusY);
-    if (!draft.template) setCustomization("direct");
-    if (draft.template && product) {
-      setCustomization("template");
-      void chooseTemplate(draft.template.id, product, draft.template.outputId, undefined, draft.id).then(() => {
-        // A draft with no saved assignments keeps whatever role defaults the
-        // reloaded output just prefilled.
-        if (Object.keys(draft.slotAssignments).length > 0) setTemplateAssignments(draft.slotAssignments);
-        setTemplateInputs(draft.textValues);
-        setSlotTransforms(draft.slotTransforms);
-      }).catch((error) => setTemplateNotice({ tone: "error", message: `Template contract unavailable: ${responseMessage(error)}` }));
-    }
   }
 
   function handlePhotoAction(action: PhotoLibraryAction) {
@@ -363,7 +588,6 @@ export function ManualStorefront() {
       setTemplateAssignments((assignments) => Object.fromEntries(
         Object.entries(assignments).filter(([, photoId]) => photoId !== action.photoId),
       ));
-      setTemplateManagedAssets({});
     }
     // A direct print has no slots, so its printed shape names the role the
     // visible tray selection stands for.
@@ -375,9 +599,6 @@ export function ManualStorefront() {
       setCropX(50);
       setCropY(50);
       setCropZoom(1);
-    }
-    if (action.type === "add" || action.type === "move" || action.type === "remove") {
-      setTemplateRender(null);
     }
     dispatchPhotoLibrary(action);
   }
@@ -394,37 +615,18 @@ export function ManualStorefront() {
     setCompatibleOutputs([]);
     setTemplateOutputsRevisionID("");
     setSelectedTemplateOutputId("");
-    setTemplateRender(null);
     setTemplateContract(null);
     setTemplateOutput(null);
     setTemplateInputs({});
     setTemplateAssignments({});
     setPrefilledSlots({});
-    setTemplateManagedAssets({});
     setSlotTransforms({});
     setActiveImageSlotKey(null);
     setBrowserPreviewDocument(null);
     browserPreviewDocumentRef.current = null;
     setSelectedBrowserPreviewSurfaceID("");
-    browserPreviewRequestVersion.current += 1;
     if (navigate) setStep("prepare");
     setNotice(null);
-    setOffers([]);
-    setOfferState("loading");
-    setSelectedOfferId("");
-    // Provider offers are shown as published cost evidence only. The cart and
-    // checkout are browser-local, so nothing here gates the flow: a product
-    // with no published offer stays fully usable.
-    storefrontClient.offers(product.id).then((result) => {
-      const available = result.offers.filter((offer) =>
-        offer.availability === "available" && offer.provider_id === "whcc");
-      setOffers(available);
-      setOfferState("ready");
-      if (available.length > 0) setSelectedOfferId(available[0].id);
-    }).catch(() => {
-      // An offer lookup failure is reported quietly inside the offer panel.
-      setOfferState("error");
-    });
     // The template composition is the print, so it is the default preview
     // whenever the product publishes one.
     setCustomization(product.template_requirement === "unsupported" ? "direct" : "template");
@@ -438,6 +640,9 @@ export function ManualStorefront() {
       const draft = createPrintDraft(product, [photoId]);
       setDrafts((items) => [...items, draft]);
       setSelectedDraftId(draft.id);
+      // Only the visible format chooser creates a draft this way, so the
+      // shopper chose this print and is watching it load.
+      noteVisibleDraft(draft.id, "shopper");
       if (roleDefault) {
         dispatchPhotoLibrary({ type: "select", photoId });
         setNotice({ tone: "info", message: `Started this print with your ${prefillProvenance(roleDefault.role)} photograph. Choose another tray photo to change it.` });
@@ -492,7 +697,6 @@ export function ManualStorefront() {
     if (!localImage || !selectedProduct || !selectedPhoto) return;
     const target: PhotoTarget = { productId: selectedProduct.id, productRevision: selectedProduct.revision };
     templateRequestVersion.current += 1;
-    setTemplateRender(null);
     setPreparing(true);
     setNotice(null);
     dispatchPhotoLibrary({ type: "set-preparation", photoId: selectedPhoto.id, target, preparation: { status: "preparing" } });
@@ -509,7 +713,6 @@ export function ManualStorefront() {
       };
       setManagedAsset(asset);
       dispatchPhotoLibrary({ type: "set-preparation", photoId: selectedPhoto.id, target, preparation: { status: "ready", managedAssetId: asset.asset_id, preparedFilename: asset.original_filename } });
-      setTemplateRender(null);
       setNotice({ tone: "info", message: `Prepared ${prepared.width} × ${prepared.height}px through the published studio asset API.` });
     } catch (error) {
       dispatchPhotoLibrary({ type: "set-preparation", photoId: selectedPhoto.id, target, preparation: { status: "error", error: responseMessage(error) } });
@@ -548,22 +751,23 @@ export function ManualStorefront() {
     setSelectedTemplateOutputId("");
     setTemplateContract(null);
     setTemplateOutput(null);
-    setTemplateRender(null);
     setTemplateInputs({});
     setTemplateAssignments({});
     setPrefilledSlots({});
-    setTemplateManagedAssets({});
     setSlotTransforms({});
     setActiveImageSlotKey(null);
     setBrowserPreviewDocument(null);
     browserPreviewDocumentRef.current = null;
     setSelectedBrowserPreviewSurfaceID("");
-    browserPreviewRequestVersion.current += 1;
     setTemplateNotice(null);
     if (!templateId || !productForCompatibility) return null;
     setTemplateState("loading");
     try {
-      const outputs = await storefrontClient.templateOutputs(templateId);
+      const warmed = preloadedTemplatePreviews.current.get(productSelectionKey(productForCompatibility));
+      const warmedForTemplate = warmed?.templateId === templateId
+        ? { outputs: warmed.compatibleOutputs, revision_id: warmed.outputRevisionId }
+        : null;
+      const outputs = warmedForTemplate ?? await storefrontClient.templateOutputs(templateId);
       if (requestVersion !== templateRequestVersion.current) return;
       const compatible = compatibleTemplateOutputs(outputs.outputs, productForCompatibility).filter((output) =>
         !orientation || compatibleOutputVariantSummary(output, productForCompatibility) === orientation);
@@ -628,6 +832,65 @@ export function ManualStorefront() {
     return null;
   }
 
+  /**
+   * Resolves a template, its contract, its artwork and its role prefills for a
+   * draft that is *not* on screen.
+   *
+   * Deliberately a pure read of the API and the caches: it sets no workbench
+   * state at all, so a shopper hand-customizing another print keeps their
+   * preview, their active slot and their crop exactly as they left them. The
+   * document it returns is what the proposal card will paint.
+   */
+  async function resolveTemplateOffScreen(
+    product: CatalogProduct,
+    draft: PrintDraft,
+    requested: { templateId?: string; outputId?: string; orientation?: "portrait" | "landscape" },
+  ): Promise<OffScreenTemplate | null> {
+    const discovered = requested.templateId
+      ? [{ id: requested.templateId }]
+      : templates.length > 0 ? templates : (await storefrontClient.templates()).items;
+    const stored = rememberedTemplatePreference(product);
+    const preferredTemplateID = draft.template?.id ?? stored?.templateId;
+    const ordered = [...discovered].sort((left, right) =>
+      Number(right.id === preferredTemplateID) - Number(left.id === preferredTemplateID));
+    for (const template of ordered) {
+      try {
+        const outputs = await storefrontClient.templateOutputs(template.id);
+        const compatible = compatibleTemplateOutputs(outputs.outputs, product).filter((output) =>
+          !requested.orientation || compatibleOutputVariantSummary(output, product) === requested.orientation);
+        if (compatible.length === 0) continue;
+        const output = requested.outputId
+          ? compatible.find((candidate) => candidate.id === requested.outputId)
+          : rememberedCompatibleOutput(draft.template, template.id, outputs.revision_id, compatible)
+            ?? compatible.find((candidate) => template.id === stored?.templateId && candidate.id === stored.outputId)
+            ?? compatible[0];
+        if (!output) continue;
+        const contract = await storefrontClient.templateContract(template.id, output.id, outputs.revision_id);
+        const document = await resolvePreviewDocument(template.id, output, outputs.revision_id, contract);
+        rememberTemplatePreference(product, template.id, output.id);
+        // Every still-empty image slot takes the photograph the shopper already
+        // chose for that role, exactly as the on-screen path would.
+        const { assignments, prefills } = prefillSlotAssignments({
+          assignments: draft.slotAssignments,
+          memory: photoRoleMemory.current,
+          rolesBySlotKey: imageSlotRoles(contract.slots, browserPreviewSlotBoxes(document)),
+          availablePhotoIds: photoLibraryRef.current.photos.map((photo) => photo.id),
+        });
+        return {
+          template: { id: template.id, outputId: output.id, revisionId: contract.template.revision_id },
+          contract,
+          document,
+          assignments,
+          prefills,
+        };
+      } catch {
+        // A template with an unreadable output contract is not usable for this
+        // draft. Continue only with the server-returned list.
+      }
+    }
+    return null;
+  }
+
   async function selectTemplateOutput({
     templateID = selectedTemplateId,
     outputID,
@@ -652,11 +915,9 @@ export function ManualStorefront() {
     setSelectedTemplateOutputId(outputID);
     setTemplateOutput(null);
     setTemplateContract(null);
-    setTemplateRender(null);
     setTemplateInputs({});
     setTemplateAssignments({});
     setPrefilledSlots({});
-    setTemplateManagedAssets({});
     setSlotTransforms({});
     setActiveImageSlotKey(null);
     setBrowserPreviewDocument(null);
@@ -664,8 +925,24 @@ export function ManualStorefront() {
     setSelectedBrowserPreviewSurfaceID("");
     setTemplateState("loading");
     lastSlotPrefills.current = { assignments: {}, prefills: [] };
+    const warmed = product
+      ? preloadedTemplatePreviews.current.get(productSelectionKey(product))
+      : undefined;
+    const warmedForOutput = warmed?.templateId === templateID &&
+      warmed.outputRevisionId === revisionID &&
+      warmed.output.id === outputID
+      ? warmed
+      : null;
+    if (warmedForOutput) {
+      setTemplateOutput(output);
+      setTemplateContract(warmedForOutput.contract);
+      setBrowserPreviewDocument(warmedForOutput.document);
+      browserPreviewDocumentRef.current = warmedForOutput.document;
+      setSelectedBrowserPreviewSurfaceID(warmedForOutput.document.output.surfaces[0]?.id ?? "");
+    }
     try {
-      const contract = await storefrontClient.templateContract(templateID, output.id, revisionID);
+      const contract = warmedForOutput?.contract
+        ?? await storefrontClient.templateContract(templateID, output.id, revisionID);
       if (requestVersion !== templateRequestVersion.current) return null;
       setTemplateOutput(output);
       setTemplateContract(contract);
@@ -683,34 +960,36 @@ export function ManualStorefront() {
       setActiveImageSlotKey(null);
       setTemplateState("ready");
       setTemplateNotice({ tone: "info", message: `Loaded ${contract.slots.length} stable slot${contract.slots.length === 1 ? "" : "s"} from ${output.label ?? output.id}.` });
-      let previewDocument: BrowserPreviewDocument | null = null;
-      try {
-        const browserDocument = await storefrontClient.browserPreviewDocument(templateID, output.id, revisionID);
-        if (requestVersion !== templateRequestVersion.current) return null;
-        previewDocument = browserDocument;
-        setBrowserPreviewDocument(browserDocument);
-        browserPreviewDocumentRef.current = browserDocument;
-        setSelectedBrowserPreviewSurfaceID(browserDocument.output.surfaces[0]?.id ?? "");
-      } catch (browserPreviewError) {
-        if (requestVersion !== templateRequestVersion.current) return null;
-        // The published artwork is unavailable. A bundled copy of the
-        // published document is preferred, and a layout synthesized from the
-        // contract is the last resort; either way the notice says which.
-        const spec = bundledTemplateSpec(templateID);
-        const fallback = (spec ? specBrowserPreviewDocument({ spec, contract, output }) : null)
-          ?? fallbackBrowserPreviewDocument({ templateID, contract, output });
-        previewDocument = fallback;
-        setBrowserPreviewDocument(fallback);
-        browserPreviewDocumentRef.current = fallback;
-        setSelectedBrowserPreviewSurfaceID(fallback?.output.surfaces[0]?.id ?? "");
-        setTemplateNotice(fallback
-          ? {
-            tone: "info",
-            message: fallback.preview_source === "local_published_copy"
-              ? "Live template artwork is unavailable — showing the published layout from a local copy."
-              : "Live template artwork is unavailable — showing a simplified layout.",
-          }
-          : { tone: "error", message: `Live template artwork is unavailable and no local layout could be built: ${responseMessage(browserPreviewError)}` });
+      let previewDocument: BrowserPreviewDocument | null = warmedForOutput?.document ?? null;
+      if (!previewDocument) {
+        try {
+          const browserDocument = await storefrontClient.browserPreviewDocument(templateID, output.id, revisionID);
+          if (requestVersion !== templateRequestVersion.current) return null;
+          previewDocument = browserDocument;
+          setBrowserPreviewDocument(browserDocument);
+          browserPreviewDocumentRef.current = browserDocument;
+          setSelectedBrowserPreviewSurfaceID(browserDocument.output.surfaces[0]?.id ?? "");
+        } catch (browserPreviewError) {
+          if (requestVersion !== templateRequestVersion.current) return null;
+          // The published artwork is unavailable. A bundled copy of the
+          // published document is preferred, and a layout synthesized from the
+          // contract is the last resort; either way the notice says which.
+          const spec = bundledTemplateSpec(templateID);
+          const fallback = (spec ? specBrowserPreviewDocument({ spec, contract, output }) : null)
+            ?? fallbackBrowserPreviewDocument({ templateID, contract, output });
+          previewDocument = fallback;
+          setBrowserPreviewDocument(fallback);
+          browserPreviewDocumentRef.current = fallback;
+          setSelectedBrowserPreviewSurfaceID(fallback?.output.surfaces[0]?.id ?? "");
+          setTemplateNotice(fallback
+            ? {
+              tone: "info",
+              message: fallback.preview_source === "local_published_copy"
+                ? "Live template artwork is unavailable — showing the published layout from a local copy."
+                : "Live template artwork is unavailable — showing a simplified layout.",
+            }
+            : { tone: "error", message: `Live template artwork is unavailable and no local layout could be built: ${responseMessage(browserPreviewError)}` });
+        }
       }
       // The loaded output starts with whatever this draft already holds; every
       // still-empty image slot takes the photograph the shopper already chose
@@ -722,6 +1001,9 @@ export function ManualStorefront() {
         rolesBySlotKey: imageSlotRoles(contract.slots, browserPreviewSlotBoxes(previewDocument)),
         availablePhotoIds: photoLibraryRef.current.photos.map((photo) => photo.id),
       });
+      // Filed under its published output so the proposal card can paint this
+      // same artwork later without the draft being selected or refetched.
+      rememberPreviewDocument(previewDocumentKey(templateID, output.id), previewDocument);
       lastSlotPrefills.current = { assignments, prefills };
       if (prefills.length > 0) {
         setTemplateAssignments(assignments);
@@ -745,7 +1027,6 @@ export function ManualStorefront() {
       if (selectedDraftId) patchDraft(selectedDraftId, { slotAssignments: next, proofState: "idle" });
       return next;
     });
-    setTemplateManagedAssets((assets) => Object.fromEntries(Object.entries(assets).filter(([key]) => key !== slotKey)));
     // Framing belongs to the browser preview and is never baked into the
     // source File. Keeping it while unassigned makes reassignment reversible.
     if (photoId) setSlotTransforms((transforms) => ({ ...transforms, [slotKey]: transforms[slotKey] ?? initialBrowserPreviewTransform }));
@@ -759,81 +1040,6 @@ export function ManualStorefront() {
       delete next[slotKey];
       return next;
     });
-    invalidateTemplateRenderForBrowserPreviewChange();
-  }
-
-  async function imageDimensions(file: File): Promise<{ width: number; height: number }> {
-    const bitmap = await createImageBitmap(file);
-    try { return { width: bitmap.width, height: bitmap.height }; }
-    finally { bitmap.close(); }
-  }
-
-  async function prepareTemplateSlotAssets(assignments: Record<string, string> = templateAssignments): Promise<Record<string, IngestedAsset>> {
-    if (!selectedProduct || !selectedTemplate || !templateContract || !templateOutput) {
-      throw new Error("Choose a compatible published template output before preparing its photographs.");
-    }
-    const imageSlots = templateContract.slots.filter((slot) => slot.kind === "image");
-    const nextAssets = assignments === templateAssignments ? { ...templateManagedAssets } : {};
-    for (const slot of imageSlots) {
-      const photoId = assignments[slot.key];
-      if (!photoId) {
-        if (effectiveTemplateSlotRequired(selectedProduct, slot)) throw new Error(`Assign a tray photo to ${slot.suggested_label ?? slot.key}.`);
-        continue;
-      }
-      const photo = photoLibrary.photos.find((candidate) => candidate.id === photoId);
-      if (!photo) throw new Error(`The photo assigned to ${slot.suggested_label ?? slot.key} is no longer in the tray.`);
-      if (nextAssets[slot.key]) continue;
-      const target: PhotoTarget = {
-        productId: selectedProduct.id,
-        productRevision: selectedProduct.revision,
-        templateId: selectedTemplate.id,
-        templateRevisionId: templateContract.template.revision_id,
-        slotKey: slot.key,
-      };
-      dispatchPhotoLibrary({ type: "set-preparation", photoId, target, preparation: { status: "preparing" } });
-      try {
-        const [uploaded, dimensions] = await Promise.all([
-          storefrontClient.uploadStudioAsset(photo.file),
-          imageDimensions(photo.file),
-        ]);
-        const asset: IngestedAsset = {
-          asset_id: uploaded.asset_id,
-          pixel_width: dimensions.width,
-          pixel_height: dimensions.height,
-          format: photo.mimeType === "image/png" ? "png" : "jpeg",
-          original_filename: photo.filename,
-          reused: false,
-        };
-        nextAssets[slot.key] = asset;
-        dispatchPhotoLibrary({ type: "set-preparation", photoId, target, preparation: { status: "ready", managedAssetId: asset.asset_id, preparedFilename: photo.filename } });
-      } catch (error) {
-        dispatchPhotoLibrary({ type: "set-preparation", photoId, target, preparation: { status: "error", error: responseMessage(error) } });
-        throw error;
-      }
-    }
-    setTemplateManagedAssets(nextAssets);
-    return nextAssets;
-  }
-
-  function templateRenderInputs(assets: Record<string, IngestedAsset>, textValues: Record<string, string> = templateInputs) {
-    if (!templateContract) throw new Error("Choose a published template contract before requesting a render.");
-    const entries: Array<[string, { asset_id: string } | { value: string }]> = [];
-    for (const slot of templateContract.slots) {
-      if (slot.kind === "image") {
-        const asset = assets[slot.key];
-        if (asset) entries.push([slot.key, { asset_id: asset.asset_id }]);
-      } else {
-        entries.push([slot.key, { value: textValues[slot.key] ?? "" }]);
-      }
-    }
-    return Object.fromEntries(entries);
-  }
-
-  function invalidateTemplateRenderForBrowserPreviewChange() {
-    templateRequestVersion.current += 1;
-    browserPreviewRequestVersion.current += 1;
-    setTemplateRender(null);
-    setRendering(false);
   }
 
   /** Live framing, shared by preview dragging and the prepare-step sliders, so
@@ -844,70 +1050,14 @@ export function ManualStorefront() {
     setSlotTransforms(next);
   }
 
+  /** Only the shopper's own drag or slider release commits framing, so this is
+   *  proof they are looking at the selected draft. */
   function updateBrowserPreviewTransform(slotKey: string, transform: BrowserPreviewTransform) {
+    noteShopperLookingAtSelectedDraft();
     const next = { ...lastBrowserPreviewTransforms.current, [slotKey]: transform };
     lastBrowserPreviewTransforms.current = next;
     setSlotTransforms(next);
     if (selectedDraftId) patchDraft(selectedDraftId, { slotTransforms: next, proofState: "idle" });
-    invalidateTemplateRenderForBrowserPreviewChange();
-  }
-
-  async function runTemplateRender(
-    assignmentOverrides: Record<string, string> = templateAssignments,
-    textOverrides: Record<string, string> = templateInputs,
-  ) {
-    if (!selectedTemplate || !templateContract || !templateOutput) {
-      throw new Error("Choose a compatible published template before rendering.");
-    }
-    const assets = await prepareTemplateSlotAssets(assignmentOverrides);
-    const inputs = templateRenderInputs(assets, textOverrides);
-    const slotKeys = new Set(templateContract.slots.map((slot) => slot.key));
-    if (Object.keys(inputs).some((key) => !slotKeys.has(key))) {
-      throw new Error("Template inputs must use only stable keys from the visible published contract.");
-    }
-    for (const slot of templateContract.slots) {
-      const input = inputs[slot.key];
-      if (input && slot.kind === "image" && (!("asset_id" in input) || typeof input.asset_id !== "string" || input.asset_id.length === 0)) {
-        throw new Error(`Template image input ${slot.key} must use the photo assigned to that exact stable slot key.`);
-      }
-      if (input && slot.kind === "text" && !("value" in input)) {
-        throw new Error("Template text inputs must provide a text value.");
-      }
-    }
-    for (const slot of templateContract.slots.filter((candidate) => effectiveTemplateSlotRequired(selectedProduct!, candidate))) {
-      const input = inputs[slot.key];
-      if (!input || ("value" in input && (typeof input.value !== "string" || input.value.length === 0))) {
-        throw new Error(`Complete the required ${slot.suggested_label ?? slot.kind} slot.`);
-      }
-    }
-    const requestVersion = ++templateRequestVersion.current;
-    setRendering(true);
-    setTemplateNotice(null);
-    try {
-      let result = await storefrontClient.createTemplateRender(selectedTemplate.id, {
-        revision_id: templateContract.template.revision_id,
-        output_id: templateOutput.id,
-        inputs,
-      });
-      if (requestVersion !== templateRequestVersion.current) return result;
-      for (let attempt = 0; attempt < 15 && ["queued", "running"].includes(result.status); attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 1000));
-        result = await storefrontClient.templateRender(result.render_id);
-        if (requestVersion !== templateRequestVersion.current) return result;
-      }
-      setTemplateRender(result);
-      if (result.status !== "succeeded" || result.artifacts.length !== 1) {
-        throw new Error(`Batch Relay render ${result.render_id} is ${result.status} with ${result.artifacts.length} artifacts; this single-surface print requires exactly one.`);
-      }
-      setTemplateNotice({ tone: "info", message: `Render ${result.render_id} succeeded with ${result.artifacts.length} fulfillment artifact${result.artifacts.length === 1 ? "" : "s"}. The public API does not expose artifact bytes for an inline PNG preview.` });
-      return result;
-    } catch (error) {
-      if (requestVersion !== templateRequestVersion.current) throw error;
-      setTemplateNotice({ tone: "error", message: `Template render failed: ${responseMessage(error)}` });
-      throw error;
-    } finally {
-      if (requestVersion === templateRequestVersion.current) setRendering(false);
-    }
   }
 
   /**
@@ -926,16 +1076,56 @@ export function ManualStorefront() {
     return photoLibrary.photos.find((candidate) => candidate.id === photoId)?.previewURL ?? null;
   }
 
-  /** Shows the picture-in-picture proposal. Nothing enters the cart until the
-   *  shopper accepts it here or through resolve_cart_proposal. */
-  function proposeDraft(draft: PrintDraft, quantity: number): CartProposal {
+  function addableProductForDraft(draft: PrintDraft, verb: "adding" | "proposing"): CatalogProduct {
     const product = productForDraft(draft);
     if (!product) throw new Error("That visible draft no longer has its returned catalog product.");
     if (!isAddableDraft(draft)) {
+      const noun = verb === "adding" ? "adding" : "proposing";
       throw new Error(draft.template
-        ? "Complete every required visible template slot before proposing this draft."
-        : "Choose at least one visible tray photograph before proposing this draft.");
+        ? `Complete every required visible template slot before ${noun} this draft.`
+        : `Choose at least one visible tray photograph before ${noun} this draft.`);
     }
+    return product;
+  }
+
+  /**
+   * Puts a completed draft straight into the demo cart, with no proposal card.
+   * This is what the shopper's own Add to cart button does, and what
+   * add_to_cart does for the draft whose preview they are already looking at:
+   * in both cases the visible print was the pre-visualization, so a card asking
+   * about it would only re-show what is already on screen. The masthead chip's
+   * +1 flash is the acknowledgment.
+   */
+  function addDraftToCart(draft: PrintDraft, quantity: number) {
+    const product = addableProductForDraft(draft, "adding");
+    const incoming = createCartItem({
+      draftId: draft.id,
+      productId: product.id,
+      productName: product.name,
+      quantity,
+      thumbnailURL: draftThumbnailURL(draft),
+      source: draft.template ? "template" : "direct",
+      draft,
+    });
+    const merged = mergeLocalCartItem(cart, incoming);
+    setCart(merged.items);
+    setCartAcknowledgement((previous) => ({ id: (previous?.id ?? 0) + 1, quantity }));
+    setNotice({ tone: "info", message: `Added ${quantity} × ${product.name} to this browser's demo cart. Nothing was ordered or charged.` });
+    return merged;
+  }
+
+  /**
+   * Adds one picture-in-picture proposal to the stack. Nothing enters the cart
+   * until the shopper accepts it here or through resolve_cart_proposal.
+   *
+   * Proposing a draft that already has a card waiting returns that standing
+   * card: a second identical question is not a second decision to make.
+   */
+  function proposeDraft(draft: PrintDraft, quantity: number): { proposal: CartProposal; duplicate: boolean } {
+    const standing = pendingCartProposalForDraft(proposalStack, draft.id);
+    if (standing) return { proposal: standing, duplicate: true };
+
+    const product = addableProductForDraft(draft, "proposing");
     const proposal = createCartProposal({
       draftId: draft.id,
       productId: product.id,
@@ -945,32 +1135,66 @@ export function ManualStorefront() {
       source: draft.template ? "template" : "direct",
       draft,
     });
-    setPendingProposal(proposal);
+    // Newest last, which is nearest the corner the stack is anchored to.
+    setProposalStack((entries) => [...entries, { proposal, exit: null }]);
     setLastProposalOutcome(null);
     setNotice({ tone: "info", message: `Proposed ${quantity} × ${product.name}. Accept or reject the preview card.` });
-    return proposal;
+    return { proposal, duplicate: false };
   }
 
-  function resolveProposal(proposal: CartProposal, decision: "accept" | "reject"): LocalCartItem[] {
+  /**
+   * Answers one or more cards at once, which is what "add them all" is.
+   *
+   * The cart moves immediately, but the cards keep their place with `exit` set
+   * so each can play its accept or reject animation where it stands; only then
+   * do they leave the stack and let the rest settle.
+   */
+  function resolveProposals(proposals: readonly CartProposal[], decision: "accept" | "reject"): LocalCartItem[] {
+    if (proposals.length === 0) return cart;
     const accepted = decision === "accept";
-    const nextCart = accepted ? [...cart, cartItemFromProposal(proposal)] : cart;
+    let nextCart = cart;
     if (accepted) {
+      for (const proposal of proposals) {
+        nextCart = mergeLocalCartItem(nextCart, cartItemFromProposal(proposal)).items;
+      }
       setCart(nextCart);
       // Deliberately does not open the cart sheet: the masthead chip count
       // updates and flashes, so the add is noticeable without stealing focus.
-      setCartAcknowledgement((previous) => ({ id: (previous?.id ?? 0) + 1, quantity: proposal.quantity }));
+      const quantity = proposals.reduce((total, proposal) => total + proposal.quantity, 0);
+      setCartAcknowledgement((previous) => ({ id: (previous?.id ?? 0) + 1, quantity }));
     }
-    setPendingProposal(null);
-    setLastProposalOutcome(cartProposalOutcome(proposal, accepted ? "accepted" : "rejected"));
+
+    const answered = new Set(proposals.map((proposal) => proposal.id));
+    setProposalStack((entries) => entries.map((entry) =>
+      answered.has(entry.proposal.id) && !entry.exit ? { ...entry, exit: decision } : entry));
+    const timer = setTimeout(() => {
+      setProposalStack((entries) => entries.filter((entry) => !answered.has(entry.proposal.id)));
+    }, CART_PROPOSAL_EXIT_MS[decision]);
+    proposalExitTimers.current = [...proposalExitTimers.current, timer];
+
+    const last = proposals[proposals.length - 1]!;
+    setLastProposalOutcome(cartProposalOutcome(last, accepted ? "accepted" : "rejected"));
+    const names = proposals.length === 1
+      ? `${last.quantity} × ${last.productName}`
+      : `${proposals.length} proposed prints`;
     setNotice({ tone: "info", message: accepted
-      ? `Added ${proposal.quantity} × ${proposal.productName} to this browser's demo cart. Nothing was ordered or charged.`
-      : `Dismissed the ${proposal.productName} proposal. Nothing entered the demo cart.` });
+      ? `Added ${names} to this browser's demo cart. Nothing was ordered or charged.`
+      : `Dismissed ${names}. Nothing entered the demo cart.` });
     return nextCart;
   }
 
+  function resolveProposal(proposal: CartProposal, decision: "accept" | "reject"): LocalCartItem[] {
+    return resolveProposals([proposal], decision);
+  }
+
+  // A card leaving mid-unmount must not call setState on a gone component.
+  useEffect(() => () => {
+    for (const timer of proposalExitTimers.current) clearTimeout(timer);
+  }, []);
+
   useEffect(() => {
     publishStorefrontWebMcpState({
-      revision: photoLibrary.revision + cart.length + (selectedProduct ? 1 : 0) + (templateContract ? 1 : 0),
+      revision: photoLibrary.revision + cartPrintCount + (selectedProduct ? 1 : 0) + (templateContract ? 1 : 0),
       trayRevision: photoLibrary.revision,
       photoCount: photoLibrary.photos.length,
       selectedPhotoId: photoLibrary.selectedPhotoId,
@@ -982,10 +1206,10 @@ export function ManualStorefront() {
         visibleTemplateSlots.filter((slot) => slot.kind === "image" && slot.required)
           .every((slot) => Boolean(templateAssignments[slot.key]))),
       canAddToCart: canAddAnyVisibleDraft,
-      pendingProposal: Boolean(pendingProposal),
-      cartItemCount: cart.length,
+      pendingProposalCount: pendingProposals.length,
+      cartItemCount: cartPrintCount,
     });
-  }, [canAddAnyVisibleDraft, catalogState, pendingProposal, cart.length, customization, managedAsset, photoLibrary, renderArtifact, selectedOffer, selectedProduct, selectedProductId, selectedTemplate, templateAssignments, templateContract, templateOutput, visibleTemplateSlots]);
+  }, [canAddAnyVisibleDraft, cartPrintCount, catalogState, pendingProposals, customization, managedAsset, photoLibrary, selectedProduct, selectedProductId, selectedTemplate, templateAssignments, templateContract, templateOutput, visibleTemplateSlots]);
 
   useEffect(() => subscribeToStorefrontWebMcpActions((request) => {
     void (async () => {
@@ -1018,19 +1242,21 @@ export function ManualStorefront() {
               // The photograph the shopper last chose for each semantic role,
               // which is what a new print's empty slots start from.
               photo_role_defaults: photoRoleMemory.current,
-              cart_item_count: cart.length,
+              cart_item_count: cartPrintCount,
+              cart_line_count: cart.length,
               cart_items: localCartWireItems(cart),
-              pending_proposal: pendingProposal
-                ? { proposal_id: pendingProposal.id, draft_id: pendingProposal.draftId, product_name: pendingProposal.productName, quantity: pendingProposal.quantity }
-                : null,
+              // Every card still waiting, oldest first, because several can be
+              // stacked at once and each awaits its own answer.
+              pending_proposals: cartProposalWireItems(pendingProposals),
+              pending_proposal_count: pendingProposals.length,
               last_proposal_outcome: lastProposalOutcome
                 ? { proposal_id: lastProposalOutcome.proposalId, draft_id: lastProposalOutcome.draftId, product_name: lastProposalOutcome.productName, quantity: lastProposalOutcome.quantity, decision: lastProposalOutcome.decision }
                 : null,
             },
-            guidance: pendingProposal
-              ? "A proposal card is visible; ask the shopper to accept or reject it, or call resolve_cart_proposal with their answer."
+            guidance: pendingProposals.length > 0
+              ? `${pendingProposals.length} proposal card${pendingProposals.length === 1 ? " is" : "s are"} waiting; ask the shopper to accept or reject ${pendingProposals.length === 1 ? "it" : "them"}, then call resolve_cart_proposal with their answer — one proposalId at a time, or accept_all or reject_all when they answer the whole stack at once.`
               : selectedDraftId
-                ? "Complete the active draft's visible slots, then propose it for the demo cart."
+                ? "Complete the active draft's visible slots, then add it to the demo cart. Adding the draft the shopper is watching goes straight in; adding any other draft asks them with the proposal card first."
                 : "Configure a print from visible tray photos to create a draft.",
           } });
           return;
@@ -1091,12 +1317,30 @@ export function ManualStorefront() {
           let responseContract: TemplateContract | null = null;
           let appliedPrefills: SlotPrefill[] = [];
           setDrafts((items) => existingDraft ? items.map((item) => item.id === draft.id ? draft : item) : [...items, draft]);
-          setSelectedDraftId(draft.id);
-          // The draft, its template and its live preview all load behind the
-          // step the shopper is already on. Configuring a print is not a
-          // reason to move them.
-          selectProduct(product, false, false);
-          dispatchPhotoLibrary({ type: "select", photoId: photoIds[0] ?? null });
+          // A shopper customizing a print by hand keeps the screen. Their "add a
+          // 5x7 of image 6" asks for a second print, not for the memory mate
+          // they are working on to be taken away from them; that 5x7 is made in
+          // the draft rail and the proposal card is their whole view of it.
+          const placement: DraftPlacement = agentDraftPlacement(shopperViewRef.current, selectedDraftId, draft.id);
+          const onScreen = placement === "on_screen";
+          if (onScreen) {
+            setSelectedDraftId(draft.id);
+            // An agent put this draft on screen. Revising the draft the shopper
+            // was already watching leaves their view where it was; creating a
+            // new one starts the clock, so an add_to_cart chained straight onto
+            // this call is still treated as a print the shopper has not seen.
+            if (!existingDraft || shopperViewRef.current.draftId !== draft.id) {
+              noteVisibleDraft(draft.id, "agent");
+            }
+            // The draft, its template and its live preview all load behind the
+            // step the shopper is already on. Configuring a print is not a
+            // reason to move them.
+            selectProduct(product, false, false);
+            dispatchPhotoLibrary({ type: "select", photoId: photoIds[0] ?? null });
+          }
+          // Left untouched for a background draft: the shopper-view context
+          // still names the print they are holding, so add_to_cart sees this one
+          // as never having been on screen and goes to the proposal card.
           const directCrop = request.input.directCrop && typeof request.input.directCrop === "object" ? request.input.directCrop as Record<string, unknown> : null;
           if (directCrop) {
             const nextCrop = {
@@ -1106,25 +1350,41 @@ export function ManualStorefront() {
               offsetX: typeof directCrop.offsetX === "number" ? directCrop.offsetX : draft.directCrop.offsetX,
               offsetY: typeof directCrop.offsetY === "number" ? directCrop.offsetY : draft.directCrop.offsetY,
             };
-            setCropZoom(nextCrop.zoom); setCropX(nextCrop.focusX); setCropY(nextCrop.focusY);
+            if (onScreen) { setCropZoom(nextCrop.zoom); setCropX(nextCrop.focusX); setCropY(nextCrop.focusY); }
             finalDraft = patchPrintDraft(finalDraft, { directCrop: nextCrop });
             patchDraft(draft.id, { directCrop: nextCrop });
           }
           const requestedTemplateId = typeof request.input.templateId === "string" ? request.input.templateId : undefined;
           const requestedOutputId = typeof request.input.outputId === "string" ? request.input.outputId : undefined;
           const requestedOrientation = request.input.orientation === "portrait" || request.input.orientation === "landscape" ? request.input.orientation : undefined;
-          const selectedTemplateForDraft = product.template_requirement === "unsupported"
-            ? null
-            : requestedTemplateId
-              ? (() => (async () => {
-                const outputs = await storefrontClient.templateOutputs(requestedTemplateId);
-                const compatible = compatibleTemplateOutputs(outputs.outputs, product).filter((output) => !requestedOrientation || compatibleOutputVariantSummary(output, product) === requestedOrientation);
-                const output = requestedOutputId ? compatible.find((candidate) => candidate.id === requestedOutputId) : compatible[0];
-                if (!output) throw new Error("The requested template output is not compatible with this returned product and orientation.");
-                return await chooseTemplate(requestedTemplateId, product, output.id, requestedOrientation, draft.id);
-              })())()
-              : chooseRememberedOrFirstCompatibleTemplate(product, draft, requestedOutputId, requestedOrientation);
-          const templateForPatch = await selectedTemplateForDraft;
+          // On screen, the workbench loads the template and repaints. In the
+          // draft rail, the same facts are resolved as a pure read so nothing
+          // the shopper is looking at changes.
+          let offScreenTemplate: OffScreenTemplate | null = null;
+          let templateForPatch: PrintDraft["template"] | null = null;
+          if (product.template_requirement !== "unsupported") {
+            if (!onScreen) {
+              offScreenTemplate = await resolveTemplateOffScreen(product, draft, {
+                templateId: requestedTemplateId,
+                outputId: requestedOutputId,
+                orientation: requestedOrientation,
+              });
+              templateForPatch = offScreenTemplate?.template ?? null;
+            } else if (requestedTemplateId) {
+              const outputs = await storefrontClient.templateOutputs(requestedTemplateId);
+              const compatible = compatibleTemplateOutputs(outputs.outputs, product).filter((output) => !requestedOrientation || compatibleOutputVariantSummary(output, product) === requestedOrientation);
+              const output = requestedOutputId ? compatible.find((candidate) => candidate.id === requestedOutputId) : compatible[0];
+              if (!output) throw new Error("The requested template output is not compatible with this returned product and orientation.");
+              templateForPatch = await chooseTemplate(requestedTemplateId, product, output.id, requestedOrientation, draft.id);
+            } else {
+              templateForPatch = await chooseRememberedOrFirstCompatibleTemplate(product, draft, requestedOutputId, requestedOrientation);
+            }
+          }
+          // Aliases and slot geometry are read from the artwork that belongs to
+          // *this* draft, which for a background draft is never the workbench's.
+          const responseDocument: BrowserPreviewDocument | null = onScreen
+            ? browserPreviewDocumentRef.current
+            : offScreenTemplate?.document ?? null;
           if (product.template_requirement !== "unsupported" && (requestedOutputId || requestedOrientation) && !templateForPatch) {
             throw new Error("No active server template has the requested compatible output or orientation.");
           }
@@ -1138,17 +1398,25 @@ export function ManualStorefront() {
             // shape records which role that photograph now stands for.
             photoRoleMemory.current = rememberDirectPhoto(photoRoleMemory.current, product.physical_output, photoIds[0]);
           }
+          // The prefills that were applied belong to whichever path resolved the
+          // template: the workbench's own load, or the off-screen read.
+          const resolvedPrefills = () => offScreenTemplate
+            ? { prefills: offScreenTemplate.prefills, assignments: offScreenTemplate.assignments }
+            : lastSlotPrefills.current;
           if (templateForPatch && slotPatches.length === 0) {
-            const contract = await storefrontClient.templateContract(templateForPatch.id, templateForPatch.outputId, templateForPatch.revisionId);
+            const contract = offScreenTemplate?.contract
+              ?? await storefrontClient.templateContract(templateForPatch.id, templateForPatch.outputId, templateForPatch.revisionId);
             responseContract = contract;
             // Selecting an existing draft must restore its own saved inputs,
             // never silently replace them with every tray image. An untouched
             // draft keeps the role defaults the loaded output just prefilled.
-            appliedPrefills = lastSlotPrefills.current.prefills;
-            const assignments = appliedPrefills.length > 0 ? lastSlotPrefills.current.assignments : draft.slotAssignments;
-            setTemplateAssignments(assignments);
-            setTemplateInputs(draft.textValues);
-            setSlotTransforms(draft.slotTransforms);
+            appliedPrefills = resolvedPrefills().prefills;
+            const assignments = appliedPrefills.length > 0 ? resolvedPrefills().assignments : draft.slotAssignments;
+            if (onScreen) {
+              setTemplateAssignments(assignments);
+              setTemplateInputs(draft.textValues);
+              setSlotTransforms(draft.slotTransforms);
+            }
             const contractPatch: Parameters<typeof patchPrintDraft>[1] = {
               template: templateForPatch,
               templateContractKnown: true,
@@ -1159,14 +1427,15 @@ export function ManualStorefront() {
             patchDraft(draft.id, contractPatch);
           }
           if (templateForPatch && slotPatches.length > 0) {
-            const contract = await storefrontClient.templateContract(templateForPatch.id, templateForPatch.outputId, templateForPatch.revisionId);
+            const contract = offScreenTemplate?.contract
+              ?? await storefrontClient.templateContract(templateForPatch.id, templateForPatch.outputId, templateForPatch.revisionId);
             responseContract = contract;
-            appliedPrefills = lastSlotPrefills.current.prefills;
-            const assignments = { ...(appliedPrefills.length > 0 ? lastSlotPrefills.current.assignments : draft.slotAssignments) };
+            appliedPrefills = resolvedPrefills().prefills;
+            const assignments = { ...(appliedPrefills.length > 0 ? resolvedPrefills().assignments : draft.slotAssignments) };
             const values = { ...draft.textValues };
             const transforms = { ...draft.slotTransforms };
-            const patchAliases = imageSlotAliasesForContract(contract);
-            const patchRoles = imageSlotRoles(contract.slots, contractSlotBoxes(contract));
+            const patchAliases = imageSlotAliasesForContract(contract, responseDocument);
+            const patchRoles = imageSlotRoles(contract.slots, contractSlotBoxes(contract, responseDocument));
             const explicitAssignments: Record<string, string> = {};
             for (const patch of slotPatches) {
               const resolution = resolveSlotPatchTarget(contract.slots, patch, patchAliases);
@@ -1200,8 +1469,10 @@ export function ManualStorefront() {
             // that role.
             photoRoleMemory.current = rememberSlotAssignments(photoRoleMemory.current, explicitAssignments, patchRoles);
             appliedPrefills = appliedPrefills.filter((prefill) => assignments[prefill.slotKey] === prefill.photoId);
-            setPrefilledSlots(Object.fromEntries(appliedPrefills.map((prefill) => [prefill.slotKey, prefill.role])));
-            setTemplateAssignments(assignments); setTemplateInputs(values); setSlotTransforms(transforms);
+            if (onScreen) {
+              setPrefilledSlots(Object.fromEntries(appliedPrefills.map((prefill) => [prefill.slotKey, prefill.role])));
+              setTemplateAssignments(assignments); setTemplateInputs(values); setSlotTransforms(transforms);
+            }
             const slotPatch: Parameters<typeof patchPrintDraft>[1] = {
               template: templateForPatch,
               templateContractKnown: true,
@@ -1231,10 +1502,12 @@ export function ManualStorefront() {
             ? missingTemplateDraftRequirements(finalDraft)
             : [];
           const effectivePhotoIds = [...new Set([...finalDraft.photoIds, ...Object.values(finalDraft.slotAssignments)])];
-          setNotice({ tone: "info", message: `Draft ${draft.id} is visible for ${product.name}. The files remain local until they are prepared.` });
+          setNotice({ tone: "info", message: onScreen
+            ? `Draft ${draft.id} is visible for ${product.name}. The files remain local until they are prepared.`
+            : `Draft ${draft.id} for ${product.name} is waiting in the draft rail. The print you are customizing stays on screen.` });
           // The live template preview must repaint before the agent hears back.
           await nextPaint();
-          const responseSlotAliases = responseContract ? imageSlotAliasesForContract(responseContract) : {};
+          const responseSlotAliases = responseContract ? imageSlotAliasesForContract(responseContract, responseDocument) : {};
           // A bare slot key invites the agent to guess a photograph. Naming the
           // role and writing the question out invites it to ask the shopper.
           const missingDetail = describeMissingRequirements(
@@ -1245,6 +1518,14 @@ export function ManualStorefront() {
           respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
             status: "configured",
             draft_id: draft.id,
+            // Say plainly whether this draft took the screen, so the agent
+            // narrates what the shopper can actually see. A background draft was
+            // made without disturbing the print they are customizing by hand.
+            placed: placement,
+            visible: onScreen,
+            placement_guidance: onScreen
+              ? "This draft is on screen: the shopper can see its live preview now."
+              : "This draft was made in the draft rail and is NOT on screen — the shopper is customizing another print by hand and keeps it. Do not tell them they are looking at this one. Adding it will show them a proposal card carrying its own live preview, which is their first look at it.",
             trayRevision: photoLibrary.revision,
             product: { id: product.id, revision: product.revision, name: product.name },
             photos: effectivePhotoIds.flatMap((photoId) => {
@@ -1281,9 +1562,16 @@ export function ManualStorefront() {
           return;
         }
         if (request.action === "add_to_cart") {
-          const requestedDraftId = typeof request.input.draftId === "string" ? request.input.draftId : null;
-          if (!requestedDraftId) throw new Error("add_to_cart requires the visible draft ID it is proposing.");
-          if (pendingProposal) throw new Error(`Proposal ${pendingProposal.id} is still waiting on the shopper; resolve it with resolve_cart_proposal first.`);
+          // Accepted under either spelling, so an ID copied out of a response
+          // that says draft_id is not rejected for saying draft_id.
+          const requestedDraftId = requireIdentifierAlias(
+            request.input,
+            "draftId",
+            "draft_id",
+            "add_to_cart requires the visible draft ID it is proposing.",
+          );
+          // No refusal for a card already waiting: proposals stack, and the
+          // shopper answers each one on its own.
           const draft = draftsRef.current.find((candidate) => candidate.id === requestedDraftId);
           if (!draft) throw new Error("That visible draft no longer exists.");
           const requestedQuantity = Number(request.input.quantity ?? 1);
@@ -1309,26 +1597,62 @@ export function ManualStorefront() {
           // the shopper to another step, and reselecting the draft would also
           // tear down and refetch the very template preview the proposal card
           // is about to show.
-          const proposal = proposeDraft(draft, requestedQuantity);
+          //
+          // Adding the print the shopper is already looking at needs no card:
+          // its live preview was the pre-visualization, and asking again about
+          // what fills the screen is ceremony, not consent. Every other draft is
+          // one they have not seen, so that one still goes to the card.
+          if (isShopperVisibleDraft(shopperViewRef.current, draft.id, Date.now())) {
+            const { items: nextCart, line: added } = addDraftToCart(draft, requestedQuantity);
+            await nextPaint();
+            respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
+              status: "added",
+              draft_id: draft.id,
+              item_id: added.id,
+              product_name: added.productName,
+              quantity: added.quantity,
+              decided_by: "shopper_visible_context",
+              guidance: `${requestedQuantity} × ${added.productName} went straight into the demo cart, with no proposal card: the shopper is looking at this draft's own live preview, so they already saw the print they asked you to add. Its matching cart line now has quantity ${added.quantity}. The masthead cart chip flashed the new count. Tell them it is in the cart. Nothing was ordered or charged.`,
+              nextStep: "confirm_the_add_in_words",
+              pending_proposal_count: pendingProposals.length,
+              cart_item_count: localCartPrintCount(nextCart),
+              cart_line_count: nextCart.length,
+              items: localCartWireItems(nextCart),
+            } });
+            return;
+          }
+          const { proposal, duplicate } = proposeDraft(draft, requestedQuantity);
           // The proposal card must be on screen before the agent hears back.
           await nextPaint();
+          const stackCount = duplicate ? pendingProposals.length : pendingProposals.length + 1;
           respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
             status: "awaiting_shopper_confirmation",
             proposal_id: proposal.id,
             draft_id: proposal.draftId,
             product_name: proposal.productName,
+            quantity: proposal.quantity,
             decided_by: "shopper",
+            duplicate_of_pending_proposal: duplicate,
+            pending_proposal_count: stackCount,
             // Said in words, because the status alone was read as permission to
             // answer the agent's own proposal.
-            guidance: `Nothing has been added yet. The proposal card for ${proposal.quantity} × ${proposal.productName} is now on screen and waiting on the shopper, who decides by clicking Add or Don't add, or by saying so out loud. Tell them the card is waiting and stop. Do not call resolve_cart_proposal unless the shopper has since said what they want, and then quote their words in shopperConfirmation.`,
+            guidance: duplicate
+              ? `Nothing has been added, and no second card was made: ${proposal.quantity} × ${proposal.productName} already has proposal ${proposal.id} waiting on the shopper. ${stackCount} card${stackCount === 1 ? " is" : "s are"} now stacked in the corner. Tell them it is already waiting and stop.`
+              : `Nothing has been added yet. This is not the draft the shopper has on screen, so the proposal card for ${proposal.quantity} × ${proposal.productName} is now showing them the print itself and waiting on the shopper, who decides by clicking Add or Don't add, or by saying so out loud. ${stackCount} card${stackCount === 1 ? " is" : "s are"} now stacked in the corner, each awaiting its own answer. Tell them the card is waiting and stop. Do not call resolve_cart_proposal unless the shopper has since said what they want, and then quote their words in shopperConfirmation.`,
             nextStep: "await_shopper_decision",
           } });
           return;
         }
         if (request.action === "resolve_cart_proposal") {
-          const proposalId = typeof request.input.proposalId === "string" ? request.input.proposalId : null;
-          const decision = request.input.decision;
-          if (decision !== "accept" && decision !== "reject") throw new Error("decision must be accept or reject.");
+          const proposalId = readIdentifierAlias(request.input, "proposalId", "proposal_id");
+          const requestedDecision = request.input.decision;
+          const bulk = requestedDecision === "accept_all" || requestedDecision === "reject_all";
+          const decision = requestedDecision === "accept_all" ? "accept"
+            : requestedDecision === "reject_all" ? "reject"
+              : requestedDecision;
+          if (decision !== "accept" && decision !== "reject") {
+            throw new Error("decision must be accept, reject, accept_all, or reject_all.");
+          }
           // The confirmation is the shopper's own sentence. Requiring it here as
           // well as in the tool means a proposal can only be answered by
           // pointing at something the shopper actually said.
@@ -1338,18 +1662,45 @@ export function ManualStorefront() {
           if (!shopperConfirmation) {
             throw new Error("resolve_cart_proposal relays the shopper's decision only: quote their own words in shopperConfirmation. If they have not answered the visible card yet, ask them and wait.");
           }
-          if (!pendingProposal) throw new Error("No cart proposal is visible.");
-          if (proposalId !== pendingProposal.id) throw new Error(`The visible proposal is ${pendingProposal.id}.`);
-          const nextCart = resolveProposal(pendingProposal, decision);
+          if (pendingProposals.length === 0) throw new Error("No cart proposal is visible.");
+          // accept_all and reject_all are the shopper answering the whole
+          // stack in one sentence; every other decision names one card.
+          let targets: CartProposal[];
+          if (bulk) {
+            targets = pendingProposals;
+          } else {
+            const target = pendingProposals.find((candidate) => candidate.id === proposalId);
+            if (!target) {
+              throw new Error(proposalId
+                ? `No proposal ${proposalId} is waiting. The cards waiting now are ${cartProposalWireItems(pendingProposals).map((item) => `${item.proposal_id} (${item.product_name})`).join(", ")}.`
+                : `decision ${decision} names one card: pass its proposalId, or use accept_all or reject_all for the whole stack.`);
+            }
+            targets = [target];
+          }
+          const nextCart = resolveProposals(targets, decision);
+          const remaining = pendingProposals.length - targets.length;
           await nextPaint();
           respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
-            proposal_id: pendingProposal.id,
             decision: decision === "accept" ? "accepted" : "rejected",
+            scope: bulk ? "all_pending" : "one_proposal",
+            resolved: targets.map((proposal) => ({
+              proposal_id: proposal.id,
+              draft_id: proposal.draftId,
+              product_name: proposal.productName,
+              quantity: proposal.quantity,
+              decision: decision === "accept" ? "accepted" : "rejected",
+            })),
+            resolved_count: targets.length,
             // Echoed so the shopper's own words stay attached to the outcome.
             shopper_confirmation: shopperConfirmation,
             decided_by: "shopper",
-            cart_item_count: nextCart.length,
+            pending_proposal_count: remaining,
+            cart_item_count: localCartPrintCount(nextCart),
+            cart_line_count: nextCart.length,
             items: localCartWireItems(nextCart),
+            guidance: remaining > 0
+              ? `${remaining} proposal card${remaining === 1 ? " is" : "s are"} still waiting on the shopper. Do not answer ${remaining === 1 ? "it" : "them"} yourself.`
+              : "Every proposal card has been answered; none are waiting.",
           } });
           return;
         }
@@ -1372,7 +1723,8 @@ export function ManualStorefront() {
         }
         respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
           action,
-          cart_item_count: nextCart.length,
+          cart_item_count: localCartPrintCount(nextCart),
+          cart_line_count: nextCart.length,
           items: localCartWireItems(nextCart),
         } });
       } catch (error) {
@@ -1384,7 +1736,7 @@ export function ManualStorefront() {
   return <>
     <StorefrontMasthead
       cartAcknowledgement={cartAcknowledgement}
-      cartCount={cart.length}
+      cartCount={cartPrintCount}
       notice={notice}
       onOpenCart={() => setCartOpen(true)}
       onOpenHome={() => setStep("catalog")}
@@ -1392,14 +1744,6 @@ export function ManualStorefront() {
     <PhotoTray library={photoLibrary} onAction={handlePhotoAction} onImportError={(message) => setNotice({ tone: "error", message })} />
 
     <main className="mx-auto w-full max-w-[1400px] px-5 pb-16 sm:px-8 lg:px-12">
-      {drafts.length > 0 && <div className="pt-8">
-        <DraftRail
-          drafts={drafts}
-          onSelect={selectDraft}
-          productNameFor={(draft) => catalog.find((product) => product.id === draft.productId && product.revision === draft.productRevision)?.name ?? draft.productId}
-          selectedDraftId={selectedDraftId}
-        />
-      </div>}
 
       {step === "catalog" && <div className="pb-10" id="catalog">
         <FormatPicker onSelect={selectProduct} products={catalog} selectedProductKey={selectedProductKey} state={catalogState} />
@@ -1407,8 +1751,9 @@ export function ManualStorefront() {
 
       {step === "prepare" && selectedProduct && <PrepareStep
         activeImageSlotKey={activeImageSlotKey}
+        activeSlotPanLimits={activeSlotPanLimits}
         activeSlotTransform={activeSlotTransform}
-        browserPreview={browserPreviewDocument ? <BrowserTemplatePreview activeImageSlotKey={activeImageSlotKey} assetURLs={browserPreviewAssetURLs} document={browserPreviewDocument} key={selectedBrowserPreviewSurfaceID} localImageSlots={browserPreviewImageSlots} onActiveImageSlotChange={setActiveImageSlotKey} onPreviewChange={(slotKey, transform) => changeBrowserPreviewTransform(slotKey, transform)} onPreviewCommit={(_, slotKey, transform) => updateBrowserPreviewTransform(slotKey, transform)} onSurfaceChange={(surfaceID) => { invalidateTemplateRenderForBrowserPreviewChange(); setSelectedBrowserPreviewSurfaceID(surfaceID); }} selectedSurfaceID={selectedBrowserPreviewSurfaceID} serverProof={null} textValues={templateInputs} /> : null}
+        browserPreview={browserPreviewDocument ? <BrowserTemplatePreview activeImageSlotKey={activeImageSlotKey} assetURLs={browserPreviewAssetURLs} document={browserPreviewDocument} key={selectedBrowserPreviewSurfaceID} localImageSlots={browserPreviewImageSlots} onActiveImageSlotChange={(slotKey) => { setActiveImageSlotKey(slotKey); setActiveSlotPanLimits({ x: 0, y: 0 }); }} onPreviewChange={(slotKey, transform) => changeBrowserPreviewTransform(slotKey, transform)} onPreviewCommit={(_, slotKey, transform) => updateBrowserPreviewTransform(slotKey, transform)} onPreviewPanLimitsChange={(slotKey, limits) => { if (slotKey === activeImageSlotKey) setActiveSlotPanLimits(limits); }} onSurfaceChange={setSelectedBrowserPreviewSurfaceID} selectedSurfaceID={selectedBrowserPreviewSurfaceID} serverProof={null} textValues={templateInputs} /> : null}
         crop={crop}
         cropX={cropX}
         cropY={cropY}
@@ -1418,27 +1763,20 @@ export function ManualStorefront() {
         imageName={imageName}
         imagePreview={imagePreview}
         managedAsset={managedAsset}
-        offerState={offerState}
-        offers={offers}
-        onAddPreparedLine={() => { try { if (selectedDraft) proposeDraft(selectedDraft, 1); else throw new Error("Select a visible draft before adding it to the demo cart."); } catch (error) { setNotice({ tone: "error", message: responseMessage(error) }); } }}
-        onAssignTemplatePhoto={assignTemplatePhoto}
+        onAddPreparedLine={() => { try { if (selectedDraft) { noteShopperLookingAtSelectedDraft(); addDraftToCart(selectedDraft, 1); } else throw new Error("Select a visible draft before adding it to the demo cart."); } catch (error) { setNotice({ tone: "error", message: responseMessage(error) }); } }}
+        onAssignTemplatePhoto={(slotKey, photoId) => { noteShopperLookingAtSelectedDraft(); assignTemplatePhoto(slotKey, photoId); }}
         onChangeFormat={() => setStep("catalog")}
-        onCropXChange={(focusX) => { setCropX(focusX); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { zoom: cropZoom, focusX, focusY: cropY } }); }}
-        onCropYChange={(focusY) => { setCropY(focusY); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { zoom: cropZoom, focusX: cropX, focusY } }); }}
-        onCropZoomChange={(zoom) => { setCropZoom(zoom); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { zoom, focusX: cropX, focusY: cropY } }); }}
+        onCropXChange={(focusX) => { noteShopperLookingAtSelectedDraft(); setCropX(focusX); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { focusX } }); }}
+        onCropYChange={(focusY) => { noteShopperLookingAtSelectedDraft(); setCropY(focusY); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { focusY } }); }}
+        onCropZoomChange={(zoom) => { noteShopperLookingAtSelectedDraft(); setCropZoom(zoom); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { zoom } }); }}
         onPrepareLocalImage={prepareLocalImage}
-        onRunTemplateRender={() => void runTemplateRender().catch(() => undefined)}
-        onSelectOffer={setSelectedOfferId}
         onSelectTemplate={(templateId) => void chooseTemplate(templateId).catch((error) => setTemplateNotice({ tone: "error", message: responseMessage(error) }))}
         onSlotTransformChange={changeBrowserPreviewTransform}
         onSlotTransformCommit={updateBrowserPreviewTransform}
-        onTemplateTextChange={(slotKey, value) => { invalidateTemplateRenderForBrowserPreviewChange(); setTemplateInputs((values) => ({ ...values, [slotKey]: value })); }}
+        onTemplateTextChange={(slotKey, value) => { noteShopperLookingAtSelectedDraft(); setTemplateInputs((values) => ({ ...values, [slotKey]: value })); }}
         photos={photoLibrary.photos}
         prefilledSlotProvenance={prefilledSlotProvenance}
         preparing={preparing}
-        renderArtifact={renderArtifact}
-        rendering={rendering}
-        selectedOfferId={selectedOfferId}
         selectedPhotoId={selectedPhoto?.id ?? null}
         selectedPhotoOrdinal={photoLibrary.selectedPhotoId ? String(photoLibrary.photos.findIndex((photo) => photo.id === photoLibrary.selectedPhotoId) + 1).padStart(2, "0") : "—"}
         selectedProduct={selectedProduct}
@@ -1446,7 +1784,6 @@ export function ManualStorefront() {
         templateAssignments={templateAssignments}
         templateContract={templateContract}
         templateInputs={templateInputs}
-        templateRender={templateRender}
         templates={templates}
         visibleTemplateSlots={visibleTemplateSlots}
       />}
@@ -1482,30 +1819,18 @@ export function ManualStorefront() {
       onConfirmCheckout={() => { setCart([]); setNotice({ tone: "info", message: "Demo checkout complete. No order was placed and nothing was charged." }); }}
       onOpenChange={setCartOpen}
       onRemoveItem={(itemId) => setCart((items) => items.filter((item) => item.id !== itemId))}
+      onUpdateQuantity={(itemId, quantity) => setCart((items) => items.map((item) => item.id === itemId ? { ...item, quantity } : item))}
       open={cartOpen}
     />
 
-    {/* The proposal card keeps the bottom-left corner. */}
-    <div className="pointer-events-none fixed bottom-5 left-5 z-50 flex w-[min(92vw,300px)] flex-col gap-3 [&>*]:pointer-events-auto">
-      {pendingProposal && <CartProposalCard
-        aspect={proposalAspect}
-        onAccept={() => resolveProposal(pendingProposal, "accept")}
-        onReject={() => resolveProposal(pendingProposal, "reject")}
-        proposal={pendingProposal}
-        templatePreview={pendingProposal.source === "template" && browserPreviewDocument && selectedDraftId === pendingProposal.draftId
-          ? <BrowserTemplatePreview
-            activeImageSlotKey={null}
-            assetURLs={browserPreviewAssetURLs}
-            document={browserPreviewDocument}
-            localImageSlots={browserPreviewImageSlots}
-            onActiveImageSlotChange={() => undefined}
-            onSurfaceChange={() => undefined}
-            selectedSurfaceID={selectedBrowserPreviewSurfaceID}
-            serverProof={null}
-            textValues={templateInputs}
-          />
-          : null}
-      />}
-    </div>
+    {/* Every proposal waiting on the shopper, stacked in the corner. Each
+        card paints its own proposed draft; this only supplies the artwork the
+        workbench has already resolved for that draft's published output. */}
+    <CartProposalStack
+      entries={proposalStack}
+      onAccept={(proposal) => resolveProposal(proposal, "accept")}
+      onReject={(proposal) => resolveProposal(proposal, "reject")}
+      previewFor={proposalPreviewBinding}
+    />
   </>;
 }

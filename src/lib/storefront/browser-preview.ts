@@ -61,17 +61,66 @@ export type BrowserPreviewTransform = {
   offsetY: number;
 };
 
+export type BrowserPreviewPanLimits = {
+  x: number;
+  y: number;
+};
+
 export const initialBrowserPreviewTransform: BrowserPreviewTransform = {
   zoom: 1,
   offsetX: 0,
   offsetY: 0,
 };
 
-export function clampBrowserPreviewTransform(value: BrowserPreviewTransform): BrowserPreviewTransform {
+/**
+ * A zoomed cover image can always move by at least this much on each axis,
+ * regardless of its final measured aspect ratio. It keeps framing controls
+ * usable while a browser image is still decoding; exact limits take over
+ * as soon as its natural dimensions are available.
+ */
+export function minimumBrowserPreviewPanLimit(zoom: number): number {
+  const safeZoom = Math.min(4, Math.max(1, Number.isFinite(zoom) ? zoom : 1));
+  return 50 * (1 - 1 / safeZoom);
+}
+
+/**
+ * The assigned photograph is always cover-fitted behind the published slot's
+ * mask. These are the furthest translations that still leave source pixels
+ * under every edge of that mask.
+ */
+export function browserPreviewPanLimits(
+  source: { width: number; height: number },
+  targetAspectRatio: number,
+  zoom: number,
+): BrowserPreviewPanLimits {
+  const safeZoom = Math.min(4, Math.max(1, Number.isFinite(zoom) ? zoom : 1));
+  if (!Number.isFinite(source.width) || !Number.isFinite(source.height) || source.width <= 0 || source.height <= 0 || !Number.isFinite(targetAspectRatio) || targetAspectRatio <= 0) {
+    return { x: 0, y: 0 };
+  }
+  const sourceAspectRatio = source.width / source.height;
+  const baseWidth = sourceAspectRatio > targetAspectRatio ? source.height * targetAspectRatio : source.width;
+  const baseHeight = sourceAspectRatio > targetAspectRatio ? source.height : source.width / targetAspectRatio;
   return {
-    zoom: Math.min(4, Math.max(1, Number.isFinite(value.zoom) ? value.zoom : 1)),
-    offsetX: Math.min(100, Math.max(-100, Number.isFinite(value.offsetX) ? value.offsetX : 0)),
-    offsetY: Math.min(100, Math.max(-100, Number.isFinite(value.offsetY) ? value.offsetY : 0)),
+    x: Math.max(minimumBrowserPreviewPanLimit(safeZoom), Math.min(50, 50 * (1 - baseWidth / (source.width * safeZoom)))),
+    y: Math.max(minimumBrowserPreviewPanLimit(safeZoom), Math.min(50, 50 * (1 - baseHeight / (source.height * safeZoom)))),
+  };
+}
+
+export function clampBrowserPreviewTransform(
+  value: BrowserPreviewTransform,
+  source: { width: number; height: number } = { width: 1, height: 1 },
+  targetAspectRatio = 1,
+): BrowserPreviewTransform {
+  const zoom = Math.min(4, Math.max(1, Number.isFinite(value.zoom) ? value.zoom : 1));
+  const limits = browserPreviewPanLimits(source, targetAspectRatio, zoom);
+  const clampOffset = (offset: number, limit: number) => {
+    const clamped = Math.min(limit, Math.max(-limit, Number.isFinite(offset) ? offset : 0));
+    return Object.is(clamped, -0) ? 0 : clamped;
+  };
+  return {
+    zoom,
+    offsetX: clampOffset(value.offsetX, limits.x),
+    offsetY: clampOffset(value.offsetY, limits.y),
   };
 }
 

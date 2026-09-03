@@ -19,8 +19,8 @@ export type StorefrontWebMcpState = {
   canConfigurePrint: boolean;
   canRenderTemplatePreview: boolean;
   canAddToCart: boolean;
-  /** A cart proposal card is visible and waiting on the shopper. */
-  pendingProposal: boolean;
+  /** How many proposal cards are stacked and waiting on the shopper. */
+  pendingProposalCount: number;
   cartItemCount: number;
 };
 
@@ -64,7 +64,7 @@ const defaultState: StorefrontWebMcpState = {
   canConfigurePrint: false,
   canRenderTemplatePreview: false,
   canAddToCart: false,
-  pendingProposal: false,
+  pendingProposalCount: 0,
   cartItemCount: 0,
 };
 
@@ -99,7 +99,9 @@ function isState(value: unknown): value is StorefrontWebMcpState {
     typeof candidate.canConfigurePrint === "boolean" &&
     typeof candidate.canRenderTemplatePreview === "boolean" &&
     typeof candidate.canAddToCart === "boolean" &&
-    typeof candidate.pendingProposal === "boolean" &&
+    typeof candidate.pendingProposalCount === "number" &&
+    Number.isInteger(candidate.pendingProposalCount) &&
+    candidate.pendingProposalCount >= 0 &&
     typeof candidate.cartItemCount === "number" &&
     Number.isInteger(candidate.cartItemCount) &&
     candidate.cartItemCount >= 0

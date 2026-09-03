@@ -4,7 +4,14 @@ import test from "node:test";
 
 import { browserPreviewAssetProxyURL } from "../src/lib/storefront/client.ts";
 import { selectArtworkPath } from "../src/lib/storefront/customization.ts";
-import { browserPreviewCanvas, browserPreviewLayerPosition } from "../src/lib/storefront/browser-preview.ts";
+import { localCartConfigurationKey, mergeLocalCartItem } from "../src/lib/storefront/local-cart.ts";
+import {
+  browserPreviewCanvas,
+  browserPreviewLayerPosition,
+  browserPreviewPanLimits,
+  clampBrowserPreviewTransform,
+  minimumBrowserPreviewPanLimit,
+} from "../src/lib/storefront/browser-preview.ts";
 import {
   cropPatchFromSlotTransform,
   describeMissingRequirements,
@@ -63,6 +70,8 @@ test("template compatibility keeps every canonical product and revision match an
   assert.match(ui, /compatibleTemplateOutputs\(outputs\.outputs, productForCompatibility\)/);
   assert.match(ui, /compatible\.length === 0/);
   assert.match(ui, /void discoverTemplates\(\)/);
+  assert.match(ui, /preloadedTemplatePreviews/);
+  assert.match(ui, /warmedForOutput/);
   assert.match(prepare, /label="Template"/);
   assert.doesNotMatch(prepare, /Compatible published output/);
   assert.match(ui, /rememberedCompatibleOutput\(draft\.template, template\.id, outputs\.revision_id, compatible\)/);
@@ -191,6 +200,12 @@ test("the prepare step frames each image with pan and zoom, and takes photograph
   assert.match(prepare, /activeSlotTransform\.offsetX/);
   assert.match(prepare, /activeSlotTransform\.offsetY/);
   assert.match(prepare, /activeSlotTransform\.zoom/);
+  // Direct prints use the same crop state through both sliders and
+  // click-dragging the preview after it has been enlarged.
+  assert.match(prepare, /function startDirectDrag/);
+  assert.match(prepare, /function moveDirectDrag/);
+  assert.match(prepare, /onPointerDown=\{startDirectDrag\}/);
+  assert.match(prepare, /onLostPointerCapture=/);
   // Both zoom controls reach the tool schema's maximum.
   assert.equal(prepare.match(/max=\{4\}/g)?.length, 2);
   // The sliders and the preview's drag editing share one committed transform.
@@ -221,6 +236,56 @@ test("approved focus and offset crop inputs map into the shared preview framing 
   assert.deepEqual(directCropFocus({ focusX: 50, focusY: 50, offsetX: 20, offsetY: -20 }), {
     focusX: 40, focusY: 60,
   });
+});
+
+test("cart quantities merge only exact finished-print configurations", () => {
+  const direct = (overrides = {}) => ({
+    id: "item_existing",
+    draftId: "draft_a",
+    productId: "print-5x7",
+    productName: "5 × 7 Print",
+    quantity: 1,
+    thumbnailURL: "blob:photo-a",
+    source: "direct",
+    addedAt: "2026-09-03T00:00:00.000Z",
+    draft: {
+      id: "draft_a",
+      productId: "print-5x7",
+      productRevision: 3,
+      photoIds: ["photo_a"],
+      templateContractKnown: false,
+      requiredSlotKeys: [],
+      slotAssignments: {},
+      textValues: {},
+      slotTransforms: {},
+      directCrop: { zoom: 1.5, focusX: 50, focusY: 50, offsetX: 0, offsetY: 0 },
+      proofState: "idle",
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z",
+    },
+    ...overrides,
+  });
+
+  const first = direct();
+  const sameFinishedPrint = direct({ id: "item_new", draftId: "draft_b", quantity: 4, draft: { ...first.draft, id: "draft_b" } });
+  const merged = mergeLocalCartItem([first], sameFinishedPrint);
+  assert.equal(merged.items.length, 1);
+  assert.equal(merged.line.id, first.id);
+  assert.equal(merged.line.quantity, 5);
+
+  const changedPan = direct({
+    id: "item_panned",
+    draft: { ...first.draft, directCrop: { ...first.draft.directCrop, focusX: 51 } },
+  });
+  assert.notEqual(localCartConfigurationKey(first), localCartConfigurationKey(changedPan));
+  assert.equal(mergeLocalCartItem([first], changedPan).items.length, 2);
+
+  const changedPhoto = direct({
+    id: "item_photo_b",
+    draft: { ...first.draft, photoIds: ["photo_b"] },
+  });
+  assert.notEqual(localCartConfigurationKey(first), localCartConfigurationKey(changedPhoto));
+  assert.equal(mergeLocalCartItem([first], changedPhoto).items.length, 2);
 });
 
 test("a published slot crop round-trips back through set_crop, so relative changes are grounded", () => {
@@ -283,14 +348,16 @@ test("a template draft defaults to the template path and repaints on agent slot 
   // configure_print must paint the preview before the tool resolves.
   assert.match(ui, /\/\/ The live template preview must repaint before the agent hears back\.\s*\n\s*await nextPaint\(\);/);
   // Committed framing flows in as a prop so agent crops are not stuck behind local state.
-  assert.match(preview, /const committedTransforms = JSON\.stringify\(transformsFor\(localImageSlots\)\);/);
+  assert.match(preview, /const committedTransforms = JSON\.stringify\([\s\S]{0,200}?localImageSlots/);
+  assert.match(preview, /\}, \[[^\]]*\bcommittedTransforms\b[^\]]*\]\);/);
   assert.match(preview, /if \(drag\.current\) return;/);
 });
 
 test("the cart proposal paints before its tool call resolves", async () => {
   const ui = await read("src/components/storefront/manual-storefront.tsx");
-  assert.match(ui, /const proposal = proposeDraft\(draft, requestedQuantity\);\s*\n\s*\/\/[^\n]*\n\s*await nextPaint\(\);/);
-  assert.match(ui, /const nextCart = resolveProposal\(pendingProposal, decision\);\s*\n\s*await nextPaint\(\);/);
+  assert.match(ui, /const \{ proposal, duplicate \} = proposeDraft\(draft, requestedQuantity\);\s*\n\s*\/\/[^\n]*\n\s*await nextPaint\(\);/);
+  // Bulk resolution paints once for the whole batch, after the cart has moved.
+  assert.match(ui, /const nextCart = resolveProposals\(targets, decision\);\s*\n[^\n]*\n\s*await nextPaint\(\);/);
 });
 
 test("browser preview proxies keep document, assets, proof status, and bytes same-origin", async () => {
@@ -435,15 +502,36 @@ test("baked preview framing retains the shared centered-cover transform vocabula
   assert.match(source, /rasterizeBrowserPreviewCrop/);
 });
 
-test("a committed browser-preview slot transform invalidates an earlier full-resolution render", async () => {
+test("template slot framing is a bounded cover mask, never an empty translated image", () => {
+  const source = { width: 4000, height: 3000 };
+  assert.equal(minimumBrowserPreviewPanLimit(1), 0);
+  assert.equal(minimumBrowserPreviewPanLimit(2), 25);
+  assert.equal(minimumBrowserPreviewPanLimit(4), 37.5);
+  assert.deepEqual(browserPreviewPanLimits(source, 1, 1), { x: 12.5, y: 0 });
+  assert.deepEqual(clampBrowserPreviewTransform({ zoom: 1, offsetX: 80, offsetY: -80 }, source, 1), {
+    zoom: 1, offsetX: 12.5, offsetY: 0,
+  });
+  assert.deepEqual(browserPreviewPanLimits(source, 1, 2), { x: 31.25, y: 25 });
+});
+
+test("template preview clears a drag when pointer capture is lost outside the slot", async () => {
+  const preview = await read("src/components/storefront/browser-template-preview.tsx");
+  assert.match(preview, /onLostPointerCapture/);
+  assert.match(preview, /window\.addEventListener\("pointerup", endWindowDrag\)/);
+  assert.match(preview, /window\.addEventListener\("pointercancel", endWindowDrag\)/);
+  assert.match(preview, /function finishDrag\(/);
+  assert.match(preview, /drag\.current = null/);
+});
+
+test("a committed browser-preview slot transform updates the local draft without a removed render path", async () => {
   const source = await read("src/components/storefront/manual-storefront.tsx");
-  assert.match(source, /function invalidateTemplateRenderForBrowserPreviewChange\(\)/);
-  assert.match(source, /setTemplateRender\(null\)/);
-  assert.match(source, /function updateBrowserPreviewTransform\(slotKey: string, transform: BrowserPreviewTransform\)[\s\S]*invalidateTemplateRenderForBrowserPreviewChange\(\)/);
+  assert.match(source, /function updateBrowserPreviewTransform\(slotKey: string, transform: BrowserPreviewTransform\)[\s\S]*patchDraft\(selectedDraftId, \{ slotTransforms: next, proofState: "idle" \}\)/);
+  assert.doesNotMatch(source, /invalidateTemplateRenderForBrowserPreviewChange|setTemplateRender/);
 });
 
 test("the multi-slot browser preview preserves independent slot transforms without guessing a mapping", async () => {
   const source = await read("src/components/storefront/browser-template-preview.tsx");
+  const prepare = await read("src/components/storefront/prepare-step.tsx");
   assert.match(source, /localImageSlots: Record<string, LocalBrowserPreviewImage>/);
   assert.match(source, /const localSlotKey = layer\.inputSlotKey/);
   assert.match(source, /const localImage = localSlotKey \? localImageSlots\[localSlotKey\] : undefined/);
@@ -453,6 +541,7 @@ test("the multi-slot browser preview preserves independent slot transforms witho
   assert.match(source, /serverProof\.transforms\[slotKey\]/);
   assert.doesNotMatch(source, /layer\.role\].*localImageSlots|localImageSlots\[layer\.role\]/);
   assert.match(source, /requestAnimationFrame/);
-  assert.match(source, /onPointerUp=\{\(\) => commit\("slider_release", activeImageSlotKey\)\}/);
-  assert.match(source, /onBlur=\{\(\) => commit\("slider_release", activeImageSlotKey\)\}/);
+  assert.doesNotMatch(source, /RangeField/);
+  assert.match(prepare, /onPointerUp=\{\(\) => onSlotTransformCommit\(activeImageSlotKey, activeSlotTransform\)\}/);
+  assert.match(prepare, /onBlur=\{\(\) => onSlotTransformCommit\(activeImageSlotKey, activeSlotTransform\)\}/);
 });

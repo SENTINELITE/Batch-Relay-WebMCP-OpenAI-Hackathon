@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode, type PointerEvent } from "react";
 import Image from "next/image";
 import {
   Button,
@@ -13,17 +13,16 @@ import { TemplateSlotAssignment } from "@/components/storefront/template-slot-as
 import type {
   CatalogProduct,
   IngestedAsset,
-  ProviderOffer,
   PublishedTemplate,
   TemplateContract,
-  TemplateRender,
 } from "@/lib/storefront/client";
-import type { BrowserPreviewTransform } from "@/lib/storefront/browser-preview";
+import { minimumBrowserPreviewPanLimit, type BrowserPreviewPanLimits, type BrowserPreviewTransform } from "@/lib/storefront/browser-preview";
 import type { BrowserPhoto } from "@/lib/storefront/photo-library";
 
 export type PrepareStepProps = {
   /** The template image slot the preview is currently editing, if it holds a photo. */
   activeImageSlotKey: string | null;
+  activeSlotPanLimits: BrowserPreviewPanLimits;
   activeSlotTransform: BrowserPreviewTransform | null;
   browserPreview: ReactNode;
   crop: "5:7" | "4:5";
@@ -35,8 +34,7 @@ export type PrepareStepProps = {
   imageName: string | null;
   imagePreview: string | null;
   managedAsset: IngestedAsset | null;
-  offerState: "idle" | "loading" | "error" | "ready";
-  offers: ProviderOffer[];
+  /** Adds the visible draft straight to the demo cart, with no proposal card. */
   onAddPreparedLine: () => void;
   onAssignTemplatePhoto: (slotKey: string, photoId: string | null) => void;
   onChangeFormat: () => void;
@@ -44,8 +42,6 @@ export type PrepareStepProps = {
   onCropYChange: (focusY: number) => void;
   onCropZoomChange: (zoom: number) => void;
   onPrepareLocalImage: () => void;
-  onRunTemplateRender: () => void;
-  onSelectOffer: (offerId: string) => void;
   onSelectTemplate: (templateId: string) => void;
   /** Live framing while a slider is moving; the preview repaints from it. */
   onSlotTransformChange: (slotKey: string, transform: BrowserPreviewTransform) => void;
@@ -55,9 +51,6 @@ export type PrepareStepProps = {
   photos: BrowserPhoto[];
   prefilledSlotProvenance: Record<string, string>;
   preparing: boolean;
-  renderArtifact?: TemplateRender["artifacts"][number];
-  rendering: boolean;
-  selectedOfferId: string;
   selectedPhotoId: string | null;
   selectedPhotoOrdinal: string;
   selectedProduct: CatalogProduct;
@@ -65,17 +58,13 @@ export type PrepareStepProps = {
   templateAssignments: Record<string, string>;
   templateContract: TemplateContract | null;
   templateInputs: Record<string, string>;
-  templateRender: TemplateRender | null;
   templates: PublishedTemplate[];
   visibleTemplateSlots: TemplateContract["slots"];
 };
 
-function PanelHeading({ id, number, title }: { id: string; number: string; title: string }) {
+function PanelHeading({ id, title }: { id: string; title: string }) {
   return (
-    <h3 className="flex items-center gap-3 text-lg font-semibold" id={id}>
-      <span className="grid size-7 shrink-0 place-items-center rounded-full bg-primary/15 text-[13px] font-semibold text-primary">
-        {number}
-      </span>
+    <h3 className="text-lg font-semibold" id={id}>
       {title}
     </h3>
   );
@@ -83,6 +72,7 @@ function PanelHeading({ id, number, title }: { id: string; number: string; title
 
 export function PrepareStep({
   activeImageSlotKey,
+  activeSlotPanLimits,
   activeSlotTransform,
   browserPreview,
   crop,
@@ -94,8 +84,6 @@ export function PrepareStep({
   imageName,
   imagePreview,
   managedAsset,
-  offerState,
-  offers,
   onAddPreparedLine,
   onAssignTemplatePhoto,
   onChangeFormat,
@@ -103,8 +91,6 @@ export function PrepareStep({
   onCropYChange,
   onCropZoomChange,
   onPrepareLocalImage,
-  onRunTemplateRender,
-  onSelectOffer,
   onSelectTemplate,
   onSlotTransformChange,
   onSlotTransformCommit,
@@ -112,9 +98,6 @@ export function PrepareStep({
   photos,
   prefilledSlotProvenance,
   preparing,
-  renderArtifact,
-  rendering,
-  selectedOfferId,
   selectedPhotoId,
   selectedPhotoOrdinal,
   selectedProduct,
@@ -122,19 +105,76 @@ export function PrepareStep({
   templateAssignments,
   templateContract,
   templateInputs,
-  templateRender,
   templates,
   visibleTemplateSlots,
 }: PrepareStepProps) {
   // A template draft previews the whole composed print; a direct print has only
   // its single-photo crop to show.
   const templatePreviewIsPrimary = customization === "template" && Boolean(browserPreview);
-  const renderDisabled =
-    rendering ||
-    !visibleTemplateSlots
-      .filter((slot) => slot.kind === "image" && slot.required)
-      .every((slot) => Boolean(templateAssignments[slot.key]));
+  const provisionalPanLimit = activeSlotTransform ? minimumBrowserPreviewPanLimit(activeSlotTransform.zoom) : 0;
+  const activeSlotPanX = Math.max(activeSlotPanLimits.x, provisionalPanLimit);
+  const activeSlotPanY = Math.max(activeSlotPanLimits.y, provisionalPanLimit);
+  const directDrag = useRef<{
+    pointerID: number;
+    target: HTMLDivElement;
+    x: number;
+    y: number;
+    focusX: number;
+    focusY: number;
+    zoom: number;
+  } | null>(null);
+  const finishDirectDragRef = useRef<(pointerID: number, releasePointerCapture?: boolean) => void>(() => {});
 
+  function finishDirectDrag(pointerID: number, releasePointerCapture = true) {
+    const active = directDrag.current;
+    if (!active || active.pointerID !== pointerID) return;
+    directDrag.current = null;
+    if (releasePointerCapture && active.target.hasPointerCapture?.(pointerID)) {
+      active.target.releasePointerCapture(pointerID);
+    }
+  }
+
+  useEffect(() => {
+    finishDirectDragRef.current = finishDirectDrag;
+  });
+
+  useEffect(() => {
+    const endWindowDrag = (event: WindowEventMap["pointerup"] | WindowEventMap["pointercancel"]) => {
+      finishDirectDragRef.current(event.pointerId);
+    };
+    window.addEventListener("pointerup", endWindowDrag);
+    window.addEventListener("pointercancel", endWindowDrag);
+    return () => {
+      window.removeEventListener("pointerup", endWindowDrag);
+      window.removeEventListener("pointercancel", endWindowDrag);
+    };
+  }, []);
+
+  function startDirectDrag(event: PointerEvent<HTMLDivElement>) {
+    if (!imagePreview || cropZoom <= 1 || event.button !== 0 || directDrag.current) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    directDrag.current = {
+      pointerID: event.pointerId,
+      target: event.currentTarget,
+      x: event.clientX,
+      y: event.clientY,
+      focusX: cropX,
+      focusY: cropY,
+      zoom: cropZoom,
+    };
+  }
+
+  function moveDirectDrag(event: PointerEvent<HTMLDivElement>) {
+    const active = directDrag.current;
+    if (!active || active.pointerID !== event.pointerId) return;
+    const bounds = active.target.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
+    const range = 100 / Math.max(0.01, active.zoom - 1);
+    const focusX = Math.min(100, Math.max(0, active.focusX - ((event.clientX - active.x) / bounds.width) * range));
+    const focusY = Math.min(100, Math.max(0, active.focusY - ((event.clientY - active.y) / bounds.height) * range));
+    onCropXChange(focusX);
+    onCropYChange(focusY);
+  }
   return (
     <section aria-labelledby="prepare-title" className="py-10 lg:py-12" id="prepare">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -145,96 +185,42 @@ export function PrepareStep({
           <p className="mt-2 text-muted-foreground">{selectedProduct.description}</p>
         </div>
         <Button onClick={onChangeFormat} variant="secondary">
-          Change format
+          Change print
         </Button>
       </div>
 
       <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(320px,.9fr)_minmax(360px,1.1fr)]">
         <div className="lg:sticky lg:top-5 lg:self-start">
           {templatePreviewIsPrimary ? (
-            <>
-              {browserPreview}
-
-              {activeImageSlotKey && activeSlotTransform && (
-                // The same per-slot framing the preview's drag editing owns, so
-                // dragging moves these and these move the preview. It lives with
-                // the preview so framing is adjusted where it is seen.
-                <div className="mt-3 flex flex-col gap-4 rounded-[14px] border border-border bg-background/60 p-3">
-                  <div className="grid gap-1">
-                    <p className="text-base font-semibold text-foreground">Framing this image</p>
-                    <p className="font-mono text-[13px] break-words text-muted-foreground">
-                      {activeImageSlotKey}
-                    </p>
-                  </div>
-                  <RangeField
-                    hint={`${activeSlotTransform.zoom.toFixed(2)} times`}
-                    label="Zoom"
-                    max={4}
-                    min={1}
-                    onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                    onChange={(event) =>
-                      onSlotTransformChange(activeImageSlotKey, {
-                        ...activeSlotTransform,
-                        zoom: Number(event.target.value),
-                      })
-                    }
-                    onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                    step={0.01}
-                    value={activeSlotTransform.zoom}
-                  />
-                  <RangeField
-                    hint={`${Math.round(activeSlotTransform.offsetX)} percent horizontally`}
-                    label="Pan X"
-                    max={100}
-                    min={-100}
-                    onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                    onChange={(event) =>
-                      onSlotTransformChange(activeImageSlotKey, {
-                        ...activeSlotTransform,
-                        offsetX: Number(event.target.value),
-                      })
-                    }
-                    onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                    step={1}
-                    value={activeSlotTransform.offsetX}
-                  />
-                  <RangeField
-                    hint={`${Math.round(activeSlotTransform.offsetY)} percent vertically`}
-                    label="Pan Y"
-                    max={100}
-                    min={-100}
-                    onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                    onChange={(event) =>
-                      onSlotTransformChange(activeImageSlotKey, {
-                        ...activeSlotTransform,
-                        offsetY: Number(event.target.value),
-                      })
-                    }
-                    onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                    step={1}
-                    value={activeSlotTransform.offsetY}
-                  />
-                </div>
-              )}
-
-            </>
+            browserPreview
           ) : (
             <>
               <PrintFrame
                 aspect={crop === "5:7" ? "5 / 7" : "4 / 5"}
-                className="w-full"
+                aria-label={cropZoom > 1 ? "Drag to pan the selected image crop" : "Selected image crop preview"}
+                className={cropZoom > 1 ? "w-full cursor-grab touch-none active:cursor-grabbing" : "w-full"}
                 innerClassName="relative bg-surface-warm"
+                onLostPointerCapture={(event) => finishDirectDrag(event.pointerId, false)}
+                onPointerCancel={(event) => finishDirectDrag(event.pointerId)}
+                onPointerDown={startDirectDrag}
+                onPointerMove={moveDirectDrag}
+                onPointerUp={(event) => finishDirectDrag(event.pointerId)}
               >
                 {imagePreview ? (
                   <Image
                     alt="Selected image crop preview"
+                    className="pointer-events-none select-none"
                     fill
                     sizes="(max-width: 760px) 340px, 390px"
                     src={imagePreview}
                     style={{
                       objectFit: "cover",
-                      objectPosition: `${cropX}% ${cropY}%`,
-                      transform: `scale(${cropZoom})`,
+                      objectPosition: "center",
+                      // Translate the enlarged image inside this clipped
+                      // window. At every zoom level the range remains
+                      // inside the image bounds, so panning cannot expose
+                      // transparent pixels.
+                      transform: `translate(${(50 - cropX) * (cropZoom - 1)}%, ${(50 - cropY) * (cropZoom - 1)}%) scale(${cropZoom})`,
                     }}
                     unoptimized
                   />
@@ -245,39 +231,6 @@ export function PrepareStep({
                   </div>
                 )}
               </PrintFrame>
-
-              {hasLocalImage && (
-                // Direct-print framing lives with its preview too, so both
-                // customization modes adjust the crop where it is seen.
-                <div className="mt-3 flex flex-col gap-4 rounded-[14px] border border-border bg-background/60 p-3">
-                  <p className="text-base font-semibold text-foreground">Framing this crop</p>
-                  <RangeField
-                    hint={`${cropX} percent from the left`}
-                    label="Pan X"
-                    max={100}
-                    min={0}
-                    onChange={(event) => onCropXChange(Number(event.target.value))}
-                    value={cropX}
-                  />
-                  <RangeField
-                    hint={`${cropY} percent from the top`}
-                    label="Pan Y"
-                    max={100}
-                    min={0}
-                    onChange={(event) => onCropYChange(Number(event.target.value))}
-                    value={cropY}
-                  />
-                  <RangeField
-                    hint={`${cropZoom.toFixed(2)} times`}
-                    label="Zoom"
-                    max={4}
-                    min={1}
-                    onChange={(event) => onCropZoomChange(Number(event.target.value))}
-                    step={0.05}
-                    value={cropZoom}
-                  />
-                </div>
-              )}
 
               <p className="mt-3 text-sm text-muted-foreground">
                 Crop frame · {crop === "5:7" ? "5 : 7" : "4 : 5"}
@@ -292,7 +245,7 @@ export function PrepareStep({
 
         <div className="flex flex-col gap-6">
           <Surface aria-labelledby="prepare-photo-title" as="section">
-            <PanelHeading id="prepare-photo-title" number="1" title="Prepare selected photo" />
+            <PanelHeading id="prepare-photo-title" title="Prepare selected photo" />
             <div className="mt-4 flex items-center gap-3 rounded-[12px] bg-surface-warm px-4 py-3">
               <span className="font-mono text-[13px] text-muted-foreground">
                 {selectedPhotoOrdinal}
@@ -315,9 +268,78 @@ export function PrepareStep({
 
             {hasLocalImage && (
               <div className="mt-5 flex flex-col gap-4">
-                <p className="text-sm text-muted-foreground">
-                  Pan and zoom this crop with the sliders under the preview.
-                </p>
+                {templatePreviewIsPrimary && activeImageSlotKey && activeSlotTransform ? (
+                  <div className="flex flex-col gap-4">
+                    <div className="grid gap-1">
+                      <p className="text-sm font-semibold text-foreground">Frame selected image</p>
+                      <p className="font-mono text-[13px] break-words text-muted-foreground">{activeImageSlotKey}</p>
+                    </div>
+                    <RangeField
+                      hint={`${activeSlotTransform.zoom.toFixed(2)} times`}
+                      label="Zoom"
+                      max={4}
+                      min={1}
+                      onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
+                      onChange={(event) => onSlotTransformChange(activeImageSlotKey, { ...activeSlotTransform, zoom: Number(event.target.value) })}
+                      onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
+                      step={0.01}
+                      value={activeSlotTransform.zoom}
+                    />
+                    <RangeField
+                      hint={`${Math.round(activeSlotTransform.offsetX)} percent horizontally`}
+                      label="Pan X"
+                      disabled={activeSlotPanX === 0}
+                      max={activeSlotPanX}
+                      min={-activeSlotPanX}
+                      onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
+                      onChange={(event) => onSlotTransformChange(activeImageSlotKey, { ...activeSlotTransform, offsetX: Number(event.target.value) })}
+                      onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
+                      step={1}
+                      value={activeSlotTransform.offsetX}
+                    />
+                    <RangeField
+                      hint={`${Math.round(activeSlotTransform.offsetY)} percent vertically`}
+                      label="Pan Y"
+                      disabled={activeSlotPanY === 0}
+                      max={activeSlotPanY}
+                      min={-activeSlotPanY}
+                      onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
+                      onChange={(event) => onSlotTransformChange(activeImageSlotKey, { ...activeSlotTransform, offsetY: Number(event.target.value) })}
+                      onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
+                      step={1}
+                      value={activeSlotTransform.offsetY}
+                    />
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-4">
+                    <p className="text-sm font-semibold text-foreground">Frame selected photo</p>
+                    <RangeField
+                      hint={`${cropZoom.toFixed(2)} times`}
+                      label="Zoom"
+                      max={4}
+                      min={1}
+                      onChange={(event) => onCropZoomChange(Number(event.target.value))}
+                      step={0.05}
+                      value={cropZoom}
+                    />
+                    <RangeField
+                      hint={`${cropX} percent from the left`}
+                      label="Pan X"
+                      max={100}
+                      min={0}
+                      onChange={(event) => onCropXChange(Number(event.target.value))}
+                      value={cropX}
+                    />
+                    <RangeField
+                      hint={`${cropY} percent from the top`}
+                      label="Pan Y"
+                      max={100}
+                      min={0}
+                      onChange={(event) => onCropYChange(Number(event.target.value))}
+                      value={cropY}
+                    />
+                  </div>
+                )}
                 <Button className="w-full" disabled={preparing} onClick={onPrepareLocalImage}>
                   {preparing ? "Preparing…" : "Prepare selected crop"}
                 </Button>
@@ -336,7 +358,7 @@ export function PrepareStep({
 
           {customization === "template" && (
             <Surface aria-labelledby="template-title" as="section">
-              <PanelHeading id="template-title" number="2" title="Published studio template" />
+              <PanelHeading id="template-title" title="Published studio template" />
               <div className="mt-4 flex flex-col gap-4">
                 <SelectField
                   disabled={templates.length === 0}
@@ -354,86 +376,24 @@ export function PrepareStep({
                   ))}
                 </SelectField>
                 {templateContract && (
-                  <div className="flex flex-col gap-4">
-                    <TemplateSlotAssignment
-                      assignments={templateAssignments}
-                      onAssign={onAssignTemplatePhoto}
-                      onTextChange={onTemplateTextChange}
-                      photos={photos}
-                      prefilledSlotProvenance={prefilledSlotProvenance}
-                      slots={visibleTemplateSlots}
-                      textValues={templateInputs}
-                    />
-                    <Button
-                      className="w-full"
-                      disabled={renderDisabled}
-                      onClick={onRunTemplateRender}
-                    >
-                      {rendering ? "Preparing slots and rendering…" : "Create real template render"}
-                    </Button>
-                  </div>
+                  <TemplateSlotAssignment
+                    assignments={templateAssignments}
+                    onAssign={onAssignTemplatePhoto}
+                    onTextChange={onTemplateTextChange}
+                    photos={photos}
+                    prefilledSlotProvenance={prefilledSlotProvenance}
+                    slots={visibleTemplateSlots}
+                    textValues={templateInputs}
+                  />
                 )}
-                {templateRender && (
-                  <p className="rounded-[12px] bg-card px-4 py-3 font-mono text-[13px] text-foreground">
-                    Render <b className="font-semibold">{templateRender.render_id}</b>{" "}
-                    <span className="text-muted-foreground">
-                      {templateRender.status}
-                      {renderArtifact
-                        ? ` · ${renderArtifact.pixel_width} × ${renderArtifact.pixel_height}px`
-                        : ""}
-                    </span>
-                  </p>
-                )}
-                <p className="max-w-[65ch] text-sm text-muted-foreground">
-                  Server rendering uses the returned stable slot contract. Local framing is not sent
-                  unless the public API publishes that input.
-                </p>
               </div>
             </Surface>
           )}
 
-          <Surface aria-labelledby="provider-offer-title" as="section">
-            <PanelHeading id="provider-offer-title" number="3" title="Returned provider offer" />
-            {offerState === "loading" && (
-              <p className="mt-4 text-sm text-muted-foreground">Reading live offer evidence…</p>
-            )}
-            {offers.length > 0 && (
-              <div className="mt-4">
-                <SelectField
-                  label="Available configuration"
-                  onChange={(event) => onSelectOffer(event.target.value)}
-                  value={selectedOfferId}
-                >
-                  {offers.map((offer) => (
-                    <option key={offer.id} value={offer.id}>
-                      {offer.provider_id.toUpperCase()} ·{" "}
-                      {Object.entries(offer.configuration)
-                        .map(([key, value]) => `${key}: ${value}`)
-                        .join(", ")}{" "}
-                      · provider cost {((offer.unit_cost_cents ?? 0) / 100).toFixed(2)}{" "}
-                      {offer.currency}
-                    </option>
-                  ))}
-                </SelectField>
-              </div>
-            )}
-            {offerState === "ready" && offers.length === 0 && (
-              <p className="mt-4 text-sm text-muted-foreground">
-                No provider offer is published for this product (demo cart only).
-              </p>
-            )}
-            {offerState === "error" && (
-              <p className="mt-4 text-sm text-muted-foreground">
-                Published provider offers are unavailable right now (demo cart only).
-              </p>
-            )}
-            <p className="mt-4 max-w-[65ch] text-sm text-muted-foreground">
-              Provider unit cost is API evidence, not a retail price.
-            </p>
-          </Surface>
-
+          {/* The shopper is looking at this print, so their own click adds it
+              outright. No card asks them about what already fills the screen. */}
           <Button className="w-full" onClick={onAddPreparedLine} size="lg">
-            Propose this print for the demo cart
+            Add to cart
           </Button>
         </div>
       </div>

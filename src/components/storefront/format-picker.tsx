@@ -32,7 +32,7 @@ export function FormatPicker({ products, selectedProductKey, state, onSelect }: 
 
   return <section className="py-10" aria-labelledby="format-picker-title">
     <div className="flex flex-col gap-3">
-      <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl" id="format-picker-title">Choose the frame, not the workflow.</h1>
+      <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl" id="format-picker-title">Choose print.</h1>
       <p className="max-w-[60ch] text-base leading-relaxed text-muted-foreground">Pick a common format here or ask the page agent to switch the visible print.</p>
     </div>
     {state === "loading" && <Notice className="mt-6" tone="info">Reading live formats…</Notice>}

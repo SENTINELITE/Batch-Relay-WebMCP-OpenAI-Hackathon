@@ -14,30 +14,80 @@ export type CartProposalCardProps = {
   aspect: string;
   /** Live client-side template preview, when the draft uses a template. */
   templatePreview: ReactNode | null;
+  /** 0 for the card on top of the deck, 1 and 2 for the ones peeking behind it. */
+  depth: number;
+  /** Proposals waiting beyond the visible depth, shown as a count on the deck. */
+  moreCount: number;
+  /** Set once the shopper has answered, while the card animates away. */
+  exit: "accept" | "reject" | null;
   onAccept: () => void;
   onReject: () => void;
 };
 
+const exitAnimation: Record<"accept" | "reject", string> = {
+  // Toward the masthead cart chip, after a beat of affirmation.
+  accept: "animate-proposal-accept",
+  reject: "animate-proposal-reject",
+};
+
 /**
- * Floating picture-in-picture card. It proposes exactly one draft for the demo
- * cart and stays visible until the shopper, or the agent on their behalf,
- * accepts or rejects it.
+ * One floating picture-in-picture proposal, a card in the bottom-left deck.
+ *
+ * Every card is the same width so the deck has a stable footprint whichever
+ * proposal is on top; the cards behind are scaled and dimmed by the stack, and
+ * only the top one is interactive. Each proposes exactly one draft for the demo
+ * cart and stays until the shopper, or the agent relaying their words, answers.
  */
 export function CartProposalCard({
   proposal,
   aspect,
   templatePreview,
+  depth,
+  moreCount,
+  exit,
   onAccept,
   onReject,
 }: CartProposalCardProps) {
   const focus = directCropFocus(proposal.draft.directCrop);
+  const onTop = depth === 0;
+  // The exit plays on the card itself, inside the stack's depth transform, so a
+  // resolved card can fly out while the one behind it scales up into its place.
+  const motion = exit
+    ? `${exitAnimation[exit]} motion-reduce:animate-none motion-reduce:opacity-0`
+    : "animate-proposal-in motion-reduce:animate-none";
+
+  const thumbnail = <PrintFrame aspect={aspect}>
+    {proposal.thumbnailURL
+      ? <img
+        alt={`Preview of ${proposal.productName}`}
+        className="block h-full w-full object-cover"
+        draggable={false}
+        src={proposal.thumbnailURL}
+        style={{
+          objectPosition: `${focus.focusX}% ${focus.focusY}%`,
+          transform: `scale(${proposal.draft.directCrop.zoom})`,
+        }}
+      />
+      : <span aria-hidden className="block h-full w-full bg-surface-warm" />}
+  </PrintFrame>;
 
   return (
     <aside
       aria-label="Cart proposal"
-      className="flex flex-col gap-3 rounded-[18px] border border-border-strong bg-card p-4 shadow-warm"
+      className={`${motion} relative flex w-full flex-col gap-3 rounded-[18px] border border-border-strong bg-card p-4 shadow-warm`}
       role="dialog"
     >
+      {onTop && moreCount > 0 ? (
+        <span
+          aria-hidden
+          className="absolute -right-2 -top-2 rounded-full border border-border-strong bg-surface-warm px-2 py-0.5 font-mono text-[11px] leading-tight text-muted-foreground shadow-warm"
+        >
+          +{moreCount} more
+        </span>
+      ) : null}
+
+      <b className="block text-[15px] font-semibold leading-tight">{proposal.productName}</b>
+
       <div className="flex items-center justify-between gap-2">
         <Chip tone="warning">Preview</Chip>
         <span className="font-mono text-[13px] text-muted-foreground">
@@ -45,36 +95,19 @@ export function CartProposalCard({
         </span>
       </div>
 
-      <b className="block text-[15px] font-semibold leading-tight">{proposal.productName}</b>
-
       <div className="overflow-hidden">
         {templatePreview ? (
           <div className="pointer-events-none [&_section]:border-0 [&_section]:bg-transparent [&_section]:p-0">
             {templatePreview}
           </div>
-        ) : (
-          <PrintFrame aspect={aspect}>
-            {proposal.thumbnailURL ? (
-              <img
-                alt={`Preview of ${proposal.productName}`}
-                className="block h-full w-full object-cover"
-                draggable={false}
-                src={proposal.thumbnailURL}
-                style={{
-                  objectPosition: `${focus.focusX}% ${focus.focusY}%`,
-                  transform: `scale(${proposal.draft.directCrop.zoom})`,
-                }}
-              />
-            ) : <span aria-hidden className="block h-full w-full bg-surface-warm" />}
-          </PrintFrame>
-        )}
+        ) : thumbnail}
       </div>
 
       <div className="flex gap-2">
-        <Button className="flex-1" onClick={onAccept}>
+        <Button className="flex-1" disabled={Boolean(exit) || !onTop} onClick={onAccept}>
           Add to cart
         </Button>
-        <Button className="flex-1" onClick={onReject} variant="secondary">
+        <Button className="flex-1" disabled={Boolean(exit) || !onTop} onClick={onReject} variant="secondary">
           Don&apos;t add
         </Button>
       </div>
