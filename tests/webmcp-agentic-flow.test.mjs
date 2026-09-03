@@ -106,22 +106,22 @@ const approvedTools = [
     exportName: "configurePrint",
     stableKey: "storefront.prepare_print_images",
     name: "configure_print",
-    description: "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
+    description: "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
     fields: ["draftId", "trayRevision", "photoRefs", "productId", "productQuery", "templateId", "outputId", "orientation", "slotPatches", "directCrop"],
   },
   {
     exportName: "addToCart",
     stableKey: "storefront.add_to_cart",
     name: "add_to_cart",
-    description: "Use when a shopper wants a complete visible print draft added to this browser's demo cart. Takes the draft_id returned by configure_print or listed by ask_storefront, and works from whichever step the shopper is already looking at without navigating them anywhere. Shows a picture-in-picture proposal card with a live preview the shopper accepts or rejects, and returns immediately without waiting; it never renders fulfillment artwork, charges a card, or creates an order.",
+    description: "Use when a shopper wants a complete visible print draft added to this browser's demo cart. Takes the draft_id returned by configure_print or listed by ask_storefront, and works from whichever step the shopper is already looking at without navigating them anywhere. Shows a picture-in-picture proposal card with a live preview and returns immediately without waiting: this only proposes, and the proposal now awaits the SHOPPER's decision, made by clicking the card or saying so in their own words. Stop here and tell the shopper the card is waiting; asking you to add something to the cart is a request for this proposal, never confirmation of it, so you must not resolve your own proposal. It never renders fulfillment artwork, charges a card, or creates an order.",
     fields: ["draftId", "quantity"],
   },
   {
     exportName: "resolveCartProposal",
     stableKey: "storefront.resolve_cart_proposal",
     name: "resolve_cart_proposal",
-    description: "Use when a shopper answers the visible picture-in-picture proposal card in words instead of clicking it. Accepts the proposal into the demo cart or rejects and dismisses it, exactly as the two visible buttons would, and returns the resulting cart state.",
-    fields: ["proposalId", "decision"],
+    description: "Use exclusively to relay the shopper's own explicit decision about the visible picture-in-picture proposal card, spoken by them after that card appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Acts exactly as the two visible buttons would and returns the resulting cart state.",
+    fields: ["proposalId", "decision", "shopperConfirmation"],
   },
   {
     exportName: "manageCart",
@@ -180,7 +180,7 @@ test("cart proposals use completed visible draft IDs, not product or offer ident
   assert.match(inputSchema(cart), /required:\s*\["draftId"\]/);
   assert.doesNotMatch(inputSchema(cart), /\b(?:productId|offerId)\b/);
   assert.match(inputSchema(cart), /quantity:\s*\{\s*type:\s*"integer",\s*minimum:\s*1,\s*maximum:\s*99,\s*default:\s*1\s*\}/);
-  assert.match(inputSchema(resolve), /required:\s*\["proposalId",\s*"decision"\]/);
+  assert.match(inputSchema(resolve), /required:\s*\["proposalId",\s*"decision",\s*"shopperConfirmation"\]/);
   assert.match(inputSchema(resolve), /decision:\s*\{\s*type:\s*"string",\s*enum:\s*\["accept",\s*"reject"\]\s*\}/);
   assert.doesNotMatch(source, /name:\s*"render_template_preview"/);
 });
@@ -191,6 +191,53 @@ test("add_to_cart returns without blocking and refuses to stack proposals", asyn
   assert.match(cart, /state\.pendingProposal/);
   assert.match(cart, /resolve_cart_proposal first/);
   assert.match(toolDefinition(source, "resolveCartProposal"), /getStorefrontWebMcpState\(\)\.pendingProposal/);
+});
+
+test("only the shopper resolves a proposal, and their own words must be quoted", async () => {
+  // An agent proposed a print, said "since you asked for it, I'll accept it",
+  // and resolved its own proposal. Nothing can prove who spoke, so the tool
+  // makes auto-acceptance an unambiguous protocol violation and demands the
+  // shopper's verbatim words before the proposal can be answered at all.
+  const source = await read("src/webmcp/tools/storefront.ts");
+  const resolve = toolDefinition(source, "resolveCartProposal");
+  assert.match(resolve, /shopperConfirmation:\s*\{\s*type:\s*"string",\s*minLength:\s*1\s*\}/);
+  assert.match(resolve, /input\.shopperConfirmation !== "string" \|\| input\.shopperConfirmation\.trim\(\)\.length === 0/);
+  assert.match(resolve, /description:[\s\S]*?Only the shopper can accept or reject a proposal/);
+  assert.match(resolve, /description:[\s\S]*?is NOT confirmation of one/);
+
+  const addToCart = toolDefinition(source, "addToCart");
+  assert.match(addToCart, /description:[\s\S]*?awaits the SHOPPER's decision/);
+  assert.match(addToCart, /description:[\s\S]*?must not resolve your own proposal/);
+
+  // The workbench refuses the same way, so the guarantee does not depend on
+  // the tool layer being the only caller.
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  const handler = ui.slice(ui.indexOf('request.action === "resolve_cart_proposal"'));
+  assert.match(handler, /request\.input\.shopperConfirmation/);
+  assert.match(handler, /shopper_confirmation: shopperConfirmation/);
+  assert.match(handler, /decided_by: "shopper"/);
+});
+
+test("a proposal returns as a question for the shopper, not a step the agent may finish", async () => {
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  const addToCart = ui.slice(ui.indexOf('request.action === "add_to_cart"'), ui.indexOf('request.action === "resolve_cart_proposal"'));
+  assert.match(addToCart, /status: "awaiting_shopper_confirmation"/);
+  assert.match(addToCart, /nextStep: "await_shopper_decision"/);
+  assert.match(addToCart, /waiting on the shopper/);
+  assert.match(addToCart, /Do not call resolve_cart_proposal unless the shopper has since said what they want/);
+});
+
+test("an incomplete draft is refused in words that name the missing slot and ask the shopper", async () => {
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  const addToCart = ui.slice(ui.indexOf('request.action === "add_to_cart"'), ui.indexOf('request.action === "resolve_cart_proposal"'));
+  assert.match(addToCart, /missingTemplateDraftRequirements\(draft\)/);
+  assert.match(addToCart, /describeMissingRequirements\(/);
+  assert.match(addToCart, /missingRequirementsGuidance\(detail\)/);
+
+  const configure = ui.slice(ui.indexOf('request.action === "configure_print"'), ui.indexOf('request.action === "add_to_cart"'));
+  assert.match(configure, /missing: missingDetail/);
+  assert.match(configure, /guidance: missingRequirementsGuidance\(missingDetail\)/);
+  assert.match(configure, /"ask_shopper_for_missing_slots"/);
 });
 
 test("manage_cart view works on an empty demo cart while mutations still refuse", async () => {

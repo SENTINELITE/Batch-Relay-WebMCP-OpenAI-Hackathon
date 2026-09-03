@@ -4,7 +4,6 @@ import type { ReactNode } from "react";
 import Image from "next/image";
 import {
   Button,
-  Notice,
   PrintFrame,
   RangeField,
   SelectField,
@@ -17,22 +16,16 @@ import type {
   ProviderOffer,
   PublishedTemplate,
   TemplateContract,
-  TemplateOutput,
   TemplateRender,
 } from "@/lib/storefront/client";
-import type { TemplateState } from "@/lib/storefront/customization";
 import type { BrowserPreviewTransform } from "@/lib/storefront/browser-preview";
 import type { BrowserPhoto } from "@/lib/storefront/photo-library";
-import { compatibleOutputVariantSummary } from "@/lib/storefront/template-compatibility";
-
-export type PrepareStepNotice = { tone: "error" | "info"; message: string } | null;
 
 export type PrepareStepProps = {
   /** The template image slot the preview is currently editing, if it holds a photo. */
   activeImageSlotKey: string | null;
   activeSlotTransform: BrowserPreviewTransform | null;
   browserPreview: ReactNode;
-  compatibleOutputs: TemplateOutput[];
   crop: "5:7" | "4:5";
   cropX: number;
   cropY: number;
@@ -50,12 +43,10 @@ export type PrepareStepProps = {
   onCropXChange: (focusX: number) => void;
   onCropYChange: (focusY: number) => void;
   onCropZoomChange: (zoom: number) => void;
-  onDiscoverTemplates: () => void;
   onPrepareLocalImage: () => void;
   onRunTemplateRender: () => void;
   onSelectOffer: (offerId: string) => void;
   onSelectTemplate: (templateId: string) => void;
-  onSelectTemplateOutput: (outputId: string) => void;
   /** Live framing while a slider is moving; the preview repaints from it. */
   onSlotTransformChange: (slotKey: string, transform: BrowserPreviewTransform) => void;
   /** Released framing: the same commit the preview's drag editing makes. */
@@ -71,14 +62,10 @@ export type PrepareStepProps = {
   selectedPhotoOrdinal: string;
   selectedProduct: CatalogProduct;
   selectedTemplateId: string;
-  selectedTemplateOutputId: string;
   templateAssignments: Record<string, string>;
   templateContract: TemplateContract | null;
   templateInputs: Record<string, string>;
-  templateNotice: PrepareStepNotice;
-  templateOutput: TemplateOutput | null;
   templateRender: TemplateRender | null;
-  templateState: TemplateState;
   templates: PublishedTemplate[];
   visibleTemplateSlots: TemplateContract["slots"];
 };
@@ -98,7 +85,6 @@ export function PrepareStep({
   activeImageSlotKey,
   activeSlotTransform,
   browserPreview,
-  compatibleOutputs,
   crop,
   cropX,
   cropY,
@@ -116,12 +102,10 @@ export function PrepareStep({
   onCropXChange,
   onCropYChange,
   onCropZoomChange,
-  onDiscoverTemplates,
   onPrepareLocalImage,
   onRunTemplateRender,
   onSelectOffer,
   onSelectTemplate,
-  onSelectTemplateOutput,
   onSlotTransformChange,
   onSlotTransformCommit,
   onTemplateTextChange,
@@ -135,14 +119,10 @@ export function PrepareStep({
   selectedPhotoOrdinal,
   selectedProduct,
   selectedTemplateId,
-  selectedTemplateOutputId,
   templateAssignments,
   templateContract,
   templateInputs,
-  templateNotice,
-  templateOutput,
   templateRender,
-  templateState,
   templates,
   visibleTemplateSlots,
 }: PrepareStepProps) {
@@ -237,13 +217,6 @@ export function PrepareStep({
                 </div>
               )}
 
-              <p className="mt-3 text-sm text-muted-foreground">
-                Live template preview · {selectedProduct.name}
-              </p>
-              <p className="mt-2 max-w-[65ch] text-sm text-muted-foreground">
-                Every photograph stays attached to its exact published slot key. This preview
-                repaints as slots are assigned, swapped, or recropped. It is not a provider proof.
-              </p>
             </>
           ) : (
             <>
@@ -365,56 +338,23 @@ export function PrepareStep({
             <Surface aria-labelledby="template-title" as="section">
               <PanelHeading id="template-title" number="2" title="Published studio template" />
               <div className="mt-4 flex flex-col gap-4">
-                <Button
-                  className="self-start"
-                  disabled={templateState === "loading"}
-                  onClick={onDiscoverTemplates}
-                  variant="secondary"
+                <SelectField
+                  disabled={templates.length === 0}
+                  label="Template"
+                  onChange={(event) => onSelectTemplate(event.target.value)}
+                  value={selectedTemplateId}
                 >
-                  {templateState === "loading" ? "Reading…" : "Read active templates"}
-                </Button>
-                {templateNotice && (
-                  <Notice tone={templateNotice.tone === "error" ? "error" : "info"}>
-                    {templateNotice.message}
-                  </Notice>
-                )}
-                {templates.length > 0 && (
-                  <SelectField
-                    label="Template"
-                    onChange={(event) => onSelectTemplate(event.target.value)}
-                    value={selectedTemplateId}
-                  >
-                    <option value="">Select a returned template</option>
-                    {templates.map((template) => (
-                      <option key={template.id} value={template.id}>
-                        {template.name ?? template.id}
-                      </option>
-                    ))}
-                  </SelectField>
-                )}
-                {compatibleOutputs.length > 0 && (
-                  <SelectField
-                    hint={`Matched only by canonical product ${selectedProduct.id} at revision ${selectedProduct.revision}; every compatible output remains selectable.`}
-                    label="Compatible published output"
-                    onChange={(event) => onSelectTemplateOutput(event.target.value)}
-                    value={selectedTemplateOutputId}
-                  >
-                    {compatibleOutputs.map((output) => (
-                      <option key={output.id} value={output.id}>
-                        {output.label ?? output.id}
-                        {compatibleOutputVariantSummary(output, selectedProduct)
-                          ? ` · ${compatibleOutputVariantSummary(output, selectedProduct)}`
-                          : ""}
-                      </option>
-                    ))}
-                  </SelectField>
-                )}
+                  <option value="">
+                    {templates.length === 0 ? "Loading templates…" : "Select a template"}
+                  </option>
+                  {templates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name ?? template.id}
+                    </option>
+                  ))}
+                </SelectField>
                 {templateContract && (
                   <div className="flex flex-col gap-4">
-                    <p className="max-w-[65ch] text-sm text-muted-foreground">
-                      Compatible output: {templateOutput?.label ?? templateOutput?.id}. Every image
-                      remains attached to its exact published slot key.
-                    </p>
                     <TemplateSlotAssignment
                       assignments={templateAssignments}
                       onAssign={onAssignTemplatePhoto}

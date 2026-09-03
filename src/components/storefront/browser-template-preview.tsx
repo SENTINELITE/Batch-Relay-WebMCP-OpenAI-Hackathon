@@ -218,6 +218,5 @@ export function BrowserTemplatePreview({
       </div>
     </PrintFrame>
     {activeImageSlotKey && localImageSlots[activeImageSlotKey]?.source && <RangeField aria-label={`Image zoom for ${activeImageSlotKey}`} label={<>Image zoom · <span className="font-mono text-[13px]">{activeImageSlotKey}</span></>} max="4" min="1" onBlur={() => commit("slider_release", activeImageSlotKey)} onChange={(event) => updateTransform(activeImageSlotKey, { ...eventTransformFor(activeImageSlotKey), zoom: Number(event.target.value) })} onPointerUp={() => commit("slider_release", activeImageSlotKey)} step="0.01" value={activeTransform.zoom} />}
-    <p className="text-sm text-muted-foreground">Select an assigned image slot to reposition it. Local preview updates at animation-frame speed; server proof remains tied to the published framing contract.</p>
   </section>;
 }

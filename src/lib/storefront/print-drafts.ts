@@ -70,6 +70,78 @@ export function missingTemplateDraftRequirements(draft: PrintDraft): string[] {
     !draft.slotAssignments[slotKey] && !draft.textValues[slotKey]?.trim());
 }
 
+/**
+ * A missing requirement stated in words the agent can hand straight to the
+ * shopper. A bare slot key invites an agent to guess a photograph; a named role
+ * and a written question invite it to ask.
+ */
+export type MissingRequirement = {
+  slot_key: string;
+  label: string | null;
+  kind: "image" | "text" | "template";
+  aliases: string[];
+  ask_shopper: string;
+};
+
+type DescribableSlot = { key: string; kind: "image" | "text"; suggested_label?: string | null };
+
+/** The role word an agent and a shopper would both recognise for this slot. */
+function requirementName(slot: DescribableSlot, aliases: readonly string[]): string {
+  return aliases[0] ?? slot.suggested_label ?? slot.key.replace(/[_-]+/g, " ");
+}
+
+export function askShopperForRequirement(slot: DescribableSlot, aliases: readonly string[]): string {
+  const name = requirementName(slot, aliases);
+  return slot.kind === "text"
+    ? `What should the ${name} say?`
+    : `Which photo should be the ${name} image?`;
+}
+
+/**
+ * Turns the stable requirement keys into slot facts plus a written question.
+ * The two template-level sentinels describe themselves, because neither is
+ * something the shopper can answer with a photograph.
+ */
+export function describeMissingRequirements(
+  missing: readonly string[],
+  slots: readonly DescribableSlot[],
+  aliasesBySlotKey: Readonly<Record<string, readonly string[]>>,
+): MissingRequirement[] {
+  return missing.map((key) => {
+    const slot = slots.find((candidate) => candidate.key === key);
+    if (!slot) {
+      return {
+        slot_key: key,
+        label: null,
+        kind: "template" as const,
+        aliases: [],
+        ask_shopper: key === "published_template_output"
+          ? "No compatible published template output is applied yet; ask the shopper which layout they want."
+          : "The published template contract has not loaded yet; retry configure_print before asking the shopper for photographs.",
+      };
+    }
+    const aliases = [...(aliasesBySlotKey[slot.key] ?? [])];
+    return {
+      slot_key: slot.key,
+      label: slot.suggested_label ?? null,
+      kind: slot.kind,
+      aliases,
+      ask_shopper: askShopperForRequirement(slot, aliases),
+    };
+  });
+}
+
+/**
+ * The top-level instruction. Naming the slots and forbidding a guess is what
+ * turns a silently incomplete draft into a question the shopper gets asked.
+ */
+export function missingRequirementsGuidance(missing: readonly MissingRequirement[]): string | null {
+  if (missing.length === 0) return null;
+  const questions = missing.map((requirement) => requirement.ask_shopper).join(" ");
+  const names = missing.map((requirement) => requirement.aliases[0] ?? requirement.label ?? requirement.slot_key).join(", ");
+  return `This draft is not finished: ${names} still unfilled. Ask the shopper — ${questions} — and wait for their answer before calling configure_print again. Do not choose photographs for them, and do not call add_to_cart until every named requirement is filled.`;
+}
+
 type TemplateRequirementSlot = { key: string; kind: "image" | "text"; required: boolean };
 
 /**

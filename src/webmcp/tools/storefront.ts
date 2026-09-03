@@ -59,6 +59,7 @@ type AddToCartInput = {
 type ResolveCartProposalInput = {
   proposalId: string;
   decision: "accept" | "reject";
+  shopperConfirmation: string;
 };
 
 type ManageCartInput = {
@@ -128,7 +129,7 @@ export const configurePrint = defineTool<ConfigurePrintInput>({
   name: "configure_print",
   title: "Configure a print from the photo tray",
   description:
-    "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
+    "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
   inputSchema: {
     type: "object",
     properties: {
@@ -207,7 +208,7 @@ export const addToCart = defineTool<AddToCartInput>({
   name: "add_to_cart",
   title: "Propose a prepared print for the demo cart",
   description:
-    "Use when a shopper wants a complete visible print draft added to this browser's demo cart. Takes the draft_id returned by configure_print or listed by ask_storefront, and works from whichever step the shopper is already looking at without navigating them anywhere. Shows a picture-in-picture proposal card with a live preview the shopper accepts or rejects, and returns immediately without waiting; it never renders fulfillment artwork, charges a card, or creates an order.",
+    "Use when a shopper wants a complete visible print draft added to this browser's demo cart. Takes the draft_id returned by configure_print or listed by ask_storefront, and works from whichever step the shopper is already looking at without navigating them anywhere. Shows a picture-in-picture proposal card with a live preview and returns immediately without waiting: this only proposes, and the proposal now awaits the SHOPPER's decision, made by clicking the card or saying so in their own words. Stop here and tell the shopper the card is waiting; asking you to add something to the cart is a request for this proposal, never confirmation of it, so you must not resolve your own proposal. It never renders fulfillment artwork, charges a card, or creates an order.",
   inputSchema: {
     type: "object",
     properties: {
@@ -235,14 +236,15 @@ export const resolveCartProposal = defineTool<ResolveCartProposalInput>({
   name: "resolve_cart_proposal",
   title: "Resolve a pending cart proposal",
   description:
-    "Use when a shopper answers the visible picture-in-picture proposal card in words instead of clicking it. Accepts the proposal into the demo cart or rejects and dismisses it, exactly as the two visible buttons would, and returns the resulting cart state.",
+    "Use exclusively to relay the shopper's own explicit decision about the visible picture-in-picture proposal card, spoken by them after that card appeared. Only the shopper can accept or reject a proposal: calling this on your own initiative, or to confirm a proposal you yourself just made, is a protocol violation, not a shortcut. Asking for something to be added to the cart is a request for a proposal and is NOT confirmation of one, so after add_to_cart you stop and wait. Pass the shopper's confirming or declining words verbatim as shopperConfirmation; if you cannot quote them, they have not decided yet and you must ask. Acts exactly as the two visible buttons would and returns the resulting cart state.",
   inputSchema: {
     type: "object",
     properties: {
       proposalId: { type: "string", minLength: 1 },
       decision: { type: "string", enum: ["accept", "reject"] },
+      shopperConfirmation: { type: "string", minLength: 1 },
     },
-    required: ["proposalId", "decision"],
+    required: ["proposalId", "decision", "shopperConfirmation"],
     additionalProperties: false,
   },
   async execute(input) {
@@ -250,6 +252,13 @@ export const resolveCartProposal = defineTool<ResolveCartProposalInput>({
       getStorefrontWebMcpState().pendingProposal,
       "resolve a cart proposal while none is visible",
     );
+    // The quote is the whole point of the parameter: an empty one means the
+    // agent is answering its own proposal.
+    if (typeof input.shopperConfirmation !== "string" || input.shopperConfirmation.trim().length === 0) {
+      throw new Error(
+        "shopperConfirmation must quote the shopper's own words accepting or declining the visible proposal. If they have not answered yet, ask them and wait.",
+      );
+    }
     return requestStorefrontWebMcpAction("resolve_cart_proposal", input);
   },
 });

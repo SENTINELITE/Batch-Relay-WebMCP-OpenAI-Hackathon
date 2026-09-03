@@ -39,11 +39,13 @@ export function CartProposalCard({
       role="dialog"
     >
       <div className="flex items-center justify-between gap-2">
-        <Chip tone="warning">Proposed</Chip>
+        <Chip tone="warning">Preview</Chip>
         <span className="font-mono text-[13px] text-muted-foreground">
           Qty {proposal.quantity}
         </span>
       </div>
+
+      <b className="block text-[15px] font-semibold leading-tight">{proposal.productName}</b>
 
       <div className="overflow-hidden">
         {templatePreview ? (
@@ -63,20 +65,9 @@ export function CartProposalCard({
                   transform: `scale(${proposal.draft.directCrop.zoom})`,
                 }}
               />
-            ) : (
-              <span className="flex h-full items-center justify-center p-2 text-center text-[13px] text-muted-foreground">
-                That photograph is no longer in the tray.
-              </span>
-            )}
+            ) : <span aria-hidden className="block h-full w-full bg-surface-warm" />}
           </PrintFrame>
         )}
-      </div>
-
-      <div>
-        <b className="block text-[15px] font-semibold leading-tight">{proposal.productName}</b>
-        <small className="mt-0.5 block text-[13px] text-muted-foreground">
-          Demo cart only — nothing is ordered or charged.
-        </small>
       </div>
 
       <div className="flex gap-2">

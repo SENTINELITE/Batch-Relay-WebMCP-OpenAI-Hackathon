@@ -15,10 +15,12 @@ import { type TemplateState } from "@/lib/storefront/customization";
 import {
   createPrintDraft,
   cropPatchFromSlotTransform,
+  describeMissingRequirements,
   directCropFocus,
   effectiveRequiredTemplateSlotKeys,
   effectiveTemplateSlotRequired,
   isCompleteTemplateDraft,
+  missingRequirementsGuidance,
   missingTemplateDraftRequirements,
   naturalProductMatches,
   patchPrintDraft,
@@ -174,12 +176,12 @@ export function ManualStorefront() {
   const [offerState, setOfferState] = useState<"idle" | "loading" | "error" | "ready">("idle");
   const [selectedOfferId, setSelectedOfferId] = useState("");
   const [templates, setTemplates] = useState<PublishedTemplate[]>([]);
-  const [templateState, setTemplateState] = useState<TemplateState>("idle");
-  const [templateNotice, setTemplateNotice] = useState<Notice>(null);
+  const [, setTemplateState] = useState<TemplateState>("idle");
+  const [, setTemplateNotice] = useState<Notice>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [compatibleOutputs, setCompatibleOutputs] = useState<TemplateOutput[]>([]);
   const [templateOutputsRevisionID, setTemplateOutputsRevisionID] = useState("");
-  const [selectedTemplateOutputId, setSelectedTemplateOutputId] = useState("");
+  const [, setSelectedTemplateOutputId] = useState("");
   const [templateOutput, setTemplateOutput] = useState<TemplateOutput | null>(null);
   const [templateContract, setTemplateContract] = useState<TemplateContract | null>(null);
   const [templateInputs, setTemplateInputs] = useState<Record<string, string>>({});
@@ -226,6 +228,12 @@ export function ManualStorefront() {
       setNotice({ tone: "error", message: `Catalog unavailable: ${responseMessage(error)}` });
     });
     return () => { live = false; };
+  }, []);
+
+  // Fetch the available templates as the storefront opens. Selecting a print
+  // can then immediately choose the first compatible template and output.
+  useEffect(() => {
+    void discoverTemplates();
   }, []);
 
   useEffect(() => { photoLibraryRef.current = photoLibrary; }, [photoLibrary]);
@@ -1227,6 +1235,13 @@ export function ManualStorefront() {
           // The live template preview must repaint before the agent hears back.
           await nextPaint();
           const responseSlotAliases = responseContract ? imageSlotAliasesForContract(responseContract) : {};
+          // A bare slot key invites the agent to guess a photograph. Naming the
+          // role and writing the question out invites it to ask the shopper.
+          const missingDetail = describeMissingRequirements(
+            missingRequirements,
+            responseContract?.slots ?? [],
+            responseSlotAliases,
+          );
           respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
             status: "configured",
             draft_id: draft.id,
@@ -1257,8 +1272,10 @@ export function ManualStorefront() {
             direct_crop: visibleDirectCrop(finalDraft),
             default_photo_from: roleDefault ? prefillProvenance(roleDefault.role) : null,
             missing_requirements: missingRequirements,
+            missing: missingDetail,
+            guidance: missingRequirementsGuidance(missingDetail),
             nextStep: product.template_requirement === "required"
-              ? missingRequirements.length === 0 ? "ready_for_proof_or_cart" : "complete_template_slots"
+              ? missingRequirements.length === 0 ? "ready_for_proof_or_cart" : "ask_shopper_for_missing_slots"
               : "prepare_visible_crop",
           } });
           return;
@@ -1273,6 +1290,21 @@ export function ManualStorefront() {
           if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity > 99) {
             throw new Error("quantity must be a whole number from 1 through 99.");
           }
+          // An incomplete draft is refused in the same words configure_print
+          // uses, so the agent asks the shopper for the named photograph rather
+          // than reading "not ready" and picking one itself.
+          const cartMissingKeys = draft.template ? missingTemplateDraftRequirements(draft) : [];
+          if (cartMissingKeys.length > 0) {
+            const contract = await storefrontClient
+              .templateContract(draft.template!.id, draft.template!.outputId, draft.template!.revisionId)
+              .catch(() => null);
+            const detail = describeMissingRequirements(
+              cartMissingKeys,
+              contract?.slots ?? [],
+              contract ? imageSlotAliasesForContract(contract) : {},
+            );
+            throw new Error(missingRequirementsGuidance(detail) ?? "Complete every required visible template slot before proposing this draft.");
+          }
           // Deliberately no selectDraft here. Adding to the cart must not move
           // the shopper to another step, and reselecting the draft would also
           // tear down and refetch the very template preview the proposal card
@@ -1285,6 +1317,11 @@ export function ManualStorefront() {
             proposal_id: proposal.id,
             draft_id: proposal.draftId,
             product_name: proposal.productName,
+            decided_by: "shopper",
+            // Said in words, because the status alone was read as permission to
+            // answer the agent's own proposal.
+            guidance: `Nothing has been added yet. The proposal card for ${proposal.quantity} × ${proposal.productName} is now on screen and waiting on the shopper, who decides by clicking Add or Don't add, or by saying so out loud. Tell them the card is waiting and stop. Do not call resolve_cart_proposal unless the shopper has since said what they want, and then quote their words in shopperConfirmation.`,
+            nextStep: "await_shopper_decision",
           } });
           return;
         }
@@ -1292,6 +1329,15 @@ export function ManualStorefront() {
           const proposalId = typeof request.input.proposalId === "string" ? request.input.proposalId : null;
           const decision = request.input.decision;
           if (decision !== "accept" && decision !== "reject") throw new Error("decision must be accept or reject.");
+          // The confirmation is the shopper's own sentence. Requiring it here as
+          // well as in the tool means a proposal can only be answered by
+          // pointing at something the shopper actually said.
+          const shopperConfirmation = typeof request.input.shopperConfirmation === "string"
+            ? request.input.shopperConfirmation.trim()
+            : "";
+          if (!shopperConfirmation) {
+            throw new Error("resolve_cart_proposal relays the shopper's decision only: quote their own words in shopperConfirmation. If they have not answered the visible card yet, ask them and wait.");
+          }
           if (!pendingProposal) throw new Error("No cart proposal is visible.");
           if (proposalId !== pendingProposal.id) throw new Error(`The visible proposal is ${pendingProposal.id}.`);
           const nextCart = resolveProposal(pendingProposal, decision);
@@ -1299,6 +1345,9 @@ export function ManualStorefront() {
           respondToStorefrontWebMcpAction({ requestId: request.requestId, result: {
             proposal_id: pendingProposal.id,
             decision: decision === "accept" ? "accepted" : "rejected",
+            // Echoed so the shopper's own words stay attached to the outcome.
+            shopper_confirmation: shopperConfirmation,
+            decided_by: "shopper",
             cart_item_count: nextCart.length,
             items: localCartWireItems(nextCart),
           } });
@@ -1360,7 +1409,6 @@ export function ManualStorefront() {
         activeImageSlotKey={activeImageSlotKey}
         activeSlotTransform={activeSlotTransform}
         browserPreview={browserPreviewDocument ? <BrowserTemplatePreview activeImageSlotKey={activeImageSlotKey} assetURLs={browserPreviewAssetURLs} document={browserPreviewDocument} key={selectedBrowserPreviewSurfaceID} localImageSlots={browserPreviewImageSlots} onActiveImageSlotChange={setActiveImageSlotKey} onPreviewChange={(slotKey, transform) => changeBrowserPreviewTransform(slotKey, transform)} onPreviewCommit={(_, slotKey, transform) => updateBrowserPreviewTransform(slotKey, transform)} onSurfaceChange={(surfaceID) => { invalidateTemplateRenderForBrowserPreviewChange(); setSelectedBrowserPreviewSurfaceID(surfaceID); }} selectedSurfaceID={selectedBrowserPreviewSurfaceID} serverProof={null} textValues={templateInputs} /> : null}
-        compatibleOutputs={compatibleOutputs}
         crop={crop}
         cropX={cropX}
         cropY={cropY}
@@ -1378,12 +1426,10 @@ export function ManualStorefront() {
         onCropXChange={(focusX) => { setCropX(focusX); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { zoom: cropZoom, focusX, focusY: cropY } }); }}
         onCropYChange={(focusY) => { setCropY(focusY); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { zoom: cropZoom, focusX: cropX, focusY } }); }}
         onCropZoomChange={(zoom) => { setCropZoom(zoom); if (selectedDraftId) patchDraft(selectedDraftId, { directCrop: { zoom, focusX: cropX, focusY: cropY } }); }}
-        onDiscoverTemplates={discoverTemplates}
         onPrepareLocalImage={prepareLocalImage}
         onRunTemplateRender={() => void runTemplateRender().catch(() => undefined)}
         onSelectOffer={setSelectedOfferId}
         onSelectTemplate={(templateId) => void chooseTemplate(templateId).catch((error) => setTemplateNotice({ tone: "error", message: responseMessage(error) }))}
-        onSelectTemplateOutput={(outputID) => void selectTemplateOutput({ outputID }).catch((error) => setTemplateNotice({ tone: "error", message: responseMessage(error) }))}
         onSlotTransformChange={changeBrowserPreviewTransform}
         onSlotTransformCommit={updateBrowserPreviewTransform}
         onTemplateTextChange={(slotKey, value) => { invalidateTemplateRenderForBrowserPreviewChange(); setTemplateInputs((values) => ({ ...values, [slotKey]: value })); }}
@@ -1397,14 +1443,10 @@ export function ManualStorefront() {
         selectedPhotoOrdinal={photoLibrary.selectedPhotoId ? String(photoLibrary.photos.findIndex((photo) => photo.id === photoLibrary.selectedPhotoId) + 1).padStart(2, "0") : "—"}
         selectedProduct={selectedProduct}
         selectedTemplateId={selectedTemplateId}
-        selectedTemplateOutputId={selectedTemplateOutputId}
         templateAssignments={templateAssignments}
         templateContract={templateContract}
         templateInputs={templateInputs}
-        templateNotice={templateNotice}
-        templateOutput={templateOutput}
         templateRender={templateRender}
-        templateState={templateState}
         templates={templates}
         visibleTemplateSlots={visibleTemplateSlots}
       />}

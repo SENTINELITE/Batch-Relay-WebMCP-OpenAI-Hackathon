@@ -67,6 +67,58 @@ test("a direct print records its selected photo from the printed orientation", (
   assert.deepEqual(rememberDirectPhoto(landscape, null, "photo_c"), landscape);
 });
 
+test("a one-off direct print never rewrites a role a template slot already named", () => {
+  // The reported corruption: a memory mate is configured with images 5 and 6,
+  // then "add an 8x10 of image 12" — a one-off direct print — overwrote the
+  // individual default with image 12 and spoiled every later prefill.
+  const aliases = deriveImageSlotAliases(memoryMateSlots, memoryMateBoxes);
+  const memoryMateRoles = photoRolesBySlotKey(memoryMateSlots.map((slot) => ({
+    key: slot.key,
+    aliases: aliases[slot.key],
+    box: memoryMateBoxes[slot.key],
+  })));
+  const afterMemoryMate = rememberSlotAssignments(
+    emptyPhotoRoleMemory,
+    { image_face: "photo_5", image_hero: "photo_6" },
+    memoryMateRoles,
+  );
+  assert.deepEqual(afterMemoryMate, { individual: "photo_5", team: "photo_6" });
+
+  // 8x10 is portrait, so it speaks for the individual role — and must not.
+  const afterOneOff = rememberDirectPhoto(afterMemoryMate, { width: 8, height: 10 }, "photo_12");
+  assert.deepEqual(afterOneOff, { individual: "photo_5", team: "photo_6" });
+  const afterLandscapeOneOff = rememberDirectPhoto(afterOneOff, { width: 10, height: 8 }, "photo_12");
+  assert.deepEqual(afterLandscapeOneOff, { individual: "photo_5", team: "photo_6" });
+
+  // A later memory mate still prefills the photographs the shopper chose.
+  const { assignments } = prefillSlotAssignments({
+    assignments: {},
+    memory: afterOneOff,
+    rolesBySlotKey: memoryMateRoles,
+    availablePhotoIds: ["photo_5", "photo_6", "photo_12"],
+  });
+  assert.deepEqual(assignments, { image_face: "photo_5", image_hero: "photo_6" });
+
+  // A template slot stays authoritative and always re-records its role.
+  const reassigned = rememberSlotAssignments(afterOneOff, { image_face: "photo_12" }, memoryMateRoles);
+  assert.deepEqual(reassigned, { individual: "photo_12", team: "photo_6" });
+});
+
+test("a direct print still claims a role no one has claimed yet", () => {
+  // The preserved flow: a photograph printed on a 5x7 first becomes the
+  // individual default for a memory mate configured afterwards.
+  const afterFivebySeven = rememberDirectPhoto(emptyPhotoRoleMemory, { width: 5, height: 7 }, "photo_a");
+  assert.deepEqual(afterFivebySeven, { individual: "photo_a" });
+  // The unclaimed team role is still free for a landscape one-off to name.
+  const afterEightByTen = rememberDirectPhoto(afterFivebySeven, { width: 10, height: 8 }, "photo_b");
+  assert.deepEqual(afterEightByTen, { individual: "photo_a", team: "photo_b" });
+  // But the second portrait print is a one-off and leaves the default alone.
+  assert.deepEqual(
+    rememberDirectPhoto(afterEightByTen, { width: 5, height: 7 }, "photo_c"),
+    { individual: "photo_a", team: "photo_b" },
+  );
+});
+
 test("prefills only empty slots and reports where each default came from", () => {
   const memory = { individual: "photo_a", team: "photo_b" };
   const roles = { image_hero: "team", image_face: "individual" };

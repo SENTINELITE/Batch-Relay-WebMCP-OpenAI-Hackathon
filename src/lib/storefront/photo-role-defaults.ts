@@ -84,12 +84,25 @@ export function photoRoleForDirectPrint(physicalOutput: PhysicalOutput): PhotoRo
   return photoRoleFromOrientation(physicalOutput ?? null);
 }
 
+/**
+ * A direct print records a role only while that role is still unclaimed.
+ *
+ * A template slot assignment is a statement about *which photograph plays this
+ * role*, so it always re-records. A direct print is only a statement about
+ * *what to print*: "add an 8x10 of image 12" is a one-off, and letting the
+ * printed shape silently overwrite an individual or team photograph the shopper
+ * chose deliberately on a memory mate corrupts every later prefill. First write
+ * wins, so the earlier flow still works — a photograph printed on a 5x7 before
+ * any role is known becomes the individual default for a later memory mate.
+ */
 export function rememberDirectPhoto(
   memory: PhotoRoleMemory,
   physicalOutput: PhysicalOutput,
   photoId: string | null | undefined,
 ): PhotoRoleMemory {
-  return rememberPhotoRole(memory, photoRoleForDirectPrint(physicalOutput), photoId);
+  const role = photoRoleForDirectPrint(physicalOutput);
+  if (role && memory[role]) return memory;
+  return rememberPhotoRole(memory, role, photoId);
 }
 
 /** A remembered photograph that has left the tray is no longer a default. */

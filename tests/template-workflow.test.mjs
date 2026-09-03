@@ -7,10 +7,12 @@ import { selectArtworkPath } from "../src/lib/storefront/customization.ts";
 import { browserPreviewCanvas, browserPreviewLayerPosition } from "../src/lib/storefront/browser-preview.ts";
 import {
   cropPatchFromSlotTransform,
+  describeMissingRequirements,
   directCropFocus,
   effectiveRequiredTemplateSlotKeys,
   focusFromPreviewOffset,
   isCompleteTemplateDraft,
+  missingRequirementsGuidance,
   missingTemplateDraftRequirements,
   naturalProductMatches,
   patchPrintDraft,
@@ -60,7 +62,9 @@ test("template compatibility keeps every canonical product and revision match an
   const prepare = await read("src/components/storefront/prepare-step.tsx");
   assert.match(ui, /compatibleTemplateOutputs\(outputs\.outputs, productForCompatibility\)/);
   assert.match(ui, /compatible\.length === 0/);
-  assert.match(prepare, /Compatible published output/);
+  assert.match(ui, /void discoverTemplates\(\)/);
+  assert.match(prepare, /label="Template"/);
+  assert.doesNotMatch(prepare, /Compatible published output/);
   assert.match(ui, /rememberedCompatibleOutput\(draft\.template, template\.id, outputs\.revision_id, compatible\)/);
   assert.doesNotMatch(ui, /outputs\.outputs\.find\(/);
 });
@@ -129,6 +133,46 @@ test("Memory Mate promotes both image slots to required and stays ineligible unt
   assert.match(ui, /missing_requirements: missingRequirements/);
   assert.match(ui, /"ready_for_proof_or_cart"/);
   assert.match(ui, /slot_assignments:/);
+});
+
+test("a missing slot is returned as a question for the shopper, not a bare key", async () => {
+  // A partially specified memory mate used to come back as ["team"], which an
+  // agent read as licence to pick a team photograph itself.
+  const slots = [
+    { key: "image_face", kind: "image", suggested_label: "Athlete portrait" },
+    { key: "image_hero", kind: "image", suggested_label: "Team photo" },
+    { key: "text_name", kind: "text", suggested_label: "Player name" },
+  ];
+  const aliases = { image_face: ["individual", "athlete", "portrait"], image_hero: ["team", "group"] };
+  const missing = describeMissingRequirements(["image_hero", "text_name"], slots, aliases);
+  assert.deepEqual(missing, [
+    {
+      slot_key: "image_hero",
+      label: "Team photo",
+      kind: "image",
+      aliases: ["team", "group"],
+      ask_shopper: "Which photo should be the team image?",
+    },
+    {
+      slot_key: "text_name",
+      label: "Player name",
+      kind: "text",
+      aliases: [],
+      ask_shopper: "What should the Player name say?",
+    },
+  ]);
+
+  const guidance = missingRequirementsGuidance(missing);
+  assert.match(guidance, /Which photo should be the team image\?/);
+  assert.match(guidance, /Ask the shopper/);
+  assert.match(guidance, /Do not choose photographs for them/);
+  assert.match(guidance, /do not call add_to_cart/);
+  assert.equal(missingRequirementsGuidance([]), null);
+
+  // The two template-level sentinels are not photograph questions.
+  const noTemplate = describeMissingRequirements(["published_template_output"], slots, aliases);
+  assert.equal(noTemplate[0].kind, "template");
+  assert.match(noTemplate[0].ask_shopper, /which layout they want/);
 });
 
 test("the prepare step frames each image with pan and zoom, and takes photographs only from the tray", async () => {

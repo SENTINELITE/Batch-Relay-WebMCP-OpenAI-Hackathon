@@ -15,10 +15,11 @@ page, folder of demo photos ready on the desktop, cart empty, no proposal card o
 > Four things change. **Typed tools:** `configure_print` takes a product, a
 > template output, slot patches, crop values — the agent fills a schema, it does
 > not aim a cursor. **Grounded state:** `ask_storefront` returns what is actually
-> on screen, so the agent never narrates a cart that does not exist. **Capability
-> gating:** tools only exist while the UI can honor them — no photos in the tray,
-> no `configure_print`. **Human in the loop:** `add_to_cart` proposes, it does not
-> buy. A card appears and a person answers.
+> on screen, so the agent never narrates a cart that does not exist. **Grounded
+> errors:** every tool is always on the table, and when the page is not ready it
+> says exactly what is missing — no guessing, no vanishing affordances. **Human
+> in the loop:** `add_to_cart` proposes, it does not buy. A card appears and a
+> person answers — and to accept by voice, the agent has to quote your words.
 >
 > Same page, same pixels, for a human or an agent.
 
@@ -119,8 +120,9 @@ draft alive. Two configurations, one conversation."
 live preview and two buttons — **Add to cart** / **Don't add**. The step you were
 already looking at stays put; nothing navigates.
 
-**Fires:** `add_to_cart` — returns *immediately* with a pending proposal. Nothing
-entered the cart.
+**Fires:** `add_to_cart` — returns *immediately* with a pending proposal and a
+`decided_by: "shopper"` instruction to stop and wait. Nothing entered the cart,
+and the agent has no way to answer its own proposal.
 
 **Say:**
 > "Yes, buy it."
@@ -129,11 +131,14 @@ entered the cart.
 a brief `+1` flash. Nothing opens over the step you were looking at — the count
 is the receipt.
 
-**Fires:** `resolve_cart_proposal` with `decision: "accept"`.
+**Fires:** `resolve_cart_proposal` with `decision: "accept"` and
+`shopperConfirmation: "Yes, buy it."` — the tool requires your words verbatim,
+so the accept is traceable to something you actually said.
 
 **Line for the room:** "Same action, two doors — the shopper can click the button
-or say the word. The agent cannot skip the door. `add_to_cart` refuses outright
-if a proposal is already waiting."
+or say the word. The agent cannot skip the door: to accept, it has to quote you.
+An agent that tries to confirm its own proposal is refused, and `add_to_cart`
+refuses outright if a proposal is already waiting."
 
 *(Optional, if time: repeat for the second draft and click **Add to cart** with the
 mouse instead — same outcome, different door.)*
