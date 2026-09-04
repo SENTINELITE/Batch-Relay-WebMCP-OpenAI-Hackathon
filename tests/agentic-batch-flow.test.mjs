@@ -95,6 +95,22 @@ test("propose_prints stages a batch in the background and never takes the screen
   assert.match(propose, /none of them took the screen/);
 });
 
+test("propose_prints leaves an unspecified direct print at neutral framing", async () => {
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  const propose = handler(ui, "propose_prints", "add_to_cart");
+  const directBatch = propose.slice(
+    propose.indexOf("} else {\n              rememberRoles(rememberDirectPhoto"),
+    propose.indexOf("            const proposal = createCartProposal"),
+  );
+
+  // createPrintDraft owns the neutral direct-print default (1x, centred, no
+  // pan). Batch staging must not silently replace it with face analysis; that
+  // would make a shopper's unqualified request look cached or cropped.
+  assert.match(propose, /let draft = createPrintDraft\(batchProduct, \[photo\.id\]\);/);
+  assert.match(directBatch, /An unspecified batch starts in the neutral print framing/);
+  assert.doesNotMatch(directBatch, /defaultCropForSubject|subjectRegionFromFaces|directCrop:/);
+});
+
 test("propose_prints reuses the one proposal machinery so the cards stack in the same deck", async () => {
   const ui = await read("src/components/storefront/manual-storefront.tsx");
   const propose = handler(ui, "propose_prints", "add_to_cart");

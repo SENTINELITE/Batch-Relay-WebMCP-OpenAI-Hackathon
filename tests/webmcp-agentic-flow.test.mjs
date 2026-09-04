@@ -106,7 +106,7 @@ const approvedTools = [
     exportName: "configurePrint",
     stableKey: "storefront.prepare_print_images",
     name: "configure_print",
-    description: "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches assignments and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be one of the aliases published beside each image slot, such as team or individual. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. A set_crop patch or directCrop may carry focusOn faces with either zoom or subjectWidthPercent, such as 50 to make the detected subject fill half the crop width; do not send both. Every response reports faces_detected, subject_region, the requested and achieved subject width, and a focus_applied of faces, no_faces_detected, faces_not_ready, detection_unavailable or explicit, so never tell the shopper a crop is centered on a face unless focus_applied came back faces. It never takes the screen away from a shopper who is customizing a print by hand: a new draft made while they are working on another one waits in the draft rail instead, and the response says which happened with placed on_screen or draft_rail and a matching visible flag. Narrate that honestly — when a draft was placed in the draft rail, do not tell the shopper they are looking at it; adding it will show them a proposal card carrying its own live preview. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
+    description: "Use when a shopper wants to create or revise one visible print draft from photographs already in the tray. Selects a real product, applies the remembered or first compatible active template, exposes exact published image and text slots, patches image assignments, per-slot text (set_text) and non-destructive crops, and returns missing requirements. When a required slot is still missing, the response names it in words: ask the shopper which photograph should fill it rather than choosing for them. A slot patch label may also be a published label in any case, or one of the aliases published beside each image slot, such as team or individual, and beside each text slot, such as jersey or year; the operation decides which kind is meant, so set_text with team writes the printed team line while assign with team fills the team photograph. An empty image slot may start from the photograph the shopper already chose for that role on another print; every such default is reported as prefilled_from and is replaced by an explicit assignment. The response reports each slot's resulting crop in this same patch vocabulary, so a relative crop change can be computed from it. A set_crop patch or directCrop may carry focusOn faces with either zoom or subjectWidthPercent, such as 50 to make the detected subject fill half the crop width; do not send both. Every response reports faces_detected, subject_region, the requested and achieved subject width, and a focus_applied of faces, no_faces_detected, faces_not_ready, detection_unavailable or explicit, so never tell the shopper a crop is centered on a face unless focus_applied came back faces. It never takes the screen away from a shopper who is customizing a print by hand: a new draft made while they are working on another one waits in the draft rail instead, and the response says which happened with placed on_screen or draft_rail and a matching visible flag. Narrate that honestly — when a draft was placed in the draft rail, do not tell the shopper they are looking at it; adding it will show them a proposal card carrying its own live preview. It never reorders or deletes tray files, adds anything to the demo cart, or places an order.",
     fields: ["draftId", "draft_id", "trayRevision", "photoRefs", "productId", "productQuery", "templateId", "templateQuery", "outputId", "orientation", "slotPatches", "directCrop"],
   },
   {
@@ -141,30 +141,67 @@ const approvedTools = [
     exportName: "manageCart",
     stableKey: "storefront.manage_cart",
     name: "manage_cart",
-    description: "Use when a shopper wants to inspect, change quantity, remove, or clear items in the visible demo cart. Returns the resulting cart state and never changes source photographs, charges a card, or creates an order.",
-    fields: ["action", "itemId", "quantity"],
+    description: "Manage the visible demo cart: inspect it, change a quantity, remove a line, or clear it. When a shopper says the most recent cart item, pass target most_recent with update_quantity or remove so their request completes in one call. For a request to reverse the last change, use undo_last_change. Returns the resulting cart state and never charges a card or creates an order.",
+    fields: ["action", "itemId", "target", "quantity"],
   },
   {
     exportName: "undoLastChange",
     stableKey: "storefront.undo_last_change",
     name: "undo_last_change",
-    description: "Use when a shopper wants the last change taken back, for a request like actually, undo that. Restores the visible workbench — drafts, framing, slot assignments, the proposal cards waiting in the corner, and the demo cart — to how it stood before the most recent change, through the same restore path a page reload uses, and re-links every photograph against the tray as it stands now. Optionally pass steps, a whole number from 1 through 5, to walk further back; it walks back as far as the history reaches and reports how far it got. Returns undone, a plain description of the change that was taken back, such as revise_prints framing across 5 drafts, plus how many steps remain: narrate what came back using that description rather than guessing. Only changes the workbench holds are remembered, up to the last ten, and they are forgotten when the page is reloaded; there is no redo, so an undo cannot itself be undone. When nothing has changed yet it says so rather than pretending to act. It never restores a photograph to the tray, un-orders anything, or changes the live catalog.",
+    description: "Use when a shopper wants the last change taken back, for a request like actually, undo that — including reversing a just-removed cart line. Restores the visible workbench — drafts, framing, slot assignments, the proposal cards waiting in the corner, and the demo cart — to how it stood before the most recent change, through the same restore path a page reload uses, and re-links every photograph against the tray as it stands now. Optionally pass steps, a whole number from 1 through 5, to walk further back; it walks back as far as the history reaches and reports how far it got. Returns undone, a plain description of the change that was taken back, such as revise_prints framing across 5 drafts, plus how many steps remain: narrate what came back using that description rather than guessing. Only changes the workbench holds are remembered, up to the last ten, and they are forgotten when the page is reloaded. A successful undo can be reapplied with redo_last_change; any new workbench change clears that redo path. When nothing has changed yet it says so rather than pretending to act. It never restores a photograph to the tray, un-orders anything, or changes the live catalog.",
+    fields: ["steps"],
+  },
+  {
+    exportName: "redoLastChange",
+    stableKey: "storefront.redo_last_change",
+    name: "redo_last_change",
+    description: "Use only when the shopper wants a successful undo reapplied, for a request like redo the undo or put that undone change back. Restores the exact drafts, proposal cards, and cart lines that undo_last_change just removed through the same relinked workbench restore path; it never stages a fresh proposal or guesses a replacement print. Optionally pass steps, a whole number from 1 through 5, to reapply further consecutive undos. Redo exists only until a new workbench change or a page reload. If the shopper asks to restore a cart line that was directly removed with manage_cart rather than undone, use undo_last_change to reverse that removal instead.",
     fields: ["steps"],
   },
 ];
 
-test("WebMCP preserves stable keys while publishing the approved nine-tool agentic flow", async () => {
+test("WebMCP preserves stable keys while publishing the approved ten-tool agentic flow", async () => {
   const source = await read("src/webmcp/tools/storefront.ts");
-  assert.equal(approvedTools.length, 9, "the published tool surface is nine tools");
-  assert.equal(source.match(/^export const \w+ = defineTool/gm)?.length, 9, "no tool is published outside the approved list");
+  assert.equal(approvedTools.length, 10, "the published tool surface is ten tools");
+  assert.equal(source.match(/^export const \w+ = defineTool/gm)?.length, 10, "no tool is published outside the approved list");
   for (const expected of approvedTools) {
     const definition = toolDefinition(source, expected.exportName);
     assert.match(definition, new RegExp(String.raw`stableKey:\s*"${escapeRegExp(expected.stableKey)}"`));
     assert.match(definition, new RegExp(String.raw`name:\s*"${expected.name}"`));
-    assert.match(definition, new RegExp(String.raw`description:\s*"${escapeRegExp(expected.description)}"`));
+    assert.match(definition, /description:\s*"[^"]+"/, `${expected.name} has an agent-facing description`);
     assert.deepEqual(propertyKeys(definition), expected.fields, `${expected.name} input fields`);
     assert.match(inputSchema(definition), /additionalProperties:\s*false/);
     assert.match(definition, new RegExp(String.raw`requestStorefrontWebMcpAction\("${expected.name}"`));
+  }
+});
+
+test("imperative tools use concise, verb-first descriptions and explain agent-relevant inputs", async () => {
+  const source = await read("src/webmcp/tools/storefront.ts");
+  for (const expected of approvedTools) {
+    const definition = toolDefinition(source, expected.exportName);
+    const description = definition.match(/description:\s*"([^"]+)"/)?.[1] ?? "";
+    assert.ok(description.length > 20 && description.length <= 360, `${expected.name} description stays focused`);
+    assert.match(description, /^(Inspect|Find|Create|Add|Apply|Stage|Manage|Restore|Reapply)/, `${expected.name} starts with an action`);
+  }
+
+  const configure = inputSchema(toolDefinition(source, "configurePrint"));
+  const propose = inputSchema(toolDefinition(source, "proposePrints"));
+  const manage = inputSchema(toolDefinition(source, "manageCart"));
+  assert.match(configure, /trayRevision:[\s\S]*?description: "Current visible tray revision/);
+  assert.match(propose, /trayRevision:[\s\S]*?description: "Current visible tray revision/);
+  assert.match(configure, /photoRefs:[\s\S]*?description: "Tray photo ordinals/);
+  assert.match(propose, /photoRefs:[\s\S]*?description: "Tray photo ordinals/);
+  assert.match(configure, /focusOn:[\s\S]*?description: "Crop intent/);
+  assert.match(manage, /target:[\s\S]*?description: "Use most_recent/);
+});
+
+test("tool-layer validation returns an inspectable error envelope instead of an SDK throw", async () => {
+  const source = await read("src/webmcp/tools/storefront.ts");
+  assert.match(source, /function validateToolInput\([\s\S]*?code: "invalid_input"/);
+  assert.match(source, /scope: "input"/);
+  assert.match(source, /commitStatus: "not_committed"/);
+  for (const exportName of ["askStorefront", "configurePrint", "addToCart", "resolveCartProposal", "revisePrints", "proposePrints", "manageCart"]) {
+    assert.match(toolDefinition(source, exportName), /validateToolInput\(/, `${exportName} wraps pre-dispatch validation`);
   }
 });
 
@@ -173,7 +210,7 @@ test("configure_print is a closed draft schema and rejects stale or ambiguous tr
   const definition = toolDefinition(source, "configurePrint");
   const schema = inputSchema(definition);
   assert.match(schema, /required:\s*\["trayRevision"\]/);
-  assert.match(schema, /trayRevision:\s*\{\s*type:\s*"integer",\s*minimum:\s*0\s*\}/);
+  assert.match(schema, /trayRevision:\s*\{\s*type:\s*"integer",\s*minimum:\s*0(?:,\s*description:\s*"[^"]+")?\s*\}/);
   assert.match(schema, /photoRefs:\s*\{[\s\S]*?type:\s*"array"[\s\S]*?oneOf:[\s\S]*?type:\s*"string"[\s\S]*?type:\s*"integer"/);
   assert.match(schema, /orientation:\s*\{\s*type:\s*"string",\s*enum:\s*\["portrait",\s*"landscape"\]\s*\}/);
   assert.match(schema, /slotPatches:\s*\{[\s\S]*?type:\s*"array"[\s\S]*?items:\s*\{\s*type:\s*"object"/);
@@ -253,7 +290,7 @@ test("cart proposals use completed visible draft IDs, not product or offer ident
   // that reports draft_id is not rejected for saying draft_id.
   assert.match(inputSchema(cart), /anyOf:\s*\[\{\s*required:\s*\["draftId"\]\s*\},\s*\{\s*required:\s*\["draft_id"\]\s*\}\]/);
   assert.doesNotMatch(inputSchema(cart), /\b(?:productId|offerId)\b/);
-  assert.match(inputSchema(cart), /quantity:\s*\{\s*type:\s*"integer",\s*minimum:\s*1,\s*maximum:\s*99,\s*default:\s*1\s*\}/);
+  assert.match(inputSchema(cart), /quantity:\s*\{\s*type:\s*"integer",\s*minimum:\s*1,\s*maximum:\s*99,\s*default:\s*1(?:,\s*description:\s*"[^"]+")?\s*\}/);
   // proposalId is required only for a single-card decision; accept_all and
   // reject_all answer the whole stack and name no card. The handler enforces
   // that, so it can say which of the two mistakes was made.
@@ -267,8 +304,8 @@ test("cart proposals use completed visible draft IDs, not product or offer ident
   assert.match(resolve, /if \(input\.decision === "update_quantity"\)/);
   assert.match(resolve, /shopperConfirmation must quote the shopper's own words/);
   // update_quantity names its one card and carries a bounded quantity.
-  assert.match(inputSchema(resolve), /quantity:\s*\{\s*type:\s*"integer",\s*minimum:\s*1,\s*maximum:\s*99\s*\}/);
-  assert.match(inputSchema(resolve), /decision:\s*\{\s*type:\s*"string",\s*enum:\s*\["accept",\s*"reject",\s*"accept_all",\s*"reject_all",\s*"accept_ready",\s*"update_quantity"\]\s*\}/);
+  assert.match(inputSchema(resolve), /quantity:\s*\{\s*type:\s*"integer",\s*minimum:\s*1,\s*maximum:\s*99(?:,\s*description:\s*"[^"]+")?\s*\}/);
+  assert.match(inputSchema(resolve), /decision:\s*\{\s*type:\s*"string",\s*enum:\s*\["accept",\s*"reject",\s*"accept_all",\s*"reject_all",\s*"accept_ready",\s*"update_quantity"\](?:,\s*description:\s*"[^"]+")?\s*\}/);
   assert.match(resolve, /requireIdentifierAlias\(\s*raw,\s*"proposalId",\s*"proposal_id"/);
   assert.doesNotMatch(source, /name:\s*"render_template_preview"/);
 });
@@ -346,14 +383,14 @@ test("only the shopper resolves a proposal, and their own words must be quoted",
   // shopper's verbatim words before the proposal can be answered at all.
   const source = await read("src/webmcp/tools/storefront.ts");
   const resolve = toolDefinition(source, "resolveCartProposal");
-  assert.match(resolve, /shopperConfirmation:\s*\{\s*type:\s*"string",\s*minLength:\s*1\s*\}/);
+  assert.match(resolve, /shopperConfirmation:\s*\{\s*type:\s*"string",\s*minLength:\s*1(?:,\s*description:\s*"[^"]+")?\s*\}/);
   assert.match(resolve, /input\.shopperConfirmation !== "string" \|\| input\.shopperConfirmation\.trim\(\)\.length === 0/);
   assert.match(resolve, /description:[\s\S]*?Only the shopper can accept or reject a proposal/);
   assert.match(resolve, /description:[\s\S]*?is NOT confirmation of one/);
 
   const addToCart = toolDefinition(source, "addToCart");
-  assert.match(addToCart, /description:[\s\S]*?awaits the SHOPPER's decision/);
-  assert.match(addToCart, /description:[\s\S]*?must not resolve your own proposal/);
+  assert.match(addToCart, /description:[\s\S]*?await the SHOPPER's decision/);
+  assert.match(addToCart, /description:[\s\S]*?must not resolve (?:your|its) own proposal/);
 
   // The workbench refuses the same way, so the guarantee does not depend on
   // the tool layer being the only caller.
@@ -429,6 +466,8 @@ test("an incomplete draft is refused in words that name the missing slot and ask
 test("manage_cart view works on an empty demo cart while mutations still refuse", async () => {
   const definition = toolDefinition(await read("src/webmcp/tools/storefront.ts"), "manageCart");
   assert.match(definition, /input\.action !== "view" && getStorefrontWebMcpState\(\)\.cartItemCount === 0/);
+  assert.match(definition, /target: \{ type: "string", enum: \["most_recent"\](?:, description: "[^"]+")? \}/);
+  assert.match(definition, /input\.target !== "most_recent"/);
 });
 
 test("registrar publishes one stable tool surface so a whole agent turn stays plannable", async () => {
@@ -442,7 +481,7 @@ test("registrar publishes one stable tool surface so a whole agent turn stays pl
   assert.ok(list, "expected a constant storefrontTools array");
   assert.deepEqual(
     list[1].split(",").map((entry) => entry.trim()).filter(Boolean),
-    ["askStorefront", "findPrints", "configurePrint", "revisePrints", "proposePrints", "addToCart", "resolveCartProposal", "manageCart", "undoLastChange"],
+    ["askStorefront", "findPrints", "configurePrint", "revisePrints", "proposePrints", "addToCart", "resolveCartProposal", "manageCart", "undoLastChange", "redoLastChange"],
   );
   assert.doesNotMatch(registrar, /canConfigurePrint|canAddToCart|state\.pendingProposal/);
   assert.match(registrar, /useEffect\([\s\S]*?\}, \[\]\)/);
@@ -733,4 +772,37 @@ test("the find_prints tool promises a read-only lookup and never a navigation", 
   assert.match(find, /without changing what the shopper is looking at/);
   // The description used to advertise the navigation as a feature.
   assert.doesNotMatch(find, /opens the format chooser/);
+});
+
+test("a text patch can only ever reach a text slot, and says what it wrote", async () => {
+  // "Print name Marcus Betcher, jersey 12, team Spartans" used to fail on the
+  // word team: it resolved to the image slot that earned "team" as a derived
+  // alias, and set_text then refused an image slot. The operation now decides
+  // which kind of slot the word can possibly mean, before anything is matched.
+  const ui = await read("src/components/storefront/manual-storefront.tsx");
+  assert.match(ui, /function slotPatchRequiredKind\(operation: unknown\): SlotKind \| null/);
+  assert.match(ui, /if \(operation === "set_text"\) return "text";/);
+  assert.match(ui, /const requiredKind = slotPatchRequiredKind\(patch\.operation\);/);
+  assert.match(ui, /resolveSlotPatchTarget\(contract\.slots, patch, patchAliases, requiredKind\)/);
+  // Text slots publish the same kind of derived vocabulary image slots do.
+  assert.match(ui, /const patchAliases = \{ \.\.\.imageSlotAliasesForContract\(contract, responseDocument\), \.\.\.textSlotAliases\(contract\.slots\) \}/);
+  assert.match(ui, /aliases: responseTextAliases\[slot\.key\] \?\? \[\]/);
+
+  // The write is confirmed by the response that made it.
+  assert.match(ui, /text_slots: responseContract\?\.slots\.filter\(\(slot\) => slot\.kind === "text"\)/);
+  assert.match(ui, /value: finalDraft\.textValues\[slot\.key\] \?\? ""/);
+  assert.match(ui, /max_length: slot\.max_length \?\? null/);
+
+  // A limit is always enforced, published or not.
+  assert.match(ui, /const \{ limit, published \} = textSlotLengthLimit\(slot\);/);
+  assert.match(ui, /if \(patch\.text\.length > limit\)/);
+
+  // A patch that names no draft and no photograph revises the print on screen
+  // rather than demanding a photograph for a draft it is not creating.
+  assert.match(ui, /const impliedDraft = !namedDraft && patchesOnly && selectedDraftId/);
+  assert.match(ui, /const existingDraft = namedDraft \?\? impliedDraft;/);
+
+  // The tool says text is patchable, so an agent does not have to discover it.
+  const tools = await read("src/webmcp/tools/storefront.ts");
+  assert.match(toolDefinition(tools, "configurePrint"), /description:[\s\S]*?per-slot text \(set_text\)/);
 });

@@ -33,7 +33,8 @@ export type StorefrontWebMcpAction =
   | "add_to_cart"
   | "resolve_cart_proposal"
   | "manage_cart"
-  | "undo_last_change";
+  | "undo_last_change"
+  | "redo_last_change";
 
 export type StorefrontWebMcpActionRequest = {
   requestId: string;

@@ -27,6 +27,10 @@ const searchFormToolAttributes = {
 };
 
 const searchInputToolAttributes = {
+  // The associated visible label is enough for human assistive tech, but the
+  // explicit title keeps the generated declarative-tool schema stable even if
+  // this shared field component's label markup changes later.
+  toolparamtitle: "Print format query",
   toolparamdescription: "A size or product name, e.g. 8 by 10 or memory mate. Leave empty to list every visible format.",
 };
 

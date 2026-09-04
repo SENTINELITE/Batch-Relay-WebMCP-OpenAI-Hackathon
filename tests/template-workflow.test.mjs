@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { browserPreviewAssetProxyURL } from "../src/lib/storefront/client.ts";
 import { selectArtworkPath } from "../src/lib/storefront/customization.ts";
-import { localCartConfigurationKey, mergeLocalCartItem } from "../src/lib/storefront/local-cart.ts";
+import { localCartConfigurationKey, mergeLocalCartItem, mostRecentLocalCartItem } from "../src/lib/storefront/local-cart.ts";
 import {
   browserPreviewCanvas,
   browserPreviewLayerPosition,
@@ -293,11 +293,13 @@ test("cart quantities merge only exact finished-print configurations", () => {
   });
 
   const first = direct();
-  const sameFinishedPrint = direct({ id: "item_new", draftId: "draft_b", quantity: 4, draft: { ...first.draft, id: "draft_b" } });
+  const sameFinishedPrint = direct({ id: "item_new", draftId: "draft_b", quantity: 4, addedAt: "2026-09-03T00:05:00.000Z", draft: { ...first.draft, id: "draft_b" } });
   const merged = mergeLocalCartItem([first], sameFinishedPrint);
   assert.equal(merged.items.length, 1);
   assert.equal(merged.line.id, first.id);
   assert.equal(merged.line.quantity, 5);
+  assert.equal(merged.line.addedAt, sameFinishedPrint.addedAt);
+  assert.equal(mostRecentLocalCartItem([direct({ id: "older", addedAt: "2026-09-03T00:01:00.000Z" }), merged.line])?.id, first.id);
 
   const changedPan = direct({
     id: "item_panned",

@@ -58,6 +58,7 @@ import {
   cartProposalWireItems,
   createCartItem,
   localCartPrintCount,
+  mostRecentLocalCartItem,
   createCartProposal,
   localCartWireItems,
   mergeLocalCartItem,
@@ -127,10 +128,13 @@ import {
 import { bundledTemplateSpec } from "@/lib/storefront/template-specs";
 import {
   deriveImageSlotAliases,
+  deriveTextSlotAliases,
   imageSlotBoxesFromCanvases,
   resolveSlotPatchTarget,
   slotBoxFromLabel,
+  textSlotLengthLimit,
   type SlotBox,
+  type SlotKind,
 } from "@/lib/storefront/slot-aliases";
 import {
   directPhotoDefault,
@@ -328,6 +332,19 @@ function imageSlotRoles(
     aliases: aliases[slot.key],
     box: boxesBySlotKey[slot.key] ?? slotBoxFromLabel(slot.suggested_label),
   })));
+}
+
+/** The slot kind each patch operation can possibly mean. */
+function slotPatchRequiredKind(operation: unknown): SlotKind | null {
+  if (operation === "set_text") return "text";
+  if (operation === "assign" || operation === "unassign" || operation === "set_crop") return "image";
+  return null;
+}
+
+/** The words published beside each text slot, derived from its own label and
+ *  semantic key so an agent may aim a set_text at "team" or "jersey". */
+function textSlotAliases(slots: TemplateContract["slots"]): Record<string, string[]> {
+  return deriveTextSlotAliases(slots.filter((slot) => slot.kind === "text"));
 }
 
 const templatePreferenceKey = "batchrelay-storefront-template-preferences-v1";
@@ -572,9 +589,9 @@ export function ManualStorefront() {
   /**
    * The last ten states an agent action was about to change, newest last.
    *
-   * Held in a ref rather than state because nothing renders from it: the undo
-   * affordance is the toast's own button and the tool, neither of which needs a
-   * re-render when the depth changes. It is deliberately not persisted — a
+   * Held in a ref rather than state because nothing renders from it: the
+   * undo/redo affordances are tools and a toast action, neither of which needs
+   * a re-render when their depth changes. It is deliberately not persisted — a
    * reload is already the bigger undo, and restoring a history alongside the
    * workbench it describes invites the two to disagree.
    */
@@ -659,6 +676,11 @@ export function ManualStorefront() {
     { announce = true }: { announce?: boolean } = {},
   ) {
     const restore = relinkWorkbenchSnapshot(snapshot, photos);
+    // A proposal resolution schedules its exit. If undo restores that very
+    // card before the animation timer fires, the old timer must not erase the
+    // restored card (or a later redo) by its recycled proposal id.
+    for (const timer of proposalExitTimers.current) clearTimeout(timer);
+    proposalExitTimers.current = [];
     setDrafts(restore.drafts);
     draftsRef.current = restore.drafts;
     setCart(restore.cart);
@@ -732,7 +754,7 @@ export function ManualStorefront() {
    * already does. Returns what was undone, or null when the history is empty.
    */
   function undoWorkbenchChange(steps: number) {
-    const undone = workbenchHistory.current.undo(steps);
+    const undone = workbenchHistory.current.undo(captureWorkbenchState(), steps);
     if (!undone) return null;
     // The shopper has plainly moved on from any half-linked reload restore, so
     // a late re-link pass must not fire on top of the state just put back.
@@ -744,6 +766,20 @@ export function ManualStorefront() {
     );
     setNotice({ tone: "info", message: `Undid: ${undone.label}.` });
     return { ...undone, restore, remaining: workbenchHistory.current.depth() };
+  }
+
+  /** Re-applies a real undo through the same relinked restore path. */
+  function redoWorkbenchChange(steps: number) {
+    const redone = workbenchHistory.current.redo(steps);
+    if (!redone) return null;
+    pendingRestore.current = null;
+    const restore = applyWorkbenchRestore(
+      workbenchSnapshotFromState(redone.state),
+      photoLibrary.photos,
+      { announce: false },
+    );
+    setNotice({ tone: "info", message: `Redid: ${redone.label}.` });
+    return { ...redone, restore, remaining: workbenchHistory.current.redoDepth() };
   }
 
   /**
@@ -1061,6 +1097,12 @@ export function ManualStorefront() {
     templateContract?.slots.filter((slot) => slot.kind === "image") ?? [],
     browserPreviewSlotBoxes(browserPreviewDocument),
   ), [browserPreviewDocument, templateContract]);
+  // The same courtesy for the printed lines: "team", "jersey", "year" read out
+  // of each text slot's own published label and semantic key.
+  const visibleTextAliases = useMemo(
+    () => textSlotAliases(templateContract?.slots ?? []),
+    [templateContract],
+  );
   // The role each visible image slot speaks for, used to carry a shopper's
   // earlier choice across print types.
   const visibleSlotRoles = useMemo(
@@ -2454,10 +2496,12 @@ export function ManualStorefront() {
      * *recorded* once the response says something actually changed, so a
      * refused call and a batch that staged nothing leave no empty undo step.
      *
-     * An undo is deliberately excluded: it is not a change to be undone, and
-     * recording it would turn a second undo into a redo of the first.
+     * History traversal is deliberately excluded: undo and redo already own
+     * their opposite-stack entries, so recording either would fork history.
      */
-    const preMutation = isMutatingAgentAction(request.action) && request.action !== "undo_last_change"
+    const preMutation = isMutatingAgentAction(request.action)
+      && request.action !== "undo_last_change"
+      && request.action !== "redo_last_change"
       ? { label: agentActionLabel(request.action, request.input), state: captureWorkbenchState() }
       : null;
     /**
@@ -2538,7 +2582,8 @@ export function ManualStorefront() {
                 assigned_photo_id: slot.kind === "image" ? templateAssignments[slot.key] ?? null : null,
                 value: slot.kind === "text" ? templateInputs[slot.key] ?? "" : null,
                 label: slot.suggested_label ?? null,
-                aliases: slot.kind === "image" ? visibleSlotAliases[slot.key] ?? [] : [],
+                aliases: (slot.kind === "image" ? visibleSlotAliases[slot.key] : visibleTextAliases[slot.key]) ?? [],
+                max_length: slot.kind === "text" ? slot.max_length ?? null : null,
                 role: slot.kind === "image" ? visibleSlotRoles[slot.key] ?? null : null,
                 prefilled_from: prefilledSlots[slot.key] ? prefillProvenance(prefilledSlots[slot.key]!) : null,
                 // The set_crop values that reproduce the visible framing, so a
@@ -2613,8 +2658,18 @@ export function ManualStorefront() {
         if (request.action === "configure_print") {
           if (request.input.trayRevision !== photoLibrary.revision) throw new Error(`The photo tray changed; use visible tray revision ${photoLibrary.revision}.`);
           const requestedDraftId = typeof request.input.draftId === "string" ? request.input.draftId : null;
-          const existingDraft = requestedDraftId ? draftsRef.current.find((draft) => draft.id === requestedDraftId) : null;
-          if (requestedDraftId && !existingDraft) throw new Error("That visible draft no longer exists. Create a new print configuration instead.");
+          const namedDraft = requestedDraftId ? draftsRef.current.find((draft) => draft.id === requestedDraftId) : null;
+          if (requestedDraftId && !namedDraft) throw new Error("That visible draft no longer exists. Create a new print configuration instead.");
+          // A patch that names no draft and no photograph — "put SPARTANS on the
+          // team line" — is aimed at the print the shopper is already looking
+          // at. Only a genuinely new draft needs a photograph chosen for it.
+          const patchesOnly = Array.isArray(request.input.slotPatches)
+            && request.input.slotPatches.length > 0
+            && (!Array.isArray(request.input.photoRefs) || request.input.photoRefs.length === 0);
+          const impliedDraft = !namedDraft && patchesOnly && selectedDraftId
+            ? draftsRef.current.find((draft) => draft.id === selectedDraftId) ?? null
+            : null;
+          const existingDraft = namedDraft ?? impliedDraft;
           const productId = typeof request.input.productId === "string" ? request.input.productId : existingDraft?.productId ?? null;
           const productQuery = typeof request.input.productQuery === "string" ? request.input.productQuery.trim().toLowerCase() : "";
           const productMatches = productId
@@ -2636,7 +2691,7 @@ export function ManualStorefront() {
           const roleDefault = photos.length === 0 && !existingDraft
             ? directPhotoDefault(photoRoleMemory.current, product.physical_output, photoLibrary.photos.map((photo) => photo.id))
             : null;
-          if (photos.length === 0 && !existingDraft && !roleDefault) throw new Error("Choose at least one photograph from the visible tray.");
+          if (photos.length === 0 && !existingDraft && !roleDefault) throw new Error("Choose at least one photograph from the visible tray, or name the draft to revise with draftId.");
           const photoIds = photos.length > 0
             ? photos.map((photo) => photo.id)
             : roleDefault ? [roleDefault.photoId] : existingDraft!.photoIds;
@@ -2861,7 +2916,10 @@ export function ManualStorefront() {
             appliedPrefills = resolvedPrefills().prefills;
             const assignments = { ...(appliedPrefills.length > 0 ? resolvedPrefills().assignments : draft.slotAssignments) };
             const values = { ...draft.textValues };
-            const patchAliases = imageSlotAliasesForContract(contract, responseDocument);
+            // Image and text slots keep separate vocabularies but one lookup:
+            // the resolver scopes them by the operation's kind, so the same
+            // word may name a photograph slot and a printed line.
+            const patchAliases = { ...imageSlotAliasesForContract(contract, responseDocument), ...textSlotAliases(contract.slots) };
             const patchBoxes = contractSlotBoxes(contract, responseDocument);
             // Any prefilled slot is seeded before the explicit patches run, so
             // an explicit set_crop in the same call still has the last word.
@@ -2869,8 +2927,17 @@ export function ManualStorefront() {
             const patchRoles = imageSlotRoles(contract.slots, patchBoxes);
             const explicitAssignments: Record<string, string> = {};
             for (const patch of slotPatches) {
-              const resolution = resolveSlotPatchTarget(contract.slots, patch, patchAliases);
-              if (resolution.kind !== "resolved") throw new Error("Each slot patch must name an exact visible published slot key or unique visible label.");
+              // The kind the operation needs is settled before anything is
+              // matched, so "team" reaches the printed team line for a set_text
+              // and the team photograph for an assign or a crop.
+              const requiredKind = slotPatchRequiredKind(patch.operation);
+              if (!requiredKind) throw new Error("Unknown slot patch operation.");
+              const resolution = resolveSlotPatchTarget(contract.slots, patch, patchAliases, requiredKind);
+              if (resolution.kind !== "resolved") {
+                throw new Error(resolution.reason === "no_match"
+                  ? `No visible ${requiredKind} slot matches that patch; name an exact published ${requiredKind} slot key, its published label, or an alias published beside it.`
+                  : `That patch names more than one visible ${requiredKind} slot; use its exact published slot key.`);
+              }
               const slot = resolution.slot;
               if (patch.operation === "assign") {
                 if (slot.kind !== "image" || (typeof patch.photoRef !== "string" && typeof patch.photoRef !== "number")) throw new Error(`Assign requires a tray photo for image slot ${slot.key}.`);
@@ -2889,6 +2956,15 @@ export function ManualStorefront() {
                 delete assignments[slot.key];
               } else if (patch.operation === "set_text") {
                 if (slot.kind !== "text" || typeof patch.text !== "string") throw new Error(`set_text requires text for ${slot.key}.`);
+                // The template's own limit when it publishes one; otherwise the
+                // storefront's cap, so text no proof could carry is refused
+                // here rather than printed silently.
+                const { limit, published } = textSlotLengthLimit(slot);
+                if (patch.text.length > limit) {
+                  throw new Error(published
+                    ? `Text for ${slot.key} is ${patch.text.length} characters; this template publishes a max_length of ${limit}.`
+                    : `Text for ${slot.key} is ${patch.text.length} characters; this template publishes no max_length, so the storefront caps text slots at ${limit}.`);
+                }
                 values[slot.key] = patch.text;
               } else if (patch.operation === "set_crop") {
                 if (slot.kind !== "image") throw new Error(`set_crop applies only to image slot ${slot.key}.`);
@@ -2965,6 +3041,7 @@ export function ManualStorefront() {
           // The live template preview must repaint before the agent hears back.
           await nextPaint();
           const responseSlotAliases = responseContract ? imageSlotAliasesForContract(responseContract, responseDocument) : {};
+          const responseTextAliases = responseContract ? textSlotAliases(responseContract.slots) : {};
           // A bare slot key invites the agent to guess a photograph. Naming the
           // role and writing the question out invites it to ask the shopper.
           const missingDetail = describeMissingRequirements(
@@ -3016,6 +3093,18 @@ export function ManualStorefront() {
                 focus: slotFocusReports[slot.key] ? focusWire(slotFocusReports[slot.key]!) : null,
               };
             }) ?? [],
+            // The printed lines as they now stand, so a set_text is confirmed
+            // by the same response that made it rather than by a second read.
+            text_slots: responseContract?.slots.filter((slot) => slot.kind === "text").map((slot) => ({
+              slot_key: slot.key,
+              label: slot.suggested_label ?? null,
+              aliases: responseTextAliases[slot.key] ?? [],
+              required: effectiveTemplateSlotRequired(product, slot),
+              value: finalDraft.textValues[slot.key] ?? "",
+              // The published limit when there is one; null means the
+              // storefront's own cap applies.
+              max_length: slot.max_length ?? null,
+            })) ?? [],
             direct_crop: visibleDirectCrop(finalDraft),
             direct_photo: finalDraft.template ? null : {
               photo_id: finalDraft.photoIds[0] ?? null,
@@ -3140,12 +3229,16 @@ export function ManualStorefront() {
             let skipReason: string | null = null;
             if (wantedSlotKey || wantedLabel) {
               const resolution = resolveSlotPatchTarget(
-                facts.map((fact) => ({ key: fact.key, suggested_label: null })),
+                // Every candidate here is an image slot, and a crop can mean
+                // nothing else, so the resolver is told so explicitly.
+                facts.map((fact) => ({ key: fact.key, kind: "image" as const, suggested_label: null })),
                 { slotKey: wantedSlotKey, label: wantedLabel },
                 Object.fromEntries(facts.map((fact) => [fact.key, fact.aliases])),
+                "image",
               );
               if (resolution.kind === "resolved") slotKey = resolution.slot.key;
-              else skipReason = resolution.reason === "ambiguous_alias" ? "ambiguous_slot_alias" : "no_matching_slot";
+              else if (resolution.reason === "no_match") skipReason = "no_matching_slot";
+              else skipReason = resolution.reason === "ambiguous_alias" ? "ambiguous_slot_alias" : "ambiguous_slot_label";
             } else if (wantedRole) {
               const matching = facts.filter((fact) => fact.role === wantedRole);
               if (matching.length === 1) slotKey = matching[0]!.key;
@@ -3417,13 +3510,9 @@ export function ManualStorefront() {
               });
             } else {
               rememberRoles(rememberDirectPhoto(photoRoleMemory.current, batchProduct.physical_output, photo.id));
-              // The whole photograph is the print: the same face-centred start,
-              // expressed in the direct-crop vocabulary.
-              const subject = subjectRegionFromFaces(photoFacesRef.current[photo.id] ?? null);
-              const target = boxAspectRatio(batchProduct.physical_output);
-              const source = photoAspectRatio(photo.id);
-              const seeded = subject && target && source ? defaultCropForSubject(subject, target, source) : null;
-              if (seeded) draft = patchPrintDraft(draft, { directCrop: { ...seeded, offsetX: 0, offsetY: 0 } });
+              // An unspecified batch starts in the neutral print framing from
+              // createPrintDraft: 1x, centre focus, and no pan. Face framing
+              // remains an explicit configure_print/revise_prints choice.
             }
             const proposal = createCartProposal({
               draftId: draft.id,
@@ -3724,25 +3813,57 @@ export function ManualStorefront() {
             undone_count: undone.undoneCount,
             requested_steps: requestedSteps,
             remaining_undo_steps: undone.remaining,
+            remaining_redo_steps: workbenchHistory.current.redoDepth(),
             draft_count: undone.restore.restoredDraftCount,
             pending_proposal_count: livePendingProposals().length,
             cart_item_count: localCartPrintCount(undone.restore.cart),
             unlinked_photo_count: undone.restore.unlinkedPhotoCount,
-            guidance: `The workbench is back to how it stood before ${undone.label}${undone.undoneCount > 1 ? ` and ${undone.undoneCount - 1} further change${undone.undoneCount === 2 ? "" : "s"}` : ""}. Every draft, proposal card and cart line has repainted, and each photograph was re-linked against the tray as it stands now.${undone.restore.unlinkedPhotoCount > 0 ? ` ${undone.restore.unlinkedPhotoCount} photograph${undone.restore.unlinkedPhotoCount === 1 ? " is" : "s are"} no longer in the tray, so their slots came back empty — say so.` : ""} There is no redo: this cannot be taken back. ${undone.remaining > 0 ? `${undone.remaining} earlier change${undone.remaining === 1 ? "" : "s"} can still be undone.` : "Nothing further can be undone."}`,
+            guidance: `The workbench is back to how it stood before ${undone.label}${undone.undoneCount > 1 ? ` and ${undone.undoneCount - 1} further change${undone.undoneCount === 2 ? "" : "s"}` : ""}. Every draft, proposal card and cart line has repainted, and each photograph was re-linked against the tray as it stands now.${undone.restore.unlinkedPhotoCount > 0 ? ` ${undone.restore.unlinkedPhotoCount} photograph${undone.restore.unlinkedPhotoCount === 1 ? " is" : "s are"} no longer in the tray, so their slots came back empty — say so.` : ""} Call redo_last_change only when the shopper wants this actual undo reapplied. If they ask to restore a cart line that was directly removed with manage_cart, call undo_last_change instead — do not stage a new proposal. ${undone.remaining > 0 ? `${undone.remaining} earlier change${undone.remaining === 1 ? "" : "s"} can still be undone.` : "Nothing further can be undone."}`,
+            nextStep: "tell_the_shopper_what_came_back",
+          } });
+          return;
+        }
+        if (request.action === "redo_last_change") {
+          const requestedSteps = request.input.steps === undefined ? 1 : Number(request.input.steps);
+          if (!Number.isInteger(requestedSteps) || requestedSteps < 1 || requestedSteps > 5) {
+            throw new Error("steps must be a whole number from 1 through 5.");
+          }
+          const redone = redoWorkbenchChange(requestedSteps);
+          if (!redone) {
+            throw new Error("There is no undone change to redo. Redo is available only immediately after undo_last_change and is cleared by any new workbench change or page reload.");
+          }
+          await nextPaint();
+          respondWithActivity({ requestId: request.requestId, result: {
+            status: "redone",
+            redone: redone.label,
+            redone_changes: redone.labels,
+            redone_count: redone.redoneCount,
+            requested_steps: requestedSteps,
+            remaining_redo_steps: redone.remaining,
+            draft_count: redone.restore.restoredDraftCount,
+            pending_proposal_count: livePendingProposals().length,
+            cart_item_count: localCartPrintCount(redone.restore.cart),
+            unlinked_photo_count: redone.restore.unlinkedPhotoCount,
+            guidance: `The workbench is back to how it stood after ${redone.label}${redone.redoneCount > 1 ? ` and ${redone.redoneCount - 1} further change${redone.redoneCount === 2 ? "" : "s"}` : ""}. Every draft, proposal card and cart line has repainted. If the shopper instead wants to reverse a cart removal that was performed directly with manage_cart, call undo_last_change — do not stage a fresh proposal. ${redone.remaining > 0 ? `${redone.remaining} further undone change${redone.remaining === 1 ? "" : "s"} can still be redone.` : "Nothing further can be redone."}`,
             nextStep: "tell_the_shopper_what_came_back",
           } });
           return;
         }
         const action = request.input.action;
-        const itemId = typeof request.input.itemId === "string" ? request.input.itemId : undefined;
+        const explicitItemId = typeof request.input.itemId === "string" ? request.input.itemId : undefined;
+        const target = request.input.target === "most_recent" ? "most_recent" : undefined;
+        // Resolve shopper language once, against the cart rendered for this
+        // request. This keeps "change the most recent one" atomic instead of
+        // making an agent inspect the cart, infer an ID, and retry.
+        const itemId = explicitItemId ?? (target === "most_recent" ? mostRecentLocalCartItem(cart)?.id : undefined);
         const quantity = typeof request.input.quantity === "number" ? request.input.quantity : undefined;
         let nextCart = cart;
         if (action === "clear") nextCart = [];
         else if (action === "remove") {
-          if (!itemId || !cart.some((item) => item.id === itemId)) throw new Error("remove requires a visible cart item ID.");
+          if (!itemId || !cart.some((item) => item.id === itemId)) throw new Error("remove requires a visible cart item ID or target most_recent.");
           nextCart = cart.filter((item) => item.id !== itemId);
         } else if (action === "update_quantity") {
-          if (!itemId || !cart.some((item) => item.id === itemId)) throw new Error("update_quantity requires a visible cart item ID.");
+          if (!itemId || !cart.some((item) => item.id === itemId)) throw new Error("update_quantity requires a visible cart item ID or target most_recent.");
           if (!Number.isInteger(quantity) || !quantity || quantity < 1 || quantity > 99) throw new Error("update_quantity requires a quantity from 1 through 99.");
           nextCart = cart.map((item) => item.id === itemId ? { ...item, quantity } : item);
         } else if (action !== "view") throw new Error("Choose view, update_quantity, remove, or clear.");
@@ -3752,9 +3873,14 @@ export function ManualStorefront() {
         }
         respondWithActivity({ requestId: request.requestId, result: {
           action,
+          target,
+          resolved_item_id: itemId,
           cart_item_count: localCartPrintCount(nextCart),
           cart_line_count: nextCart.length,
           items: localCartWireItems(nextCart),
+          guidance: action === "remove"
+            ? "That cart line was removed. If the shopper asks to undo, restore, or redo this removal, call undo_last_change to bring this exact line back; do not stage a new proposal."
+            : undefined,
         } });
       } catch (error) {
         respondToStorefrontWebMcpAction({ requestId: request.requestId, error: responseMessage(error) });
@@ -3797,7 +3923,7 @@ export function ManualStorefront() {
       onImportError={(message) => setNotice({ tone: "error", message })}
     />
 
-    <main className="mx-auto w-full max-w-[1400px] px-5 pb-16 sm:px-8 lg:px-12">
+    <main className="mx-auto w-full max-w-[1400px] px-5 pb-16 sm:px-8 lg:px-12 2xl:max-w-[1800px]">
 
       {step === "catalog" && <div className="pb-10" id="catalog">
         <FormatPicker onSelect={selectProduct} products={catalog} selectedProductKey={selectedProductKey} state={catalogState} />

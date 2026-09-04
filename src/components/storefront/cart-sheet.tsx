@@ -18,9 +18,11 @@ export type CartSheetProps = {
   onConfirmCheckout: () => void;
 };
 
-function CartThumbnail({ item }: { item: LocalCartItem }) {
+/** No quantity badge: the row's stepper is the one place that number lives.
+ *  Two readings of the same count invited the shopper to trust the wrong one. */
+function CartThumbnail({ item, className }: { item: LocalCartItem; className?: string }) {
   return (
-    <PrintFrame aspect="1 / 1" className="w-12 shrink-0" innerClassName="relative">
+    <PrintFrame aspect="1 / 1" className={className ?? "w-[72px] shrink-0"}>
       {item.thumbnailURL ? (
         <img
           alt=""
@@ -31,10 +33,47 @@ function CartThumbnail({ item }: { item: LocalCartItem }) {
       ) : (
         <span className="block h-full w-full bg-foreground/5" />
       )}
-      <span className="absolute bottom-0 right-0 rounded-tl-[6px] bg-foreground/80 px-1 font-mono text-[11px] leading-[1.5] text-background">
+    </PrintFrame>
+  );
+}
+
+/** One enclosed control. Loose −/+ glyphs either side of a bare number did not
+ *  read as a single quantity the shopper could change. */
+function QuantityStepper({
+  item,
+  onUpdateQuantity,
+}: {
+  item: LocalCartItem;
+  onUpdateQuantity: (itemId: string, quantity: number) => void;
+}) {
+  return (
+    <div
+      aria-label={`Quantity for ${item.productName}`}
+      className="flex shrink-0 items-center gap-0.5 rounded-full border border-border bg-background/60 p-0.5"
+      role="group"
+    >
+      <Button
+        aria-label={`Decrease ${item.productName} quantity`}
+        className="size-8 p-0 text-lg"
+        disabled={item.quantity <= 1}
+        onClick={() => onUpdateQuantity(item.id, item.quantity - 1)}
+        variant="ghost"
+      >
+        −
+      </Button>
+      <span aria-live="polite" className="min-w-8 text-center font-mono text-[15px] text-foreground">
         {item.quantity}
       </span>
-    </PrintFrame>
+      <Button
+        aria-label={`Increase ${item.productName} quantity`}
+        className="size-8 p-0 text-lg"
+        disabled={item.quantity >= 99}
+        onClick={() => onUpdateQuantity(item.id, item.quantity + 1)}
+        variant="ghost"
+      >
+        +
+      </Button>
+    </div>
   );
 }
 
@@ -123,21 +162,21 @@ export function CartSheet({
               <h2 className="text-2xl font-semibold tracking-[-0.02em]" id="cart-sheet-title">
                 {checkingOut ? "Review your prints" : "Local cart"}
               </h2>
-              <small className="text-[13px] text-muted-foreground">
-                {isEmpty ? "Cart empty" : `${printCount} print${printCount === 1 ? "" : "s"}`}
+              <small className="text-sm text-muted-foreground">
+                {isEmpty
+                  ? "Cart empty"
+                  : `${items.length} photo${items.length === 1 ? "" : "s"} · ${printCount} print${printCount === 1 ? "" : "s"}`}
               </small>
             </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <Chip tone="warning">Demo</Chip>
-              <Button
-                aria-label="Close demo cart"
-                onClick={close}
-                ref={closeRef}
-                variant="ghost"
-              >
-                Close
-              </Button>
-            </div>
+            <Button
+              aria-label="Close demo cart"
+              className="bg-surface-warm"
+              onClick={close}
+              ref={closeRef}
+              variant="ghost"
+            >
+              Close
+            </Button>
           </div>
 
           {complete && (
@@ -161,7 +200,7 @@ export function CartSheet({
                     <span className="font-mono text-[13px] text-muted-foreground">
                       {String(index + 1).padStart(2, "0")}
                     </span>
-                    <CartThumbnail item={item} />
+                    <CartThumbnail className="w-12 shrink-0" item={item} />
                     <div className="min-w-0 flex-1">
                       <b className="block truncate text-[15px] font-semibold">{item.productName}</b>
                       <small className="block text-[13px] text-muted-foreground">
@@ -188,55 +227,77 @@ export function CartSheet({
                   No prints in the demo cart yet. Propose a print to add one.
                 </small>
               ) : (
+                /* The product name gets the full width of the sheet rather than
+                   whatever the controls leave over. On a 400px panel, sharing
+                   one line with a stepper and a Remove button clipped every
+                   title to "8 ×…". */
                 <ul className="flex flex-col divide-y divide-border">
                   {items.map((item) => (
-                    <li className="flex items-center gap-3 py-2 first:pt-0" key={item.id}>
+                    <li className="flex items-start gap-3.5 py-3.5 first:pt-0" key={item.id}>
                       <CartThumbnail item={item} />
-                      <div className="min-w-0 flex-1">
-                        <b className="block truncate text-[14px] font-semibold">{item.productName}</b>
-                        <small className="block text-[13px] text-muted-foreground">
-                          {item.source}
-                        </small>
+                      <div className="flex min-w-0 flex-1 flex-col gap-2.5">
+                        <b className="text-base font-semibold leading-[1.375] tracking-[-0.01em]">
+                          {item.productName}
+                        </b>
+                        <div className="flex items-center justify-between gap-2">
+                          <Chip className="h-[22px] rounded-[6px] px-2 text-[11px] uppercase tracking-[0.09em]">
+                            {item.source}
+                          </Chip>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <QuantityStepper item={item} onUpdateQuantity={onUpdateQuantity} />
+                            <Button
+                              aria-label={`Remove ${item.productName}`}
+                              className="size-9 p-0"
+                              onClick={() => onRemoveItem(item.id)}
+                              variant="ghost"
+                            >
+                              <svg
+                                aria-hidden="true"
+                                className="size-3.5"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeLinecap="round"
+                                strokeWidth={1.7}
+                                viewBox="0 0 14 14"
+                              >
+                                <path d="M2.5 2.5l9 9M11.5 2.5l-9 9" />
+                              </svg>
+                            </Button>
+                          </div>
+                        </div>
                       </div>
-                      <div aria-label={`Quantity for ${item.productName}`} className="flex items-center gap-1" role="group">
-                        <Button
-                          aria-label={`Decrease ${item.productName} quantity`}
-                          disabled={item.quantity <= 1}
-                          onClick={() => onUpdateQuantity(item.id, item.quantity - 1)}
-                          variant="ghost"
-                        >
-                          −
-                        </Button>
-                        <span className="min-w-7 text-center font-mono text-[13px]" aria-live="polite">{item.quantity}</span>
-                        <Button
-                          aria-label={`Increase ${item.productName} quantity`}
-                          disabled={item.quantity >= 99}
-                          onClick={() => onUpdateQuantity(item.id, item.quantity + 1)}
-                          variant="ghost"
-                        >
-                          +
-                        </Button>
-                      </div>
-                      <Button
-                        aria-label={`Remove ${item.productName}`}
-                        onClick={() => onRemoveItem(item.id)}
-                        variant="ghost"
-                      >
-                        Remove
-                      </Button>
                     </li>
                   ))}
                 </ul>
               )}
 
-              <Button
-                className="mt-auto w-full"
-                disabled={isEmpty}
-                onClick={() => { setComplete(false); setCheckingOut(true); }}
-                size="lg"
-              >
-                Demo checkout
-              </Button>
+              {/* The demo disclosure moves off the button and under it, where
+                  there is room to say the whole thing. A one-word "Demo" chip
+                  in the header was easy to read past. */}
+              <div className="mt-auto flex flex-col gap-3.5 border-t border-border pt-5">
+                {!isEmpty && (
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span className="text-sm text-muted-foreground">Total prints</span>
+                    <span className="flex items-baseline gap-1.5">
+                      <b className="font-mono text-[22px] font-medium">{printCount}</b>
+                      <span className="text-sm text-muted-foreground">
+                        across {items.length} photo{items.length === 1 ? "" : "s"}
+                      </span>
+                    </span>
+                  </div>
+                )}
+                <Button
+                  className="w-full"
+                  disabled={isEmpty}
+                  onClick={() => { setComplete(false); setCheckingOut(true); }}
+                  size="lg"
+                >
+                  Checkout
+                </Button>
+                <small className="text-center text-[13px] text-muted-foreground">
+                  Demo checkout — no order is placed and nothing is charged.
+                </small>
+              </div>
             </>
           )}
         </Surface>

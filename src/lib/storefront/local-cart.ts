@@ -184,7 +184,10 @@ export function mergeLocalCartItem(items: readonly LocalCartItem[], incoming: Lo
   const key = localCartConfigurationKey(incoming);
   const existing = items.find((item) => localCartConfigurationKey(item) === key);
   if (!existing) return { items: [...items, incoming], line: incoming };
-  const line = { ...existing, quantity: existing.quantity + incoming.quantity };
+  // An exact re-add is still the shopper's latest cart action. Preserve the
+  // original line identity, but refresh this timestamp so "most recent" means
+  // what they last put in the cart, including a merged quantity increase.
+  const line = { ...existing, quantity: existing.quantity + incoming.quantity, addedAt: incoming.addedAt };
   return {
     items: items.map((item) => item.id === existing.id ? line : item),
     line,
@@ -210,14 +213,22 @@ export function localCartPrintCount(items: readonly LocalCartItem[]): number {
   return items.reduce((total, item) => total + item.quantity, 0);
 }
 
+/** The line affected by a shopper request such as "change the most recent one." */
+export function mostRecentLocalCartItem(items: readonly LocalCartItem[]): LocalCartItem | null {
+  return items.reduce<LocalCartItem | null>((latest, item) =>
+    !latest || item.addedAt >= latest.addedAt ? item : latest, null);
+}
+
 /** The wire shape both manage_cart and resolve_cart_proposal return. */
 export function localCartWireItems(items: readonly LocalCartItem[]) {
-  return items.map((item) => ({
+  return items.map((item, index) => ({
     item_id: item.id,
     draft_id: item.draftId,
     product_id: item.productId,
     product_name: item.productName,
     quantity: item.quantity,
     source: item.source,
+    position: index + 1,
+    added_at: item.addedAt,
   }));
 }

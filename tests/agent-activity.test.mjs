@@ -19,6 +19,13 @@ import {
 
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
+test("agent toasts stay beside the cart and use their timed undo flow instead of a close X", async () => {
+  const toaster = await read("src/components/storefront/activity-toaster.tsx");
+  assert.match(toaster, /position="bottom-right"/);
+  assert.match(toaster, /closeButton=\{false\}/);
+  assert.match(toaster, /duration: 3600/);
+});
+
 /** The slice of the workbench that answers one WebMCP action. */
 function handler(source, action, nextAction) {
   const start = source.indexOf(`request.action === "${action}"`);
@@ -46,6 +53,7 @@ test("only tools that change the shopper's screen are allowed to announce anythi
     "resolve_cart_proposal",
     "manage_cart",
     "undo_last_change",
+    "redo_last_change",
   ]);
   // Viewing the cart arrives on a tool that can mutate, but changes nothing.
   assert.equal(agentActivity("manage_cart", { action: "view" }, { action: "view", cart_item_count: 3 }), null);
@@ -149,7 +157,7 @@ test("relaying the shopper's decision never reads as the agent's own", () => {
   assert.equal(rejected.detail, "2 cards still waiting");
 });
 
-test("an undo names the change it took back, and is not itself undoable", () => {
+test("an undo names the change it took back, and a redo names what it restored", () => {
   const activity = agentActivity("undo_last_change", { steps: 1 }, {
     status: "undone",
     undone: "revise_prints framing across 5 drafts",
@@ -160,6 +168,15 @@ test("an undo names the change it took back, and is not itself undoable", () => 
   // Offering Undo on an undo would promise a redo the ring buffer does not have.
   assert.equal(activity.undoable, false);
   assert.equal(activity.pulse, "workbench");
+
+  const redone = agentActivity("redo_last_change", { steps: 1 }, {
+    status: "redone",
+    redone: "resolve_cart_proposal accept",
+    remaining_redo_steps: 0,
+  });
+  assert.equal(redone.message, "Redid: resolve_cart_proposal accept");
+  assert.equal(redone.detail, "Nothing further to redo");
+  assert.equal(redone.undoable, true);
 });
 
 // ---------------------------------------------------------------- feature 2
@@ -182,7 +199,7 @@ const state = (overrides = {}) => workbenchState({
 test("the undo ring buffer walks back through recorded states, newest first", () => {
   const history = createWorkbenchHistory(10);
   assert.equal(history.depth(), 0);
-  assert.equal(history.undo(), null, "an untouched workbench has nothing to undo");
+  assert.equal(history.undo(state()), null, "an untouched workbench has nothing to undo");
 
   history.push("configure_print", state({ directCrop: { zoom: 1, focusX: 50, focusY: 50 } }));
   history.push("revise_prints framing across 5 drafts", state({ directCrop: { zoom: 2, focusX: 50, focusY: 50 } }));
@@ -191,19 +208,27 @@ test("the undo ring buffer walks back through recorded states, newest first", ()
   assert.deepEqual(history.labels(), ["add_to_cart", "revise_prints framing across 5 drafts", "configure_print"]);
 
   // One step back restores the state the newest change started from.
-  const once = history.undo();
+  const once = history.undo(state({ directCrop: { zoom: 4, focusX: 50, focusY: 50 } }));
   assert.equal(once.label, "add_to_cart");
   assert.equal(once.undoneCount, 1);
   assert.equal(once.state.directCrop.zoom, 3);
   assert.equal(history.depth(), 2);
 
   // Several steps collapse into one restore, and report every label undone.
-  const twice = history.undo(2);
+  const twice = history.undo(once.state, 2);
   assert.deepEqual(twice.labels, ["revise_prints framing across 5 drafts", "configure_print"]);
   assert.equal(twice.undoneCount, 2);
   assert.equal(twice.state.directCrop.zoom, 1, "restores the oldest of the two, not the newest");
   assert.equal(history.depth(), 0);
-  assert.equal(history.undo(), null);
+  assert.equal(history.undo(twice.state), null);
+
+  const firstRedo = history.redo();
+  assert.equal(firstRedo.label, "configure_print");
+  assert.equal(firstRedo.state.directCrop.zoom, 2);
+  const secondRedo = history.redo(2);
+  assert.equal(secondRedo.label, "add_to_cart");
+  assert.equal(secondRedo.state.directCrop.zoom, 4);
+  assert.equal(history.redo(), null);
 });
 
 test("the ring is bounded, and going back further than it holds says how far it got", () => {
@@ -214,12 +239,31 @@ test("the ring is bounded, and going back further than it holds says how far it 
 
   // Asking for five back when three remain walks back three and says so,
   // rather than refusing an undo the shopper can plainly see is available.
-  const undone = history.undo(5);
+  const undone = history.undo(state({ directCrop: { zoom: 6, focusX: 50, focusY: 50 } }), 5);
   assert.equal(undone.undoneCount, 3);
   assert.equal(undone.state.directCrop.zoom, 3);
   assert.equal(history.depth(), 0);
 
   assert.equal(WORKBENCH_HISTORY_LIMIT, 10, "the shipped ring holds ten changes");
+});
+
+test("redo restores the exact cart state an undo removed, and new work clears it", () => {
+  const history = createWorkbenchHistory();
+  const beforeAccept = state({ cart: [] });
+  const accepted = state({ cart: [{ id: "cart_image_1_x10", quantity: 10 }] });
+  history.push("resolve_cart_proposal accept", beforeAccept);
+
+  const undone = history.undo(accepted);
+  assert.deepEqual(undone.state.cart, []);
+  assert.equal(history.redoDepth(), 1);
+
+  const redone = history.redo();
+  assert.equal(redone.label, "resolve_cart_proposal accept");
+  assert.equal(redone.state.cart[0]?.id, "cart_image_1_x10");
+  assert.equal(redone.state.cart[0]?.quantity, 10);
+
+  history.push("manage_cart update_quantity", redone.state);
+  assert.equal(history.redo(), null, "a new change invalidates the old future");
 });
 
 test("an undone state round-trips through the same relink path a reload restore uses", () => {
@@ -265,7 +309,7 @@ test("an undone state round-trips through the same relink path a reload restore 
     directCrop: { zoom: 1, focusX: 50, focusY: 50 },
   }));
 
-  const undone = history.undo();
+  const undone = history.undo(state());
   const snapshot = workbenchSnapshotFromState(undone.state, () => "2026-01-02T00:00:00.000Z");
   assert.equal(snapshot.version, WORKBENCH_SCHEMA_VERSION, "an undo goes back through the real snapshot envelope");
 
@@ -290,8 +334,8 @@ test("the undo point is recorded once, centrally, and never for a read-only or r
   // One capture, at the one point every bridge action passes through, before
   // any branch has run. A snapshot taken inside a handler would already hold
   // half the change it is supposed to undo.
-  assert.equal((ui.match(/captureWorkbenchState\(\)/g) ?? []).length, 2, "one definition and one call site");
-  assert.match(ui, /const preMutation = isMutatingAgentAction\(request\.action\) && request\.action !== "undo_last_change"/);
+  assert.equal((ui.match(/captureWorkbenchState\(\)/g) ?? []).length, 3, "one definition, one mutation capture, and one undo capture");
+  assert.match(ui, /request\.action !== "undo_last_change"\s*&& request\.action !== "redo_last_change"/);
   // Recorded only once the response says something changed, so a refused call
   // and a batch that staged nothing leave no empty step to walk back into.
   assert.match(ui, /if \(activity\?\.undoable && preMutation\) \{\s*workbenchHistory\.current\.push\(preMutation\.label, preMutation\.state\);/);
@@ -299,7 +343,7 @@ test("the undo point is recorded once, centrally, and never for a read-only or r
   // Exactly one restore implementation. An undo that grew its own would drift
   // from the reload path that already proves proposal cards come back.
   assert.equal((ui.match(/relinkWorkbenchSnapshot\(/g) ?? []).length, 1, "the only call is inside applyWorkbenchRestore");
-  const undo = handler(ui, "undo_last_change", null);
+  const undo = handler(ui, "undo_last_change", "redo_last_change");
   assert.match(undo, /const undone = undoWorkbenchChange\(requestedSteps\);/);
   assert.match(undo, /undone: undone\.label/, "the description is read off the recorded label");
   // Nothing to undo is said in words, not faked by restoring the same state.
@@ -308,6 +352,11 @@ test("the undo point is recorded once, centrally, and never for a read-only or r
   // it must after a reload restore.
   assert.ok(undo.indexOf("await nextPaint()") < undo.indexOf("respondWithActivity"));
   assert.match(ui, /workbenchSnapshotFromState\(undone\.state\)/);
+  const redo = handler(ui, "redo_last_change", null);
+  assert.match(redo, /const redone = redoWorkbenchChange\(requestedSteps\);/);
+  assert.match(redo, /redone: redone\.label/);
+  assert.match(redo, /There is no undone change to redo/);
+  assert.match(ui, /for \(const timer of proposalExitTimers\.current\) clearTimeout\(timer\);/);
 });
 
 test("every mutating branch announces through the one mapping, and no branch toasts on its own", async () => {
@@ -315,7 +364,7 @@ test("every mutating branch announces through the one mapping, and no branch toa
   // The read-only pair keeps calling the imported responder, so it cannot
   // announce anything by accident; every mutating branch goes through the
   // wrapper that maps action plus result to a line of text.
-  assert.equal((ui.match(/respondWithActivity\(/g) ?? []).length, 12, "one definition and eleven mutating call sites");
+  assert.equal((ui.match(/respondWithActivity\(/g) ?? []).length, 13, "one definition and twelve mutating call sites");
   const ask = handler(ui, "ask_storefront", "find_prints");
   assert.doesNotMatch(ask, /respondWithActivity/);
   const find = handler(ui, "find_prints", "configure_print");
@@ -395,4 +444,46 @@ test("a live quantity change is announced as a change to the question, not an ad
   });
   assert.equal(activity.message, "Agent set that card to 2 copies");
   assert.equal(activity.detail, "5×7 Print — still waiting on your answer");
+});
+
+test("filling the printed lines is announced as text, not as configuring a print", () => {
+  const result = {
+    draft_id: "draft_1",
+    product: { name: "Memory Mate 8x10" },
+    text_slots: [
+      { slot_key: "text_746edef46a4a", label: "Team", value: "Spartans" },
+      { slot_key: "text_1e6560b98c6e", label: "Year", value: "2026" },
+    ],
+  };
+  const four = agentActivity("configure_print", {
+    slotPatches: [
+      { label: "print name", operation: "set_text", text: "Marcus Betcher" },
+      { label: "jersey", operation: "set_text", text: "12" },
+      { label: "team", operation: "set_text", text: "Spartans" },
+      { label: "year", operation: "set_text", text: "2026" },
+    ],
+  }, result);
+  assert.equal(four.message, "Agent filled 4 text lines on the Memory Mate 8x10");
+  assert.equal(four.undoable, true);
+
+  // One line is named the way the artwork names it, not by its opaque key.
+  const one = agentActivity("configure_print", {
+    slotPatches: [{ label: "team", operation: "set_text", text: "Spartans" }],
+  }, result);
+  assert.equal(one.message, "Agent set the Team line to Spartans");
+
+  // A mixed call is a configuration again: there is no single change to name.
+  const mixed = agentActivity("configure_print", {
+    slotPatches: [
+      { label: "team", operation: "set_text", text: "Spartans" },
+      { label: "team", operation: "assign", photoRef: 3 },
+    ],
+  }, result);
+  assert.match(mixed.message, /^Agent configured a Memory Mate 8x10/);
+
+  // The undo snapshot is labelled from the request, before any response exists.
+  assert.equal(
+    agentActionLabel("configure_print", { slotPatches: [{ label: "team", operation: "set_text", text: "Spartans" }] }),
+    "configure_print 1 text line",
+  );
 });

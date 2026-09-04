@@ -115,37 +115,140 @@ export function deriveImageSlotAliases(
   return derived ? uniqueOnly(derived) : {};
 }
 
+/**
+ * A text slot publishes a human label ("Print Name") and often a semantic key
+ * ("athlete_print_name"). Both are words the template itself already speaks, so
+ * the shopper's own vocabulary — "name", "jersey", "team" — is read out of them
+ * rather than invented for one particular template.
+ */
+export type AliasTextSlot = {
+  key: string;
+  suggested_label?: string | null;
+  suggested_semantic_key?: string | null;
+};
+
+/** Words that carry no aim of their own and would collide across slots. */
+const textAliasStopWords = new Set(["a", "an", "and", "for", "of", "or", "the", "to", "your"]);
+
+function aliasWords(source: string | null | undefined): string[] {
+  if (typeof source !== "string") return [];
+  return source
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 1 && !textAliasStopWords.has(word) && !/^\d+$/.test(word));
+}
+
+function aliasPhrase(source: string | null | undefined): string | null {
+  const words = aliasWords(source);
+  return words.length > 1 ? words.join(" ") : null;
+}
+
+/**
+ * Text slot vocabulary, derived only from what the contract publishes: the
+ * label as one phrase, its own words, then the same two readings of the
+ * semantic key. A word two slots would both answer to (the "athlete" in
+ * athlete_team and athlete_year) is dropped, exactly as for image slots.
+ */
+export function deriveTextSlotAliases(slots: readonly AliasTextSlot[]): Record<string, string[]> {
+  const derived: Record<string, string[]> = {};
+  for (const slot of slots) {
+    const words = [
+      aliasPhrase(slot.suggested_label),
+      ...aliasWords(slot.suggested_label),
+      aliasPhrase(slot.suggested_semantic_key),
+      ...aliasWords(slot.suggested_semantic_key),
+    ].filter((word): word is string => Boolean(word));
+    const unique = [...new Set(words)].filter((word) => word !== slot.key.toLowerCase());
+    if (unique.length > 0) derived[slot.key] = unique;
+  }
+  return uniqueOnly(derived);
+}
+
+export type SlotKind = "image" | "text";
+
 export type SlotPatchReference = { slotKey?: unknown; label?: unknown };
 
 export type SlotPatchResolution<Slot> =
   | { kind: "resolved"; slot: Slot; matchedBy: "key" | "label" | "alias" }
-  | { kind: "unresolved"; reason: "no_match" | "ambiguous_alias" };
+  | { kind: "unresolved"; reason: "no_match" | "ambiguous_label" | "ambiguous_alias" };
+
+function uniqueMatch<Slot>(
+  matches: readonly Slot[],
+  matchedBy: "key" | "label" | "alias",
+  ambiguous: "ambiguous_label" | "ambiguous_alias",
+): SlotPatchResolution<Slot> | null {
+  if (matches.length === 1) return { kind: "resolved", slot: matches[0]!, matchedBy };
+  if (matches.length > 1) return { kind: "unresolved", reason: ambiguous };
+  return null;
+}
 
 /**
- * Exact published facts win absolutely: a slot key, then a published label.
- * Derived aliases are the last resort and only resolve when one slot owns them.
+ * Exact published facts win absolutely: a slot key, then a published label —
+ * exact case first, then trimmed and case-folded. Derived aliases are the last
+ * resort and only resolve when one slot owns them.
+ *
+ * Every tier is scoped to the kind the operation needs before anything is
+ * matched, because "team" is a word this artwork uses twice: once for the
+ * landscape team photograph and once for the printed team line. A set_text can
+ * only ever mean the text slot, and an assign only ever the image slot.
  */
-export function resolveSlotPatchTarget<Slot extends AliasImageSlot>(
+export function resolveSlotPatchTarget<Slot extends AliasImageSlot & { kind?: unknown }>(
   slots: readonly Slot[],
   patch: SlotPatchReference,
   aliasesBySlotKey: Readonly<Record<string, string[]>> = {},
+  requiredKind: SlotKind | null = null,
 ): SlotPatchResolution<Slot> {
+  // A slot that publishes no kind cannot be excluded by kind: the caller that
+  // knows every candidate is an image (revise_prints) says so explicitly.
+  const candidates = requiredKind
+    ? slots.filter((slot) => typeof slot.kind !== "string" || slot.kind === requiredKind)
+    : slots;
   const slotKey = typeof patch.slotKey === "string" ? patch.slotKey : null;
   const label = typeof patch.label === "string" ? patch.label : null;
   if (slotKey) {
-    const exact = slots.find((slot) => slot.key === slotKey);
+    const exact = candidates.find((slot) => slot.key === slotKey);
     if (exact) return { kind: "resolved", slot: exact, matchedBy: "key" };
   }
   if (label) {
-    const exactKey = slots.find((slot) => slot.key === label);
+    const wanted = label.trim();
+    const folded = wanted.toLowerCase();
+    const exactKey = candidates.find((slot) => slot.key === label || slot.key === wanted);
     if (exactKey) return { kind: "resolved", slot: exactKey, matchedBy: "key" };
-    const published = slots.find((slot) => slot.suggested_label === label);
-    if (published) return { kind: "resolved", slot: published, matchedBy: "label" };
-    const wanted = label.trim().toLowerCase();
-    const aliased = slots.filter((slot) =>
-      (aliasesBySlotKey[slot.key] ?? []).some((alias) => alias.toLowerCase() === wanted));
-    if (aliased.length === 1) return { kind: "resolved", slot: aliased[0]!, matchedBy: "alias" };
-    if (aliased.length > 1) return { kind: "unresolved", reason: "ambiguous_alias" };
+    const exactLabel = uniqueMatch(
+      candidates.filter((slot) => slot.suggested_label === label),
+      "label",
+      "ambiguous_label",
+    );
+    if (exactLabel) return exactLabel;
+    const foldedLabel = uniqueMatch(
+      candidates.filter((slot) => (slot.suggested_label ?? "").trim().toLowerCase() === folded),
+      "label",
+      "ambiguous_label",
+    );
+    if (foldedLabel) return foldedLabel;
+    const aliased = uniqueMatch(
+      candidates.filter((slot) =>
+        (aliasesBySlotKey[slot.key] ?? []).some((alias) => alias.trim().toLowerCase() === folded)),
+      "alias",
+      "ambiguous_alias",
+    );
+    if (aliased) return aliased;
   }
   return { kind: "unresolved", reason: "no_match" };
+}
+
+/**
+ * A template that publishes max_length owns the limit. When it publishes none,
+ * the storefront still refuses a 300-character jersey number: silently printing
+ * text no proof can carry is worse than a clear error.
+ */
+export const unpublishedTextSlotMaxLength = 200;
+
+export function textSlotLengthLimit(
+  slot: { max_length?: number | null },
+): { limit: number; published: boolean } {
+  const published = typeof slot.max_length === "number" && Number.isFinite(slot.max_length) && slot.max_length > 0;
+  return published
+    ? { limit: Math.floor(slot.max_length as number), published: true }
+    : { limit: unpublishedTextSlotMaxLength, published: false };
 }

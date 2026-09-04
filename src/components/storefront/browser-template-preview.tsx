@@ -53,7 +53,7 @@ type BrowserTemplatePreviewProps = {
 
 /** The canvas keeps `container-type: inline-size` so text layers can size in `cqw`. */
 const canvasClassName =
-  "relative mx-auto max-h-[560px] w-[min(100%,440px)] cursor-grab touch-none overflow-hidden [container-type:inline-size] active:cursor-grabbing";
+  "relative mx-auto max-h-[min(78vh,1000px)] w-full cursor-grab touch-none overflow-hidden [container-type:inline-size] active:cursor-grabbing";
 
 /** Published background art, ported from the legacy stylesheet's pattern rules. */
 function backgroundArtStyle(art: BrowserPreviewCanvas["backgroundArt"]): CSSProperties {
@@ -386,7 +386,10 @@ export function BrowserTemplatePreview({
 
   return <section className="grid gap-4" aria-label="Responsive template preview" ref={previewRoot}>
     {document.output.surfaces.length > 1 && <SelectField label="Surface" value={selectedSurface.id} onChange={(event) => onSurfaceChange(event.target.value)}>{document.output.surfaces.map((surface) => <option key={surface.id} value={surface.id}>{surface.id} · {surface.fulfillment_role}</option>)}</SelectField>}
-    <PrintFrame className="mx-auto w-[min(100%,452px)]">
+    {/* The print is the reason the page exists, so it takes the column it is
+        given. It used to stop at 452px however wide the workbench got, which
+        left the artwork smaller than the form describing it. */}
+    <PrintFrame className="mx-auto w-full max-w-[min(100%,780px)]">
       <div className={canvasClassName} style={{ aspectRatio: `${canvas.widthIn} / ${canvas.heightIn}`, background: canvas.backgroundColor }} onLostPointerCapture={loseDrag} onPointerCancel={endDrag} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={endDrag}>
         {canvas.backgroundAssetRef && assetURLs[canvas.backgroundAssetRef] && <img alt="Published template background" className="pointer-events-none absolute inset-0 h-full w-full object-cover" src={assetURLs[canvas.backgroundAssetRef]} />}
         {!canvas.backgroundAssetRef && canvas.backgroundArt !== "none" && <span aria-hidden className="pointer-events-none absolute inset-0 h-full w-full opacity-[.55]" style={backgroundArtStyle(canvas.backgroundArt)} />}

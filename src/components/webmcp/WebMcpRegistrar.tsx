@@ -10,6 +10,7 @@ import {
   findPrints,
   manageCart,
   proposePrints,
+  redoLastChange,
   resolveCartProposal,
   revisePrints,
   undoLastChange,
@@ -39,6 +40,7 @@ const storefrontTools = [
   resolveCartProposal,
   manageCart,
   undoLastChange,
+  redoLastChange,
 ];
 
 /** Registers the storefront tool surface once for the visible client flow. */

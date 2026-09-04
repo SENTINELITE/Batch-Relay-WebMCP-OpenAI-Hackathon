@@ -64,6 +64,7 @@ test("the search form is a declarative WebMCP tool", async () => {
   assert.match(source, /toolname: "search-print-formats"/);
   assert.match(source, /tooldescription:/);
   assert.match(source, /toolautosubmit: ""/);
+  assert.match(source, /toolparamtitle: "Print format query"/);
   assert.match(source, /toolparamdescription:/);
 
   // The declarative name must not collide with the imperative SDK tool.

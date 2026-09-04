@@ -4,9 +4,12 @@ import test from "node:test";
 import { browserPreviewCanvas } from "../src/lib/storefront/browser-preview.ts";
 import {
   deriveImageSlotAliases,
+  deriveTextSlotAliases,
   imageSlotBoxesFromCanvases,
   resolveSlotPatchTarget,
   slotBoxFromLabel,
+  textSlotLengthLimit,
+  unpublishedTextSlotMaxLength,
 } from "../src/lib/storefront/slot-aliases.ts";
 
 const memoryMateSlots = [
@@ -199,4 +202,118 @@ test("refuses a reference that names nothing visible", () => {
     { kind: "unresolved", reason: "no_match" },
   );
   assert.deepEqual(resolveSlotPatchTarget(resolutionSlots, {}), { kind: "unresolved", reason: "no_match" });
+});
+
+// The live Neon Lights memory mate, whose landscape photograph slot earns the
+// derived alias "team" while a printed line is *labelled* "Team".
+const neonLightsSlots = [
+  { key: "image_122qlv9", kind: "image", suggested_label: "Athlete portrait (5x7)", suggested_semantic_key: "athlete.portrait" },
+  { key: "text_5106920550f5", kind: "text", suggested_label: "Print Name", suggested_semantic_key: "athlete_print_name" },
+  { key: "text_171cff5dcfde", kind: "text", suggested_label: "Jersey Number", suggested_semantic_key: "athlete_jersey_number" },
+  { key: "text_746edef46a4a", kind: "text", suggested_label: "Team", suggested_semantic_key: "athlete_team" },
+  { key: "text_1e6560b98c6e", kind: "text", suggested_label: "Year", suggested_semantic_key: "athlete_year" },
+  { key: "image_12rkfks", kind: "image", suggested_label: "athlete.portrait", suggested_semantic_key: "athlete.portrait" },
+];
+const neonLightsAliases = {
+  image_12rkfks: ["team", "group"],
+  image_122qlv9: ["individual", "athlete"],
+  ...deriveTextSlotAliases(neonLightsSlots.filter((slot) => slot.kind === "text")),
+};
+
+test("the word team means the printed line for set_text and the photograph for a crop", () => {
+  // The collision that broke the demo: a lowercase "team" resolved to the
+  // image slot holding the derived alias, and set_text then refused it.
+  const forText = resolveSlotPatchTarget(neonLightsSlots, { label: "team" }, neonLightsAliases, "text");
+  assert.equal(forText.kind, "resolved");
+  assert.equal(forText.slot.key, "text_746edef46a4a");
+
+  for (const kindedPatch of [{ label: "team" }, { label: "Team" }, { label: " team " }]) {
+    const forImage = resolveSlotPatchTarget(neonLightsSlots, kindedPatch, neonLightsAliases, "image");
+    assert.equal(forImage.kind, "resolved");
+    assert.equal(forImage.slot.key, "image_12rkfks", "a crop or an assign can only mean the photograph slot");
+  }
+});
+
+test("every text line the live template publishes is reachable by a spoken word", () => {
+  const spoken = [
+    ["name", "text_5106920550f5"],
+    ["print name", "text_5106920550f5"],
+    ["Jersey Number", "text_171cff5dcfde"],
+    ["jersey", "text_171cff5dcfde"],
+    ["number", "text_171cff5dcfde"],
+    ["team", "text_746edef46a4a"],
+    ["year", "text_1e6560b98c6e"],
+  ];
+  for (const [label, key] of spoken) {
+    const resolved = resolveSlotPatchTarget(neonLightsSlots, { label }, neonLightsAliases, "text");
+    assert.equal(resolved.kind, "resolved", `${label} should name a text slot`);
+    assert.equal(resolved.slot.key, key, `${label} should reach ${key}`);
+  }
+});
+
+test("a kind-scoped reference refuses to reach across into the other kind", () => {
+  // "Print Name" is a text label; an assign may not land on it, and the image
+  // slots publish nothing by that name.
+  assert.deepEqual(
+    resolveSlotPatchTarget(neonLightsSlots, { label: "Print Name" }, neonLightsAliases, "image"),
+    { kind: "unresolved", reason: "no_match" },
+  );
+  assert.deepEqual(
+    resolveSlotPatchTarget(neonLightsSlots, { label: "individual" }, neonLightsAliases, "text"),
+    { kind: "unresolved", reason: "no_match" },
+  );
+  // The exact published key is honoured only within the kind that owns it.
+  assert.deepEqual(
+    resolveSlotPatchTarget(neonLightsSlots, { slotKey: "image_12rkfks" }, neonLightsAliases, "text"),
+    { kind: "unresolved", reason: "no_match" },
+  );
+});
+
+test("published labels match trimmed and case-folded, exact case first", () => {
+  const slots = [
+    { key: "text_a", kind: "text", suggested_label: "Team" },
+    { key: "text_b", kind: "text", suggested_label: "team" },
+  ];
+  const exact = resolveSlotPatchTarget(slots, { label: "team" }, {}, "text");
+  assert.equal(exact.slot.key, "text_b", "an exact-case label outranks a case-folded one");
+  const folded = resolveSlotPatchTarget(slots, { label: "  TEAM " }, {}, "text");
+  assert.deepEqual(folded, { kind: "unresolved", reason: "ambiguous_label" });
+  const only = resolveSlotPatchTarget([slots[0]], { label: "  tEaM " }, {}, "text");
+  assert.equal(only.kind, "resolved");
+  assert.equal(only.matchedBy, "label");
+});
+
+test("text slot aliases are read from the published label and semantic key", () => {
+  const aliases = deriveTextSlotAliases(neonLightsSlots.filter((slot) => slot.kind === "text"));
+  assert.deepEqual(aliases, {
+    text_5106920550f5: ["print name", "print", "name", "athlete print name"],
+    text_171cff5dcfde: ["jersey number", "jersey", "number", "athlete jersey number"],
+    text_746edef46a4a: ["team", "athlete team"],
+    text_1e6560b98c6e: ["year", "athlete year"],
+  });
+  // "athlete" is the namespace all four share, so no slot may answer to it.
+  assert.ok(!Object.values(aliases).flat().includes("athlete"));
+});
+
+test("a word two text slots would both answer to is dropped", () => {
+  const aliases = deriveTextSlotAliases([
+    { key: "text_home", suggested_label: "Home Team" },
+    { key: "text_away", suggested_label: "Away Team" },
+  ]);
+  assert.deepEqual(aliases, {
+    text_home: ["home team", "home"],
+    text_away: ["away team", "away"],
+  });
+});
+
+test("a text slot with nothing published earns no vocabulary", () => {
+  assert.deepEqual(deriveTextSlotAliases([{ key: "text_1" }]), {});
+  assert.deepEqual(deriveTextSlotAliases([]), {});
+});
+
+test("the published max_length owns the limit, and an unpublished one still has a cap", () => {
+  assert.deepEqual(textSlotLengthLimit({ max_length: 24 }), { limit: 24, published: true });
+  assert.deepEqual(textSlotLengthLimit({}), { limit: unpublishedTextSlotMaxLength, published: false });
+  assert.deepEqual(textSlotLengthLimit({ max_length: 0 }), { limit: unpublishedTextSlotMaxLength, published: false });
+  assert.equal(unpublishedTextSlotMaxLength, 200);
 });

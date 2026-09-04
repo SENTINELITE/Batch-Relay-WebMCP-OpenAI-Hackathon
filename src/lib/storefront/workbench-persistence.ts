@@ -266,6 +266,25 @@ export type WorkbenchUndo = {
   undoneCount: number;
 };
 
+export type WorkbenchRedo = {
+  /** The workbench as it stood after the re-applied changes. */
+  state: WorkbenchState;
+  /** The most recent change re-applied, for the line the shopper is shown. */
+  label: string;
+  /** Every change re-applied, oldest first — longer than one only for multi-step. */
+  labels: string[];
+  /** How many changes were actually re-applied. */
+  redoneCount: number;
+};
+
+type WorkbenchRedoEntry = {
+  label: string;
+  /** State after this one original change. */
+  state: WorkbenchState;
+  /** The pre-mutation state to put back on the undo stack after a redo. */
+  undoEntry: WorkbenchHistoryEntry;
+};
+
 /**
  * A bounded stack of pre-mutation snapshots.
  *
@@ -282,9 +301,13 @@ export type WorkbenchHistory = {
   /** Records the state a change is about to modify. */
   push(label: string, state: WorkbenchState): void;
   /** Walks back up to `steps` changes, or null when there is nothing to undo. */
-  undo(steps?: number): WorkbenchUndo | null;
+  undo(currentState: WorkbenchState, steps?: number): WorkbenchUndo | null;
+  /** Re-applies up to `steps` changes that were previously undone. */
+  redo(steps?: number): WorkbenchRedo | null;
   /** How many changes can still be walked back. */
   depth(): number;
+  /** How many changes can still be re-applied. */
+  redoDepth(): number;
   /** The pending labels, newest first. Read-only; for describing the history. */
   labels(): string[];
   clear(): void;
@@ -294,13 +317,17 @@ export function createWorkbenchHistory(limit: number = WORKBENCH_HISTORY_LIMIT):
   // Oldest first, so the newest entry is the last one — a plain array is the
   // right shape at this size, and shift() past the limit is the whole ring.
   const entries: WorkbenchHistoryEntry[] = [];
+  const redos: WorkbenchRedoEntry[] = [];
   return {
     push(label, state) {
       if (limit <= 0) return;
       entries.push({ label, state });
       while (entries.length > limit) entries.shift();
+      // A new change forks history: an old redo would restore a different
+      // future than the shopper can now see.
+      redos.length = 0;
     },
-    undo(steps = 1) {
+    undo(currentState, steps = 1) {
       if (entries.length === 0) return null;
       // Asking to go back further than the ring holds walks back as far as it
       // can and says how far it got, rather than refusing a reachable undo.
@@ -309,16 +336,47 @@ export function createWorkbenchHistory(limit: number = WORKBENCH_HISTORY_LIMIT):
       const removed = entries.splice(entries.length - undoneCount, undoneCount);
       const oldest = removed[0]!;
       const labels = [...removed].reverse().map((entry) => entry.label);
+      // Every removed pre-state gets a corresponding after-state. Walking
+      // backward twice means the first redo returns to the intermediate state,
+      // then the next one returns to the original present.
+      let stateAfter = currentState;
+      for (const entry of [...removed].reverse()) {
+        redos.push({ label: entry.label, state: stateAfter, undoEntry: entry });
+        stateAfter = entry.state;
+      }
       return { state: oldest.state, label: labels[0]!, labels, undoneCount };
+    },
+    redo(steps = 1) {
+      if (redos.length === 0) return null;
+      const requested = Number.isInteger(steps) && steps > 0 ? steps : 1;
+      const redone: WorkbenchRedoEntry[] = [];
+      for (let index = 0; index < requested; index += 1) {
+        const entry = redos.pop();
+        if (!entry) break;
+        redone.push(entry);
+        entries.push(entry.undoEntry);
+        while (entries.length > limit) entries.shift();
+      }
+      const latest = redone[redone.length - 1]!;
+      return {
+        state: latest.state,
+        label: latest.label,
+        labels: redone.map((entry) => entry.label),
+        redoneCount: redone.length,
+      };
     },
     depth() {
       return entries.length;
+    },
+    redoDepth() {
+      return redos.length;
     },
     labels() {
       return [...entries].reverse().map((entry) => entry.label);
     },
     clear() {
       entries.length = 0;
+      redos.length = 0;
     },
   };
 }

@@ -103,6 +103,25 @@ the agent addresses slots by their published contract labels, not grid position
 math.
 
 **Then say:**
+> "Print name Marcus Betcher, jersey 12, team Spartans, year 2026."
+
+**Screen:** all four printed lines fill in on the artwork at once, and the toast
+reads *"Agent filled 4 text lines on the Memory Mate."*
+
+**Fires:** one `configure_print` carrying four `set_text` patches
+(`{ label: "print name" | "jersey" | "team" | "year", operation: "set_text", text }`).
+The text slots publish their own aliases beside their labels, so the words the
+shopper says reach them. Note what `team` does here: the same word names the
+landscape *photograph* slot, and the operation is what decides which is meant —
+`set_text` can only ever reach the printed team line, `assign` only the photo.
+The response echoes every text slot's resulting value, so the agent confirms the
+write without asking a second time.
+
+**Shorter variant if you are tight on time:** *"Put SPARTANS 2026 on the team
+line"* — one patch, matched case-insensitively against the published `Team`
+label, aimed at whatever draft is on screen without naming a draft ID.
+
+**Then say:**
 > "Make it landscape."
 
 **Screen:** the preview flips orientation, crops re-fit.

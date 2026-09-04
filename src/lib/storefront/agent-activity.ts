@@ -31,6 +31,7 @@ export const MUTATING_AGENT_ACTIONS = [
   "resolve_cart_proposal",
   "manage_cart",
   "undo_last_change",
+  "redo_last_change",
 ] as const;
 
 export type MutatingAgentAction = (typeof MUTATING_AGENT_ACTIONS)[number];
@@ -123,6 +124,26 @@ function configureCrop(input: Record<string, unknown>): { crop: unknown; role: s
   return { crop, role: text(patch.label) ?? text(patch.slotKey) };
 }
 
+/**
+ * The printed lines a configure_print wrote, named as the template labels them
+ * rather than by the opaque slot key the agent aimed at. A shopper watching
+ * "Agent set the Team line to Spartans" can check it against the artwork.
+ */
+function textClause(input: Record<string, unknown>, result: Record<string, unknown>): string | null {
+  const patches = Array.isArray(input.slotPatches) ? input.slotPatches.filter(isRecord) : [];
+  if (patches.length === 0 || patches.some((patch) => patch.operation !== "set_text")) return null;
+  if (patches.length > 1) return `filled ${patches.length} text lines on the ${productName(result)}`;
+  const patch = patches[0]!;
+  const reference = text(patch.slotKey) ?? text(patch.label);
+  const slots = Array.isArray(result.text_slots) ? result.text_slots.filter(isRecord) : [];
+  const slot = slots.find((candidate) => text(candidate.slot_key) === reference)
+    ?? slots.find((candidate) => text(candidate.label)?.trim().toLowerCase() === reference?.trim().toLowerCase());
+  const label = text(slot?.label) ?? reference;
+  if (!label) return null;
+  const value = text(patch.text);
+  return value ? `set the ${label} line to ${value}` : `cleared the ${label} line`;
+}
+
 function configureActivity(
   input: Record<string, unknown>,
   result: Record<string, unknown>,
@@ -134,6 +155,12 @@ function configureActivity(
     ? `${missing} ${plural(missing, "slot")} still ${plural(missing, "needs", "need")} a photograph`
     : undefined;
 
+  // Text is the other revision that "configured a print" would describe
+  // uselessly: the shopper watches four lines appear on the artwork.
+  const lines = textClause(input, result);
+  if (lines && text(result.draft_id)) {
+    return { message: `Agent ${lines}`, detail, pulse: "workbench", undoable: true };
+  }
   // A crop-only revision of an existing draft is the most common shape by far,
   // and "configured a print" would describe it uselessly.
   const patch = configureCrop(input);
@@ -256,13 +283,28 @@ function manageCartActivity(result: Record<string, unknown>): AgentActivity | nu
 
 function undoActivity(result: Record<string, unknown>): AgentActivity {
   const undone = text(result.undone);
+  const redoSteps = count(result.remaining_redo_steps) ?? 0;
   return {
     message: undone ? `Undid: ${undone}` : "Undid the last change",
-    detail: count(result.remaining_undo_steps) === 0 ? "Nothing further to undo" : undefined,
+    detail: redoSteps > 0
+      ? "Redo is available"
+      : count(result.remaining_undo_steps) === 0 ? "Nothing further to undo" : undefined,
     pulse: "workbench",
-    // An undo is not itself undoable here: offering it would promise a redo
-    // that the ring buffer does not implement.
+    // The visible Undo action can now genuinely reverse this redo-capable
+    // history traversal rather than pretending the operation was one-way.
     undoable: false,
+  };
+}
+
+function redoActivity(result: Record<string, unknown>): AgentActivity {
+  const redone = text(result.redone);
+  return {
+    message: redone ? `Redid: ${redone}` : "Redid the last undone change",
+    detail: count(result.remaining_redo_steps) === 0 ? "Nothing further to redo" : undefined,
+    pulse: "workbench",
+    // Redo restores its entry to the real undo stack, so the regular toast
+    // action is truthful again.
+    undoable: true,
   };
 }
 
@@ -287,6 +329,7 @@ export function agentActivity(
     case "resolve_cart_proposal": return resolveActivity(result);
     case "manage_cart": return manageCartActivity(result);
     case "undo_last_change": return undoActivity(result);
+    case "redo_last_change": return redoActivity(result);
   }
 }
 
@@ -302,6 +345,12 @@ export function agentActionLabel(action: string, input: unknown): string {
   const safeInput = isRecord(input) ? input : {};
   switch (action) {
     case "configure_print": {
+      // No response exists yet, so the text clause is read from the request:
+      // how many lines it is about to write is enough to name the change.
+      const written = Array.isArray(safeInput.slotPatches) ? safeInput.slotPatches.filter(isRecord) : [];
+      if (written.length > 0 && written.every((patch) => patch.operation === "set_text")) {
+        return `configure_print ${written.length} text ${plural(written.length, "line")}`;
+      }
       const patch = configureCrop(safeInput);
       const clause = patch ? cropClause(patch.crop, patch.role) : null;
       return clause ? `configure_print ${clause.replace(/^set |^centred /, "")}` : "configure_print";
@@ -324,6 +373,7 @@ export function agentActionLabel(action: string, input: unknown): string {
       return `resolve_cart_proposal ${decision}`;
     }
     case "manage_cart": return `manage_cart ${text(safeInput.action) ?? "change"}`;
+    case "redo_last_change": return "redo_last_change";
     default: return action;
   }
 }
