@@ -2,12 +2,12 @@
 
 /* eslint-disable @next/next/no-img-element -- local object URLs are browser-only preview state. */
 
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 
-import { Button, Chip, PrintFrame } from "@/components/ui";
+import { Button, PrintFrame } from "@/components/ui";
 import { initialBrowserPreviewTransform } from "@/lib/storefront/browser-preview";
 import { directCropFocus, slotTransformFromCropPatch, type PrintDraft } from "@/lib/storefront/print-drafts";
-import type { CartProposal } from "@/lib/storefront/local-cart";
+import { cartItemDisplayName, type CartProposal } from "@/lib/storefront/local-cart";
 import { printReviewSummary, type PrintReview } from "@/lib/storefront/print-review";
 
 export type CartProposalCardProps = {
@@ -18,8 +18,6 @@ export type CartProposalCardProps = {
   templatePreview: ReactNode | null;
   /** Geometry-only verdict for the proposed draft: resolution, zoom, trim, aspect. */
   review: PrintReview;
-  /** True when this draft was made in the draft rail, never on the shopper's screen. */
-  foundInCatalog: boolean;
   /** 0 for the card on top of the deck, 1 and 2 for the ones peeking behind it. */
   depth: number;
   /** Proposals waiting beyond the visible depth, shown as a count on the deck. */
@@ -32,12 +30,9 @@ export type CartProposalCardProps = {
   position: number;
   /** Total proposals awaiting the shopper. */
   total: number;
-  canGoPrevious: boolean;
-  canGoNext: boolean;
   onAccept: () => void;
   onReject: () => void;
-  onPrevious: () => void;
-  onNext: () => void;
+  onToggleFlag: () => void;
 };
 
 const exitAnimation: Record<"accept" | "reject", string> = {
@@ -94,34 +89,32 @@ function DirectProposalThumbnail({ aspect, draft, productName, source }: {
 }
 
 /**
- * One floating picture-in-picture proposal, a card in the bottom-left deck.
+ * One floating picture-in-picture proposal in the cursor-responsive deck.
  *
  * Every card is the same width so the deck has a stable footprint whichever
  * proposal is on top; the cards behind are scaled and dimmed by the stack, and
- * only the top one is interactive. Each proposes exactly one draft for the demo
- * cart and stays until the shopper, or the agent relaying their words, answers.
+ * only the top one is interactive. A review pill opens the specific concern and
+ * lets a shopper flag it without treating a caution as a rejection.
  */
 export function CartProposalCard({
   proposal,
   aspect,
   templatePreview,
   review,
-  foundInCatalog,
   depth,
   moreCount,
   exit,
   animateArrival,
   position,
   total,
-  canGoPrevious,
-  canGoNext,
   onAccept,
   onReject,
-  onPrevious,
-  onNext,
+  onToggleFlag,
 }: CartProposalCardProps) {
   const needsReview = review.verdict === "needs_review";
   const onTop = depth === 0;
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const reviewPanelId = useId();
   // The exit plays on the card itself, inside the stack's depth transform, so a
   // resolved card can fly out while the one behind it scales up into its place.
   const motion = exit
@@ -131,11 +124,12 @@ export function CartProposalCard({
   const thumbnail = proposal.thumbnailURL
     ? <DirectProposalThumbnail aspect={aspect} draft={proposal.draft} productName={proposal.productName} source={proposal.thumbnailURL} />
     : <PrintFrame aspect={aspect}><span aria-hidden className="block h-full w-full bg-surface-warm" /></PrintFrame>;
+  const displayName = cartItemDisplayName(proposal);
 
   return (
     <aside
       aria-label={`Cart proposal ${position} of ${total}`}
-      className={`${motion} relative flex w-full flex-col gap-3 rounded-[18px] border border-border-strong bg-card p-4 shadow-warm`}
+      className={`${motion} relative flex w-full flex-col gap-3 rounded-[18px] border border-border-strong bg-card p-3 shadow-warm`}
       role="region"
     >
       {onTop && moreCount > 0 ? (
@@ -147,39 +141,27 @@ export function CartProposalCard({
         </span>
       ) : null}
 
-      <div className="flex items-center justify-between gap-2">
-        <b className="block text-[15px] font-semibold leading-tight">{proposal.productName}</b>
-        {onTop ? (
-          <span aria-hidden className="shrink-0 font-mono text-[11px] text-muted-foreground">
-            {position} / {total}
+      <header className="flex items-start justify-between gap-3">
+        <div>
+          <b className="block text-[15px] font-semibold leading-tight">{displayName}</b>
+          <span className="mt-0.5 block font-mono text-[11px] text-muted-foreground">
+            {position} / {total} · Qty {proposal.quantity}
           </span>
-        ) : null}
-      </div>
-
-      {/* This print was found in the catalog and made behind the screen — the
-          shopper never chose it in the format picker, so the card says so. */}
-      {foundInCatalog ? (
-        <Chip className="self-start" tone="info">
-          Found in catalog · {proposal.productName}
-        </Chip>
-      ) : null}
-
-      <div className="flex items-center justify-between gap-2">
-        {/* The verdict is a reason to look, never a block: both cards can still
-            be accepted, and only the shopper does that. */}
-        <Chip tone={needsReview ? "warning" : "success"}>
-          {needsReview ? "⚠ Needs review" : "✓ Ready"}
-        </Chip>
-        <span className="font-mono text-[13px] text-muted-foreground">
-          Qty {proposal.quantity}
-        </span>
-      </div>
-
-      {needsReview ? (
-        <p className="text-[13px] leading-snug text-status-warning">
-          {printReviewSummary(review)}
-        </p>
-      ) : null}
+        </div>
+        {needsReview ? (
+          <button
+            aria-controls={reviewPanelId}
+            aria-expanded={reviewOpen}
+            className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full bg-status-warning-surface px-3 text-[13px] font-semibold text-status-warning transition-colors hover:brightness-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring motion-reduce:transition-none"
+            onClick={() => setReviewOpen((open) => !open)}
+            type="button"
+          >
+            Needs review <span aria-hidden className="font-normal">{reviewOpen ? "−" : "→"}</span>
+          </button>
+        ) : (
+          <span className="pt-0.5 text-[13px] font-medium text-status-success">Ready</span>
+        )}
+      </header>
 
       <div className="overflow-hidden">
         {templatePreview ? (
@@ -189,42 +171,39 @@ export function CartProposalCard({
         ) : thumbnail}
       </div>
 
+      {needsReview && reviewOpen ? (
+        <section
+          aria-label="Print review"
+          className="rounded-[14px] border border-status-warning/30 bg-status-warning-surface/60 p-3"
+          id={reviewPanelId}
+        >
+          <p className="text-[13px] leading-snug text-status-warning">
+            {printReviewSummary(review)}
+          </p>
+          <Button
+            aria-pressed={proposal.reviewFlagged === true}
+            className="mt-2 h-8 px-3 text-[12px]"
+            onClick={onToggleFlag}
+            variant="ghost"
+          >
+            {proposal.reviewFlagged ? "Flagged for follow-up" : "Flag for follow-up"}
+          </Button>
+        </section>
+      ) : null}
+
       <div className="flex gap-2">
         <Button
-          className="flex-1"
+          className="flex-1 whitespace-nowrap"
           data-proposal-primary-action={onTop ? "true" : undefined}
           disabled={Boolean(exit) || !onTop}
           onClick={onAccept}
         >
-          Add to cart
+          {needsReview ? "Add anyway" : "Add to cart"}
         </Button>
         <Button className="flex-1" disabled={Boolean(exit) || !onTop} onClick={onReject} variant="secondary">
-          Don&apos;t add
+          Skip
         </Button>
       </div>
-
-      {onTop && total > 1 ? (
-        <nav aria-label="Proposal navigation" className="flex items-center justify-between gap-2 border-t border-border pt-2">
-          <Button
-            aria-label="Previous proposal"
-            className="h-9 px-3 text-[13px]"
-            disabled={!canGoPrevious || Boolean(exit)}
-            onClick={onPrevious}
-            variant="ghost"
-          >
-            Previous
-          </Button>
-          <Button
-            aria-label="Next proposal"
-            className="h-9 px-3 text-[13px]"
-            disabled={!canGoNext || Boolean(exit)}
-            onClick={onNext}
-            variant="ghost"
-          >
-            Next
-          </Button>
-        </nav>
-      ) : null}
     </aside>
   );
 }

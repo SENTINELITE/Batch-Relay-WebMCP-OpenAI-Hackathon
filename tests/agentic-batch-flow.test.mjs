@@ -213,16 +213,16 @@ test("the review verdict rides on every response that offers a print, and on the
   assert.equal(ui.match(/printReviewWire\(/g).length >= 5, true);
   assert.match(ui, /proposal_review_summary: reviewCounts\(/);
 
-  // The chip is a reason to look, never a block: both verdicts keep both
-  // buttons live, and only the shopper presses either.
-  assert.match(card, /needsReview \? "⚠ Needs review" : "✓ Ready"/);
-  assert.match(card, /tone=\{needsReview \? "warning" : "success"\}/);
+  // Needs review stays visible as a compact, actionable pill. It opens the
+  // reason and can be flagged for follow-up without answering the proposal.
+  assert.match(card, /Needs review/);
+  assert.match(card, /aria-expanded=\{reviewOpen\}/);
   assert.match(card, /printReviewSummary\(review\)/);
+  assert.match(card, /Flag for follow-up/);
   assert.doesNotMatch(card, /disabled=\{[^}]*needsReview/);
 
-  // A draft made in the rail says so, because the shopper never chose it in
-  // the format picker and the card is their first sight of it.
-  assert.match(card, /Found in catalog/);
+  // Rail provenance stays in the tool state, not the compact card surface.
+  assert.doesNotMatch(card, /Found in catalog/);
   assert.match(ui, /foundInCatalog: backgroundDraftIds\.current\.has\(proposal\.draftId\)/);
 });
 

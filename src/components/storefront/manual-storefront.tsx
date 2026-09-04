@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   type CatalogProduct,
-  type IngestedAsset,
   type PublishedTemplate,
   type TemplateContract,
   type TemplateOutput,
@@ -142,6 +141,7 @@ import {
   photoRolesBySlotKey,
   prefillProvenance,
   prefillSlotAssignments,
+  rekeySlotValuesByRole,
   rememberDirectPhoto,
   rememberPhotoRole,
   rememberSlotAssignments,
@@ -157,7 +157,6 @@ import {
   revokePhotoObjectURLs,
   type BrowserPhoto,
   type PhotoLibraryAction,
-  type PhotoTarget,
 } from "@/lib/storefront/photo-library";
 import {
   publishStorefrontWebMcpState,
@@ -175,6 +174,11 @@ type OffScreenTemplate = {
   document: BrowserPreviewDocument | null;
   assignments: Record<string, string>;
   prefills: SlotPrefill[];
+};
+type TemplateSlotState = {
+  assignments: Record<string, string>;
+  transforms: Record<string, BrowserPreviewTransform>;
+  rolesBySlotKey: Record<string, PhotoRole>;
 };
 /** Shared, read-only template facts for an all-or-nothing staged batch. */
 type BatchTemplatePreflight = Pick<OffScreenTemplate, "template" | "contract" | "document">;
@@ -438,7 +442,7 @@ export function ManualStorefront() {
   const [catalogState, setCatalogState] = useState<"loading" | "ready" | "error">("loading");
   const [selectedProductKey, setSelectedProductKey] = useState<string | null>(null);
   const [step, setStep] = useState<ActiveStep>("catalog");
-  const [notice, setNotice] = useState<Notice>(null);
+  const [, setNotice] = useState<Notice>(null);
   const [photoLibrary, dispatchPhotoLibrary] = useReducer(photoLibraryReducer, undefined, emptyPhotoLibrary);
   const [cropX, setCropX] = useState(50);
   const [cropY, setCropY] = useState(50);
@@ -447,10 +451,8 @@ export function ManualStorefront() {
   // It is keyed per direct crop / template slot so changing slots cannot make
   // another photograph unexpectedly inherit a face-centred zoom.
   const [framingFocusByTarget, setFramingFocusByTarget] = useState<Record<string, FocusPreset>>({});
-  const [managedAsset, setManagedAsset] = useState<IngestedAsset | null>(null);
-  const [preparing, setPreparing] = useState(false);
   const [templates, setTemplates] = useState<PublishedTemplate[]>([]);
-  const [, setTemplateState] = useState<TemplateState>("idle");
+  const [templateState, setTemplateState] = useState<TemplateState>("idle");
   const [, setTemplateNotice] = useState<Notice>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [compatibleOutputs, setCompatibleOutputs] = useState<TemplateOutput[]>([]);
@@ -461,6 +463,10 @@ export function ManualStorefront() {
   const [templateInputs, setTemplateInputs] = useState<Record<string, string>>({});
   const [templateAssignments, setTemplateAssignments] = useState<Record<string, string>>({});
   const [slotTransforms, setSlotTransforms] = useState<Record<string, BrowserPreviewTransform>>({});
+  // The compatible output each published template would print on, keyed by
+  // product and template, so the template picker can show every template's
+  // artwork and not only the chosen one's.
+  const [carouselOutputs, setCarouselOutputs] = useState<Record<string, string>>({});
   const [activeImageSlotKey, setActiveImageSlotKey] = useState<string | null>(null);
   const [activeSlotPanLimits, setActiveSlotPanLimits] = useState<BrowserPreviewPanLimits>({ x: 0, y: 0 });
   const [browserPreviewDocument, setBrowserPreviewDocument] = useState<BrowserPreviewDocument | null>(null);
@@ -511,9 +517,10 @@ export function ManualStorefront() {
   const faceDebugRef = useRef(false);
   useEffect(() => { faceDebugRef.current = faceDebugOn; }, [faceDebugOn]);
   // Detection results live in refs, so a pass finishing does not by itself
-  // repaint anything. This exists only to nudge a render while the overlay is
-  // on; its value is never read, exactly like `setPhotoFaces` above.
-  const [, setFaceDebugRevision] = useState(0);
+  // repaint anything. This nudge makes the top-rail face badges appear as the
+  // local pass finishes; its value is never read, exactly like `setPhotoFaces`
+  // above. The debug overlay shares that repaint but is not the reason for it.
+  const [, setFaceDetectionRevision] = useState(0);
   // Which drafts were made behind the shopper's screen, so a proposal card can
   // say the print was found in the catalog rather than chosen on screen.
   const backgroundDraftIds = useRef<Set<string>>(new Set());
@@ -1038,9 +1045,9 @@ export function ManualStorefront() {
         // refs outlive the effect deliberately: a re-render must not turn a
         // finished answer back into "not ready".
         photoFacesResolvedRef.current[photo.id] = true;
-        // "Looked at and found nobody" is invisible without this: it publishes
-        // no faces, so only the debug overlay has any reason to repaint.
-        if (live && faceDebugRef.current) setFaceDebugRevision((revision) => revision + 1);
+        // "Looked at and found nobody" still needs a repaint: the rail exposes
+        // a quiet zero-face badge only after the detector has actually checked.
+        if (live) setFaceDetectionRevision((revision) => revision + 1);
         return faces;
       });
       photoFaceJobsRef.current[photo.id] = job;
@@ -1072,7 +1079,6 @@ export function ManualStorefront() {
     [photoLibrary.photos, photoLibrary.selectedPhotoId],
   );
   const imagePreview = selectedPhoto?.previewURL ?? null;
-  const imageName = selectedPhoto?.filename ?? null;
   const localImage = selectedPhoto?.file ?? null;
   const selectedProductId = selectedProduct?.id ?? null;
   const selectedTemplate = templates.find((template) => template.id === selectedTemplateId);
@@ -1215,6 +1221,66 @@ export function ManualStorefront() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by the resolved output list; resolvePreviewDocument is a stable component-body helper reading refs.
   }, [proposalTemplateSignature]);
 
+  // Warms every published template's artwork for the selected product, so the
+  // picker's ring shows real previews to either side of the chosen template.
+  // Each template resolves independently; one that cannot be resolved keeps
+  // its name on a blank card rather than holding the others back.
+  useEffect(() => {
+    const product = selectedProduct;
+    if (!product || templates.length === 0 || product.template_requirement === "unsupported") return;
+    let live = true;
+    for (const template of templates) {
+      void (async () => {
+        try {
+          const request = templateOutputRequests.current.get(template.id) ?? storefrontClient.templateOutputs(template.id);
+          templateOutputRequests.current.set(template.id, request);
+          const outputs = await request;
+          const output = compatibleTemplateOutputs(outputs.outputs, product)[0];
+          if (!output || !live) return;
+          if (!previewDocumentsRef.current[previewDocumentKey(template.id, output.id)]) {
+            const contract = await storefrontClient.templateContract(template.id, output.id, outputs.revision_id);
+            if (!live) return;
+            await resolvePreviewDocument(template.id, output, outputs.revision_id, contract);
+          }
+          const key = `${product.id}|${template.id}`;
+          if (live) setCarouselOutputs((current) => current[key] === output.id ? current : { ...current, [key]: output.id });
+        } catch {
+          // The card shows the template's name without artwork.
+        }
+      })();
+    }
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by product and template list; resolvePreviewDocument is a stable component-body helper reading refs.
+  }, [selectedProduct?.id, templates]);
+
+  /**
+   * Read-only artwork for one template in the picker's ring. The chosen
+   * template paints from the live document; the others paint from the warmed
+   * documents with the shopper's photographs and text wherever the slot keys
+   * match, and empty slots where they do not, so nothing is promised that the
+   * template cannot show.
+   */
+  function templateCarouselPreviewFor(templateId: string): ReactNode | null {
+    const isSelected = templateId === selectedTemplateId;
+    const outputId = selectedProduct ? carouselOutputs[`${selectedProduct.id}|${templateId}`] : undefined;
+    const document = isSelected && browserPreviewDocument
+      ? browserPreviewDocument
+      : outputId ? previewDocuments[previewDocumentKey(templateId, outputId)] ?? null : null;
+    if (!document) return null;
+    return <BrowserTemplatePreview
+      activeImageSlotKey={null}
+      assetURLs={previewAssetURLs(document)}
+      document={document}
+      dropEnabled={false}
+      localImageSlots={isSelected ? browserPreviewImageSlots : previewImageSlots(templateAssignments, slotTransforms, photoLibrary.photos)}
+      onActiveImageSlotChange={() => undefined}
+      onSurfaceChange={() => undefined}
+      selectedSurfaceID={document.output.surfaces[0]?.id ?? ""}
+      serverProof={null}
+      textValues={templateInputs}
+    />;
+  }
+
   /**
    * The loaded browser preview is only a geometry source for the contract it
    * belongs to; a stale document must never name another template's slots.
@@ -1243,6 +1309,21 @@ export function ManualStorefront() {
   }
 
   function handlePhotoAction(action: PhotoLibraryAction) {
+    if (action.type === "replace") {
+      // A picker selection is a fresh local photo set. Clear the live framing
+      // state that names prior photo ids; immutable cart lines remain cart
+      // history and continue to own their own snapshots.
+      setTemplateAssignments({});
+      setSlotTransforms({});
+      setActiveImageSlotKey(null);
+      setActiveSlotPanLimits({ x: 0, y: 0 });
+      setCropX(50);
+      setCropY(50);
+      setCropZoom(1);
+      setFramingFocusByTarget({});
+      photoRoleMemory.current = emptyPhotoRoleMemory;
+      setRoleMemoryRevision((revision) => revision + 1);
+    }
     if (action.type === "remove") {
       const photo = photoLibrary.photos.find((candidate) => candidate.id === action.photoId);
       if (photo) revokePhotoObjectURLs([photo]);
@@ -1256,7 +1337,6 @@ export function ManualStorefront() {
       rememberRoles(rememberDirectPhoto(photoRoleMemory.current, selectedProduct.physical_output, action.photoId));
     }
     if (action.type === "select" || action.type === "remove") {
-      setManagedAsset(null);
       setCropX(50);
       setCropY(50);
       setCropZoom(1);
@@ -1271,7 +1351,6 @@ export function ManualStorefront() {
    */
   function selectProduct(product: CatalogProduct, createVisibleDraft = true, navigate = true) {
     setSelectedProductKey(productSelectionKey(product));
-    setManagedAsset(null);
     setSelectedTemplateId("");
     setCompatibleOutputs([]);
     setTemplateOutputsRevisionID("");
@@ -1320,67 +1399,6 @@ export function ManualStorefront() {
     }
   }
 
-  async function croppedFile(
-    file: File,
-    ratio: number,
-    frame: { zoom: number; focusX: number; focusY: number; offsetX?: number; offsetY?: number } = { zoom: cropZoom, focusX: cropX, focusY: cropY },
-  ): Promise<{ file: File; width: number; height: number }> {
-    const bitmap = await createImageBitmap(file);
-    try {
-      const sourceRatio = bitmap.width / bitmap.height;
-      let baseWidth = bitmap.width;
-      let baseHeight = bitmap.height;
-      if (sourceRatio > ratio) baseWidth = bitmap.height * ratio;
-      else baseHeight = bitmap.width / ratio;
-      const width = baseWidth / frame.zoom;
-      const height = baseHeight / frame.zoom;
-      const effectiveFocus = directCropFocus({ focusX: frame.focusX, focusY: frame.focusY, offsetX: frame.offsetX ?? 0, offsetY: frame.offsetY ?? 0 });
-      const left = (bitmap.width - width) * (effectiveFocus.focusX / 100);
-      const top = (bitmap.height - height) * (effectiveFocus.focusY / 100);
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.round(width));
-      canvas.height = Math.max(1, Math.round(height));
-      const context = canvas.getContext("2d");
-      if (!context) throw new Error("This browser cannot prepare the selected image.");
-      context.drawImage(bitmap, left, top, width, height, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise<Blob>((resolve, reject) =>
-        canvas.toBlob((value) => value ? resolve(value) : reject(new Error("The crop could not be encoded.")), "image/jpeg", 0.94));
-      const baseName = file.name.replace(/\.[^.]+$/, "") || "photo";
-      return {
-        file: new File([blob], `${baseName}-${crop.replace(":", "x")}.jpg`, { type: "image/jpeg" }),
-        width: canvas.width,
-        height: canvas.height,
-      };
-    } finally { bitmap.close(); }
-  }
-
-  async function prepareLocalImage() {
-    if (!localImage || !selectedProduct || !selectedPhoto) return;
-    const target: PhotoTarget = { productId: selectedProduct.id, productRevision: selectedProduct.revision };
-    templateRequestVersion.current += 1;
-    setPreparing(true);
-    setNotice(null);
-    dispatchPhotoLibrary({ type: "set-preparation", photoId: selectedPhoto.id, target, preparation: { status: "preparing" } });
-    try {
-      const prepared = await croppedFile(localImage, crop === "5:7" ? 5 / 7 : 4 / 5);
-      const uploaded = await storefrontClient.uploadStudioAsset(prepared.file);
-      const asset: IngestedAsset = {
-        asset_id: uploaded.asset_id,
-        pixel_width: prepared.width,
-        pixel_height: prepared.height,
-        format: "jpeg",
-        original_filename: prepared.file.name,
-        reused: false,
-      };
-      setManagedAsset(asset);
-      dispatchPhotoLibrary({ type: "set-preparation", photoId: selectedPhoto.id, target, preparation: { status: "ready", managedAssetId: asset.asset_id, preparedFilename: asset.original_filename } });
-      setNotice({ tone: "info", message: `Prepared ${prepared.width} × ${prepared.height}px through the published studio asset API.` });
-    } catch (error) {
-      dispatchPhotoLibrary({ type: "set-preparation", photoId: selectedPhoto.id, target, preparation: { status: "error", error: responseMessage(error) } });
-      setNotice({ tone: "error", message: `Image preparation failed: ${responseMessage(error)}` });
-    } finally { setPreparing(false); }
-  }
-
   async function discoverTemplates() {
     const requestVersion = ++templateRequestVersion.current;
     setTemplateState("loading");
@@ -1405,6 +1423,15 @@ export function ManualStorefront() {
     orientation?: "portrait" | "landscape",
     draftId?: string,
   ): Promise<PrintDraft["template"] | null> {
+    // Snapshot before clearing the live template state. The outgoing template
+    // owns different opaque slot keys, but its visible individual/team roles
+    // are the shopper intent that may transfer to the next template.
+    const currentDraft = draftsRef.current.find((candidate) => candidate.id === (draftId ?? selectedDraftId));
+    const previousSlotState: TemplateSlotState = {
+      assignments: currentDraft?.slotAssignments ?? templateAssignments,
+      transforms: currentDraft?.slotTransforms ?? slotTransforms,
+      rolesBySlotKey: visibleSlotRoles,
+    };
     const requestVersion = ++templateRequestVersion.current;
     setSelectedTemplateId(templateId);
     setCompatibleOutputs([]);
@@ -1450,6 +1477,7 @@ export function ManualStorefront() {
         requestVersion,
         draftId,
         product: productForCompatibility,
+        previousSlotState,
       });
     } catch (error) {
       if (requestVersion !== templateRequestVersion.current) return;
@@ -1801,6 +1829,7 @@ export function ManualStorefront() {
     requestVersion = ++templateRequestVersion.current,
     draftId,
     product,
+    previousSlotState,
   }: {
     templateID?: string;
     outputID: string;
@@ -1809,6 +1838,7 @@ export function ManualStorefront() {
     requestVersion?: number;
     draftId?: string;
     product?: CatalogProduct | null;
+    previousSlotState?: TemplateSlotState;
   }): Promise<NonNullable<PrintDraft["template"]> | null> {
     const output = outputs.find((candidate) => candidate.id === outputID);
     if (!templateID || !output || !revisionID) {
@@ -1893,34 +1923,56 @@ export function ManualStorefront() {
             : { tone: "error", message: `Live template artwork is unavailable and no local layout could be built: ${responseMessage(browserPreviewError)}` });
         }
       }
-      // The loaded output starts with whatever this draft already holds; every
-      // still-empty image slot takes the photograph the shopper already chose
-      // for that role on another print, and says so.
-      const existingAssignments = draftsRef.current.find((candidate) => candidate.id === targetDraftId)?.slotAssignments ?? {};
+      // Convert the outgoing template's values into the current contract's
+      // stable keys. The role is an intentional transfer hint only; all
+      // resulting records remain keyed by the new contract's exact slot keys.
+      const draftBeforeTemplateChange = draftsRef.current.find((candidate) => candidate.id === targetDraftId);
+      const sourceSlotState: TemplateSlotState = previousSlotState ?? {
+        assignments: draftBeforeTemplateChange?.slotAssignments ?? {},
+        transforms: draftBeforeTemplateChange?.slotTransforms ?? {},
+        rolesBySlotKey: visibleSlotRoles,
+      };
+      const targetRolesBySlotKey = imageSlotRoles(contract.slots, browserPreviewSlotBoxes(previewDocument));
+      const roleMemory = rememberSlotAssignments(
+        photoRoleMemory.current,
+        sourceSlotState.assignments,
+        sourceSlotState.rolesBySlotKey,
+      );
+      rememberRoles(roleMemory);
+      const transferredAssignments = rekeySlotValuesByRole({
+        values: sourceSlotState.assignments,
+        sourceRolesBySlotKey: sourceSlotState.rolesBySlotKey,
+        targetRolesBySlotKey,
+      });
+      const transferredTransforms = rekeySlotValuesByRole({
+        values: sourceSlotState.transforms,
+        sourceRolesBySlotKey: sourceSlotState.rolesBySlotKey,
+        targetRolesBySlotKey,
+      });
+      // Every still-empty image slot takes the photograph the shopper already
+      // chose for that role on another print, and says so.
       const { assignments, prefills } = prefillSlotAssignments({
-        assignments: existingAssignments,
-        memory: photoRoleMemory.current,
-        rolesBySlotKey: imageSlotRoles(contract.slots, browserPreviewSlotBoxes(previewDocument)),
+        assignments: transferredAssignments,
+        memory: roleMemory,
+        rolesBySlotKey: targetRolesBySlotKey,
         availablePhotoIds: photoLibraryRef.current.photos.map((photo) => photo.id),
       });
       // Filed under its published output so the proposal card can paint this
       // same artwork later without the draft being selected or refetched.
       rememberPreviewDocument(previewDocumentKey(templateID, output.id), previewDocument);
       lastSlotPrefills.current = { assignments, prefills };
-      if (prefills.length > 0) {
-        setTemplateAssignments(assignments);
-        setPrefilledSlots(Object.fromEntries(prefills.map((prefill) => [prefill.slotKey, prefill.role])));
-        // A carried-over photograph gets the same face-centred first framing a
-        // hand-dropped one does, and only if this slot has no framing yet.
-        const seeded = seededSlotTransforms(
-          draftsRef.current.find((candidate) => candidate.id === targetDraftId)?.slotTransforms ?? {},
-          Object.fromEntries(prefills.map((prefill) => [prefill.slotKey, prefill.photoId])),
-          browserPreviewSlotBoxes(previewDocument),
-        );
-        setSlotTransforms(seeded);
-        lastBrowserPreviewTransforms.current = seeded;
-        if (targetDraftId) patchDraft(targetDraftId, { slotAssignments: assignments, slotTransforms: seeded, proofState: "idle" });
-      }
+      setTemplateAssignments(assignments);
+      setPrefilledSlots(Object.fromEntries(prefills.map((prefill) => [prefill.slotKey, prefill.role])));
+      // A carried-over photograph gets the same face-centred first framing a
+      // hand-dropped one does, and only if this slot has no framing yet.
+      const seeded = seededSlotTransforms(
+        transferredTransforms,
+        Object.fromEntries(prefills.map((prefill) => [prefill.slotKey, prefill.photoId])),
+        browserPreviewSlotBoxes(previewDocument),
+      );
+      setSlotTransforms(seeded);
+      lastBrowserPreviewTransforms.current = seeded;
+      if (targetDraftId) patchDraft(targetDraftId, { slotAssignments: assignments, slotTransforms: seeded, proofState: "idle" });
       return selected;
     } catch (error) {
       if (requestVersion !== templateRequestVersion.current) return null;
@@ -2484,7 +2536,7 @@ export function ManualStorefront() {
       pendingProposalCount: pendingProposals.length,
       cartItemCount: cartPrintCount,
     });
-  }, [canAddAnyVisibleDraft, cartPrintCount, catalogState, pendingProposals, customization, managedAsset, photoLibrary, selectedProduct, selectedProductId, selectedTemplate, templateAssignments, templateContract, templateOutput, visibleTemplateSlots]);
+  }, [canAddAnyVisibleDraft, cartPrintCount, catalogState, pendingProposals, customization, photoLibrary, selectedProduct, selectedProductId, selectedTemplate, templateAssignments, templateContract, templateOutput, visibleTemplateSlots]);
 
   useEffect(() => subscribeToStorefrontWebMcpActions((request) => {
     /**
@@ -3912,11 +3964,11 @@ export function ManualStorefront() {
     <StorefrontMasthead
       cartAcknowledgement={cartAcknowledgement}
       cartCount={cartPrintCount}
-      notice={notice}
       onOpenCart={() => setCartOpen(true)}
       onOpenHome={() => setStep("catalog")}
     />
     <PhotoTray
+      faceDetection={buildFaceDebugMap()}
       faceDebug={faceDebugOn ? buildFaceDebugMap() : undefined}
       library={photoLibrary}
       onAction={handlePhotoAction}
@@ -3950,9 +4002,7 @@ export function ManualStorefront() {
         customization={customization}
         framingFocus={framingFocus}
         hasLocalImage={Boolean(localImage)}
-        imageName={imageName}
         imagePreview={imagePreview}
-        managedAsset={managedAsset}
         onAddPreparedLine={() => { try { if (selectedDraft) { noteShopperLookingAtSelectedDraft(); addDraftToCart(selectedDraft, 1); } else throw new Error("Select a visible draft before adding it to the demo cart."); } catch (error) { setNotice({ tone: "error", message: responseMessage(error) }); } }}
         onAssignTemplatePhoto={(slotKey, photoId) => { noteShopperLookingAtSelectedDraft(); assignTemplatePhoto(slotKey, photoId); }}
         onChangeFormat={() => setStep("catalog")}
@@ -3963,21 +4013,20 @@ export function ManualStorefront() {
           applyVisibleFramingFocus(focus, zoom, true);
         }}
         onFramingZoomChange={(zoom) => applyVisibleFramingFocus(framingFocus, zoom)}
-        onPrepareLocalImage={prepareLocalImage}
         onSelectTemplate={(templateId) => void chooseTemplate(templateId).catch((error) => setTemplateNotice({ tone: "error", message: responseMessage(error) }))}
         onSlotTransformChange={changeBrowserPreviewTransform}
         onSlotTransformCommit={updateBrowserPreviewTransform}
         onTemplateTextChange={(slotKey, value) => { noteShopperLookingAtSelectedDraft(); setTemplateInputs((values) => ({ ...values, [slotKey]: value })); }}
         photos={photoLibrary.photos}
         prefilledSlotProvenance={prefilledSlotProvenance}
-        preparing={preparing}
         selectedPhotoId={selectedPhoto?.id ?? null}
-        selectedPhotoOrdinal={photoLibrary.selectedPhotoId ? String(photoLibrary.photos.findIndex((photo) => photo.id === photoLibrary.selectedPhotoId) + 1).padStart(2, "0") : "—"}
         selectedProduct={selectedProduct}
         selectedTemplateId={selectedTemplateId}
         templateAssignments={templateAssignments}
         templateContract={templateContract}
         templateInputs={templateInputs}
+        templateLoading={templateState === "loading"}
+        templatePreviewFor={templateCarouselPreviewFor}
         templates={templates}
         visibleTemplateSlots={visibleTemplateSlots}
         />
@@ -3988,7 +4037,7 @@ export function ManualStorefront() {
           © 2026{" "}
           <a
             className="text-inherit no-underline underline-offset-4 transition-colors hover:text-orange-500 hover:underline focus-visible:text-orange-500 focus-visible:underline motion-reduce:transition-none"
-            href="https://batchrelay.com"
+            href="https://batchrelay.com?ref=webmcp"
             rel="noopener noreferrer"
             target="_blank"
           >
@@ -3997,7 +4046,7 @@ export function ManualStorefront() {
           {" / "}
           <a
             className="text-inherit no-underline underline-offset-4 transition-colors hover:text-orange-500 hover:underline focus-visible:text-orange-500 focus-visible:underline motion-reduce:transition-none"
-            href="https://ftrbnd.com"
+            href="https://ftrbnd.com?ref=webmcp"
             rel="noopener noreferrer"
             target="_blank"
           >
@@ -4016,6 +4065,7 @@ export function ManualStorefront() {
       onRemoveItem={(itemId) => setCart((items) => items.filter((item) => item.id !== itemId))}
       onUpdateQuantity={(itemId, quantity) => setCart((items) => items.map((item) => item.id === itemId ? { ...item, quantity } : item))}
       open={cartOpen}
+      templatePreviewFor={(item) => proposalPreviewBinding({ ...item, createdAt: item.addedAt }).templatePreview}
     />
 
     {/* Every proposal waiting on the shopper, stacked in the corner. Each
@@ -4025,6 +4075,13 @@ export function ManualStorefront() {
       entries={proposalStack}
       onAccept={(proposal) => resolveProposal(proposal, "accept")}
       onReject={(proposal) => resolveProposal(proposal, "reject")}
+      onToggleFlag={(proposal) => {
+        const flagged = proposal.reviewFlagged !== true;
+        commitProposalStack((entries) => entries.map((entry) => entry.proposal.id === proposal.id
+          ? { ...entry, proposal: { ...entry.proposal, reviewFlagged: flagged } }
+          : entry));
+        setNotice({ tone: "info", message: flagged ? "Print flagged for follow-up." : "Follow-up flag removed." });
+      }}
       previewFor={proposalPreviewBinding}
     />
   </PhotoDragProvider>;

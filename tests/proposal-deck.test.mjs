@@ -6,6 +6,8 @@ import {
   PROPOSAL_DECK_COMMIT_THRESHOLD,
   PROPOSAL_DECK_MAX_PREVIEWS,
   adjacentProposalId,
+  deckLayerGeometry,
+  normalisedPointer,
   proposalPreviewWindow,
   proposalTravelGeometry,
   restoreActiveProposalId,
@@ -39,6 +41,32 @@ test("positive travel moves the active card left while its candidate comes from 
   assert.ok(negative.activeX > 0);
   assert.ok(negative.candidateX < 0);
   assert.ok(positive.candidateScale > 0.96);
+});
+
+test("the cards behind the active one fan toward the corner opposite the cursor", () => {
+  const upperLeft = normalisedPointer(0, 0, 1000, 800);
+  const lowerRight = normalisedPointer(1000, 800, 1000, 800);
+  const centre = normalisedPointer(500, 400, 1000, 800);
+  assert.deepEqual(upperLeft, { x: -1, y: -1 });
+  assert.deepEqual(lowerRight, { x: 1, y: 1 });
+  assert.deepEqual(centre, { x: 0, y: 0 });
+  // Cursor upper-left → tail lower-right: offset = spread × cursor is positive on both axes.
+  const back = deckLayerGeometry(1);
+  assert.ok(back.spread.x * upperLeft.x > 0);
+  assert.ok(back.spread.y * upperLeft.y > 0);
+  assert.ok(back.spread.x * lowerRight.x < 0);
+  assert.ok(back.spread.y * lowerRight.y < 0);
+  // Deeper cards travel further, and a centred cursor still leaves a visible fan.
+  const deeper = deckLayerGeometry(2);
+  assert.ok(Math.abs(deeper.spread.x) > Math.abs(back.spread.x));
+  assert.ok(Math.abs(back.rest.x) > 0 && Math.abs(back.rest.y) > 0);
+  assert.ok(deeper.scale < back.scale && back.scale < 1);
+  // The active card leans the other way, toward the cursor, and only slightly.
+  const top = deckLayerGeometry(0);
+  assert.ok(top.spread.x > 0 && top.spread.x < Math.abs(back.spread.x));
+  assert.deepEqual(top.rest, { x: 0, y: 0, rotate: 0 });
+  // Cards on the other side of the active one fan the opposite way.
+  assert.equal(deckLayerGeometry(1, -1).rest.rotate, -deckLayerGeometry(1, 1).rest.rotate);
 });
 
 test("wheel progress commits only after its threshold and resists unavailable edges", () => {

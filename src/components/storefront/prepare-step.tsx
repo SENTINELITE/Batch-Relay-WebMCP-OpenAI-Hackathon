@@ -6,16 +6,16 @@ import {
   Button,
   PrintFrame,
   RangeField,
-  SelectField,
   Surface,
 } from "@/components/ui";
 import { photoDropTargetClassName, usePhotoDropTarget } from "@/components/storefront/photo-drag";
+import { PreviewCrossfade } from "@/components/storefront/preview-crossfade";
+import { TemplateCarousel } from "@/components/storefront/template-carousel";
 import { TemplateSlotAssignment } from "@/components/storefront/template-slot-assignment";
 import { cn } from "@/lib/cn";
 import type { FocusPreset } from "@/lib/storefront/focus-preset";
 import type {
   CatalogProduct,
-  IngestedAsset,
   PublishedTemplate,
   TemplateContract,
 } from "@/lib/storefront/client";
@@ -36,9 +36,7 @@ export type PrepareStepProps = {
   /** The focal intent reapplied whenever the shopper changes zoom. */
   framingFocus: FocusPreset;
   hasLocalImage: boolean;
-  imageName: string | null;
   imagePreview: string | null;
-  managedAsset: IngestedAsset | null;
   /** Adds the visible draft straight to the demo cart, with no proposal card. */
   onAddPreparedLine: () => void;
   onAssignTemplatePhoto: (slotKey: string, photoId: string | null) => void;
@@ -47,7 +45,6 @@ export type PrepareStepProps = {
   onCropYChange: (focusY: number) => void;
   onFramingFocusChange: (focus: FocusPreset) => void;
   onFramingZoomChange: (zoom: number) => void;
-  onPrepareLocalImage: () => void;
   onSelectTemplate: (templateId: string) => void;
   /** Live framing while a slider is moving; the preview repaints from it. */
   onSlotTransformChange: (slotKey: string, transform: BrowserPreviewTransform) => void;
@@ -56,14 +53,16 @@ export type PrepareStepProps = {
   onTemplateTextChange: (slotKey: string, value: string) => void;
   photos: BrowserPhoto[];
   prefilledSlotProvenance: Record<string, string>;
-  preparing: boolean;
   selectedPhotoId: string | null;
-  selectedPhotoOrdinal: string;
   selectedProduct: CatalogProduct;
   selectedTemplateId: string;
   templateAssignments: Record<string, string>;
   templateContract: TemplateContract | null;
   templateInputs: Record<string, string>;
+  /** True while a chosen template's contract and artwork are still arriving. */
+  templateLoading: boolean;
+  /** Read-only artwork for any published template, for the picker's ring. */
+  templatePreviewFor: (templateId: string) => ReactNode | null;
   templates: PublishedTemplate[];
   visibleTemplateSlots: TemplateContract["slots"];
 };
@@ -76,20 +75,6 @@ function PanelHeading({ id, subtitle, title }: { id: string; subtitle?: string; 
       </h3>
       {subtitle ? <p className="text-[15px] text-muted-foreground">{subtitle}</p> : null}
     </div>
-  );
-}
-
-/** The photograph the framing controls are acting on, named on the card that
- *  changes it. Framing lives beside the print, not on top of it, so the card
- *  has to say out loud which of the tray's photographs it is holding. */
-function SelectedPhotoChip({ filename, ordinal }: { filename: string; ordinal: string }) {
-  return (
-    <span className="inline-flex min-w-0 shrink items-center gap-2 rounded-full border border-border bg-background/60 px-3.5 py-1.5">
-      <span aria-hidden="true" className="size-2 shrink-0 rounded-full bg-primary" />
-      <span className="truncate font-mono text-[13px] text-foreground">
-        {ordinal} · {filename}
-      </span>
-    </span>
   );
 }
 
@@ -146,9 +131,7 @@ export function PrepareStep({
   customization,
   framingFocus,
   hasLocalImage,
-  imageName,
   imagePreview,
-  managedAsset,
   onAddPreparedLine,
   onAssignTemplatePhoto,
   onChangeFormat,
@@ -156,26 +139,36 @@ export function PrepareStep({
   onCropYChange,
   onFramingFocusChange,
   onFramingZoomChange,
-  onPrepareLocalImage,
   onSelectTemplate,
   onSlotTransformChange,
   onSlotTransformCommit,
   onTemplateTextChange,
   photos,
   prefilledSlotProvenance,
-  preparing,
-  selectedPhotoOrdinal,
   selectedProduct,
   selectedTemplateId,
   templateAssignments,
   templateContract,
   templateInputs,
+  templateLoading,
+  templatePreviewFor,
   templates,
   visibleTemplateSlots,
 }: PrepareStepProps) {
   // A template draft previews the whole composed print; a direct print has only
   // its single-photo crop to show.
-  const templatePreviewIsPrimary = customization === "template" && Boolean(browserPreview);
+  // While the next template's contract and artwork load, the crossfade holds
+  // the last print. The contract lands a beat before the artwork, so the
+  // column stays with the template for as long as one is chosen at all; the
+  // direct-print fallback is for prints that have no template.
+  const templatePreviewIsPrimary = customization === "template"
+    && (Boolean(browserPreview) || templateLoading || Boolean(selectedTemplateId && templateContract));
+  // Optional products stay useful as direct prints when no compatible
+  // published template exists. The template card is an editing surface, not a
+  // loading placeholder, so it appears once there is a contract to edit and
+  // then stays put while the shopper turns the picker from one template to
+  // the next, rather than unmounting for every change.
+  const hasPublishedTemplate = customization === "template" && Boolean(selectedTemplateId) && (Boolean(templateContract) || templateLoading);
   const provisionalPanLimit = activeSlotTransform ? minimumBrowserPreviewPanLimit(activeSlotTransform.zoom) : 0;
   const activeSlotPanX = Math.max(activeSlotPanLimits.x, provisionalPanLimit);
   const activeSlotPanY = Math.max(activeSlotPanLimits.y, provisionalPanLimit);
@@ -269,9 +262,6 @@ export function PrepareStep({
           >
             {selectedProduct.name}
           </h2>
-          <p className="mt-3 text-[17px] leading-7 text-muted-foreground">
-            {selectedProduct.description}
-          </p>
         </div>
         <Button className="h-13 px-6 text-base" onClick={onChangeFormat} variant="secondary">
           Change print
@@ -284,14 +274,14 @@ export function PrepareStep({
       <div className="mt-10 grid gap-8 lg:grid-cols-[minmax(0,1.02fr)_minmax(0,1fr)] xl:gap-14">
         <div className="lg:sticky lg:top-5 lg:self-start">
           {templatePreviewIsPrimary ? (
-            browserPreview
+            <PreviewCrossfade transitionKey={selectedTemplateId}>{browserPreview}</PreviewCrossfade>
           ) : (
             <>
               <PrintFrame
                 aspect={crop === "5:7" ? "5 / 7" : "4 / 5"}
                 aria-label={cropZoom > 1 ? "Drag to pan the selected image crop" : "Selected image crop preview"}
                 className={cn(
-                  cropZoom > 1 ? "w-full cursor-grab touch-none active:cursor-grabbing" : "w-full",
+                  cropZoom > 1 ? "mx-auto w-full max-w-[min(80%,640px)] cursor-grab touch-none active:cursor-grabbing" : "mx-auto w-full max-w-[min(80%,640px)]",
                   photoDropTargetClassName({
                     isDragActive: directDropDragActive,
                     isOver: directDropIsOver,
@@ -332,33 +322,17 @@ export function PrepareStep({
                 )}
               </PrintFrame>
 
-              <p className="mt-3 text-sm text-muted-foreground">
-                Crop frame · {crop === "5:7" ? "5 : 7" : "4 : 5"}
-              </p>
-              <p className="mt-2 max-w-[65ch] text-sm text-muted-foreground">
-                The frame is a local crop aid. “Prepare selected crop” creates those pixels and
-                uploads them through the published studio asset session. It is not a provider proof.
-              </p>
             </>
           )}
         </div>
 
         <div className="flex flex-col gap-6">
           <Surface aria-labelledby="prepare-photo-title" as="section" className="p-6 lg:p-7">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <PanelHeading
-                id="prepare-photo-title"
-                subtitle="Adjust the crop, then apply it to the artwork on the left."
-                title="Framing"
-              />
-              {imageName ? (
-                <SelectedPhotoChip filename={imageName} ordinal={selectedPhotoOrdinal} />
-              ) : null}
-            </div>
+            <PanelHeading id="prepare-photo-title" title="Framing" />
             {hasLocalImage && (
-              <div className="mt-6 flex flex-col gap-6">
+              <div className="mt-5 flex flex-col gap-5">
                 {templatePreviewIsPrimary && activeImageSlotKey && activeSlotTransform ? (
-                  <div className="flex flex-col gap-6" data-template-framing-controls>
+                  <div className="flex flex-col gap-5" data-template-framing-controls>
                     <FramingFocusToggle onChange={onFramingFocusChange} value={framingFocus} />
                     <RangeField
                       label="Zoom"
@@ -373,37 +347,39 @@ export function PrepareStep({
                       step={0.01}
                       value={activeSlotTransform.zoom}
                     />
-                    <RangeField
-                      label="Pan X"
-                      maxLabel="Right"
-                      minLabel="Left"
-                      valueLabel={`${Math.round(activeSlotTransform.offsetX)}%`}
-                      disabled={activeSlotPanX === 0}
-                      max={activeSlotPanX}
-                      min={-activeSlotPanX}
-                      onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                      onChange={(event) => onSlotTransformChange(activeImageSlotKey, { ...activeSlotTransform, offsetX: Number(event.target.value) })}
-                      onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                      step={1}
-                      value={activeSlotTransform.offsetX}
-                    />
-                    <RangeField
-                      label="Pan Y"
-                      maxLabel="Bottom"
-                      minLabel="Top"
-                      valueLabel={`${Math.round(activeSlotTransform.offsetY)}%`}
-                      disabled={activeSlotPanY === 0}
-                      max={activeSlotPanY}
-                      min={-activeSlotPanY}
-                      onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                      onChange={(event) => onSlotTransformChange(activeImageSlotKey, { ...activeSlotTransform, offsetY: Number(event.target.value) })}
-                      onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
-                      step={1}
-                      value={activeSlotTransform.offsetY}
-                    />
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <RangeField
+                        label="Pan X"
+                        maxLabel="Right"
+                        minLabel="Left"
+                        valueLabel={`${Math.round(activeSlotTransform.offsetX)}%`}
+                        disabled={activeSlotPanX === 0}
+                        max={activeSlotPanX}
+                        min={-activeSlotPanX}
+                        onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
+                        onChange={(event) => onSlotTransformChange(activeImageSlotKey, { ...activeSlotTransform, offsetX: Number(event.target.value) })}
+                        onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
+                        step={1}
+                        value={activeSlotTransform.offsetX}
+                      />
+                      <RangeField
+                        label="Pan Y"
+                        maxLabel="Bottom"
+                        minLabel="Top"
+                        valueLabel={`${Math.round(activeSlotTransform.offsetY)}%`}
+                        disabled={activeSlotPanY === 0}
+                        max={activeSlotPanY}
+                        min={-activeSlotPanY}
+                        onBlur={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
+                        onChange={(event) => onSlotTransformChange(activeImageSlotKey, { ...activeSlotTransform, offsetY: Number(event.target.value) })}
+                        onPointerUp={() => onSlotTransformCommit(activeImageSlotKey, activeSlotTransform)}
+                        step={1}
+                        value={activeSlotTransform.offsetY}
+                      />
+                    </div>
                   </div>
                 ) : (
-                  <div className="flex flex-col gap-6">
+                  <div className="flex flex-col gap-5">
                     <FramingFocusToggle onChange={onFramingFocusChange} value={framingFocus} />
                     <RangeField
                       label="Zoom"
@@ -416,43 +392,30 @@ export function PrepareStep({
                       step={0.05}
                       value={cropZoom}
                     />
-                    <RangeField
-                      label="Pan X"
-                      maxLabel="Right"
-                      minLabel="Left"
-                      valueLabel={`${cropX}%`}
-                      max={100}
-                      min={0}
-                      onChange={(event) => onCropXChange(Number(event.target.value))}
-                      value={cropX}
-                    />
-                    <RangeField
-                      label="Pan Y"
-                      maxLabel="Bottom"
-                      minLabel="Top"
-                      valueLabel={`${cropY}%`}
-                      max={100}
-                      min={0}
-                      onChange={(event) => onCropYChange(Number(event.target.value))}
-                      value={cropY}
-                    />
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <RangeField
+                        label="Pan X"
+                        maxLabel="Right"
+                        minLabel="Left"
+                        valueLabel={`${cropX}%`}
+                        max={100}
+                        min={0}
+                        onChange={(event) => onCropXChange(Number(event.target.value))}
+                        value={cropX}
+                      />
+                      <RangeField
+                        label="Pan Y"
+                        maxLabel="Bottom"
+                        minLabel="Top"
+                        valueLabel={`${cropY}%`}
+                        max={100}
+                        min={0}
+                        onChange={(event) => onCropYChange(Number(event.target.value))}
+                        value={cropY}
+                      />
+                    </div>
                   </div>
                 )}
-                {/* Secondary, because it is a step on the way to the one primary
-                    action on this page. Two orange buttons asked the shopper to
-                    pick a winner between preparing a crop and buying the print. */}
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border pt-5">
-                  <Button
-                    disabled={preparing}
-                    onClick={onPrepareLocalImage}
-                    variant="secondary"
-                  >
-                    {preparing ? "Preparing…" : "Prepare selected crop"}
-                  </Button>
-                  {managedAsset && (
-                    <p className="text-sm text-muted-foreground">Selected crop is ready.</p>
-                  )}
-                </div>
               </div>
             )}
 
@@ -466,48 +429,35 @@ export function PrepareStep({
             )}
           </Surface>
 
-          {customization !== "template" ? addToCartAction : null}
-
-          {customization === "template" && (
-            <>
-              <Surface aria-labelledby="template-title" as="section" className="p-6 lg:p-7">
-                <PanelHeading
-                  id="template-title"
-                  subtitle="Drop photographs into the image slots, then enter the text you want printed."
-                  title="Published studio template"
+          {hasPublishedTemplate ? (
+            <Surface aria-labelledby="template-title" as="section" className="p-6 lg:p-7">
+              <PanelHeading
+                id="template-title"
+                subtitle="Drop photographs into the image slots, then enter the text you want printed."
+                title="Published studio template"
+              />
+              <div className="mt-6 flex flex-col gap-6">
+                <TemplateCarousel
+                  loading={templates.length === 0}
+                  onSelect={onSelectTemplate}
+                  previewFor={templatePreviewFor}
+                  selectedTemplateId={selectedTemplateId}
+                  templates={templates.map((template) => ({ id: template.id, name: template.name ?? template.id }))}
                 />
-                <div className="mt-6 flex flex-col gap-6">
-                  <SelectField
-                    disabled={templates.length === 0}
-                    label="Template"
-                    onChange={(event) => onSelectTemplate(event.target.value)}
-                    value={selectedTemplateId}
-                  >
-                    <option value="">
-                      {templates.length === 0 ? "Loading templates…" : "Select a template"}
-                    </option>
-                    {templates.map((template) => (
-                      <option key={template.id} value={template.id}>
-                        {template.name ?? template.id}
-                      </option>
-                    ))}
-                  </SelectField>
-                  {templateContract && (
-                    <TemplateSlotAssignment
-                      assignments={templateAssignments}
-                      onAssign={onAssignTemplatePhoto}
-                      onTextChange={onTemplateTextChange}
-                      photos={photos}
-                      prefilledSlotProvenance={prefilledSlotProvenance}
-                      slots={visibleTemplateSlots}
-                      textValues={templateInputs}
-                    />
-                  )}
-                </div>
-              </Surface>
-              {addToCartAction}
-            </>
-          )}
+                <TemplateSlotAssignment
+                  assignments={templateAssignments}
+                  onAssign={onAssignTemplatePhoto}
+                  onTextChange={onTemplateTextChange}
+                  photos={photos}
+                  prefilledSlotProvenance={prefilledSlotProvenance}
+                  slots={visibleTemplateSlots}
+                  textValues={templateInputs}
+                />
+              </div>
+            </Surface>
+          ) : null}
+
+          {addToCartAction}
 
         </div>
       </div>

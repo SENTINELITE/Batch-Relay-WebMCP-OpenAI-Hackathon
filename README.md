@@ -1,11 +1,15 @@
 # Batch Relay WebMCP Storefront
 
-An agent-native photo-print workbench. A shopper loads their own JPEG or PNG
-photographs locally, selects a print, frames it, fills a studio template when
-appropriate, and adds the finished configuration to a browser-local demo cart.
+[Batch Relay](https://batchrelay.com) · WebMCP hackathon demo
+
+Batch Relay's platform with WebMCP exposes a agentic experience where users can
+interact naturally with their voice, or drive the experience with various
+agents via tool-calls. Shoppers can load their own JPEG or PNG photographs
+locally, select a print, frame it, and use studio templates, when appropriate,
+and review the prints before they complete their purchase.
 
 People and agents use the same visible workbench. Instead of asking an agent to
-guess at buttons and pixels, the page exposes typed WebMCP tools for the
+guess at buttons and pixels, the page exposes WebMCP tools for the
 photograph tray, print drafts, framing, templates, proposal cards, and cart.
 
 ## What the demo proves
@@ -18,10 +22,6 @@ photograph tray, print drafts, framing, templates, proposal cards, and cart.
 - **Human approval where it matters.** A print already on screen can be added
   directly. A background print becomes a preview card that the shopper must
   accept or reject.
-- **Safe, inspectable local state.** The cart, proposals, and framing persist
-  in the browser only. There is no checkout, charge, or fulfillment order. An
-  optional Test Mode template-proof action can upload only the crop a shopper
-  explicitly prepares.
 - **Shared visible feedback.** Agent actions update the page before returning
   and briefly report what changed, with undo/redo for the recent workbench
   history.
@@ -92,21 +92,6 @@ API origin is `https://api.batchrelay.com`; override
 `NEXT_PUBLIC_WEBMCP_TRACKING_KEY` is optional telemetry. Tools work without
 it.
 
-## Deploy on Vercel
-
-1. Push this repository to a public GitHub, GitLab, or Bitbucket repository.
-2. Import it into Vercel as a Next.js project.
-3. Add any optional studio-template variables above as **server-side** Vercel
-   environment variables. Do not add a deployment password or login wall for
-   the demo.
-4. Attach the public custom domain, for example `webmcp.batchrelay.com`.
-5. Open the deployed URL in ChatGPT's in-app browser and verify tool discovery,
-   one direct print, one template print, a proposal acceptance, cart quantity,
-   and undo/redo.
-
-Before making the repository public, confirm that `.env.local` is ignored and
-that no real API credential appears in the Git history.
-
 ## Verification
 
 ```bash
@@ -118,14 +103,6 @@ npm run check:public-api
 
 The last command fetches the public Batch Relay OpenAPI document and confirms
 the operations this demo relies on. It needs network access.
-
-## Demo materials
-
-Use photographs, template artwork, names, logos, and music that you own or are
-licensed to show. The app is intentionally useful with only a few images:
-one portrait, one team/group photo, and one additional direct-print photo are
-enough to demonstrate the core collaboration flow. Shoppers can always load
-their own JPEG or PNG files locally.
 
 ## License
 

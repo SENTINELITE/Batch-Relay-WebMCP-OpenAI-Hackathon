@@ -101,3 +101,11 @@ test("the declarative tool description scopes itself to the visible chooser", as
     /"Search the live print formats shown in the catalog chooser by size or name\./,
   );
 });
+
+test("the demo hides, rather than removes, its secondary catalog controls", async () => {
+  const source = await read("src/components/storefront/format-picker.tsx");
+
+  assert.match(source, /className="mt-6 hidden flex-col[\s\S]*?ref=\{formRef\}/);
+  assert.match(source, /<details className="group hidden rounded-\[22px\][\s\S]*?Explore more print formats/);
+  assert.match(source, /toolname: "search-print-formats"/);
+});

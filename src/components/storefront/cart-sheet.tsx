@@ -2,10 +2,10 @@
 
 /* eslint-disable @next/next/no-img-element -- local object URLs are browser-only preview state. */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
-import { Button, Chip, Notice, PrintFrame, Surface } from "@/components/ui";
-import { localCartPrintCount, type LocalCartItem } from "@/lib/storefront/local-cart";
+import { Button, Notice, PrintFrame, Surface } from "@/components/ui";
+import { cartItemDisplayName, localCartPrintCount, type LocalCartItem } from "@/lib/storefront/local-cart";
 
 export type CartSheetProps = {
   items: LocalCartItem[];
@@ -16,11 +16,16 @@ export type CartSheetProps = {
   onRemoveItem: (itemId: string) => void;
   onUpdateQuantity: (itemId: string, quantity: number) => void;
   onConfirmCheckout: () => void;
+  /** The finished composed preview for template-based cart lines. */
+  templatePreviewFor: (item: LocalCartItem) => ReactNode | null;
 };
 
 /** No quantity badge: the row's stepper is the one place that number lives.
  *  Two readings of the same count invited the shopper to trust the wrong one. */
-function CartThumbnail({ item, className }: { item: LocalCartItem; className?: string }) {
+function CartThumbnail({ item, className, templatePreview }: { item: LocalCartItem; className?: string; templatePreview: ReactNode | null }) {
+  if (templatePreview) return <div className={`pointer-events-none shrink-0 [&_section]:block [&_section]:w-full [&_section]:gap-0 [&_section>div]:w-full ${className ?? "w-[72px]"}`}>
+    {templatePreview}
+  </div>;
   return (
     <PrintFrame aspect="1 / 1" className={className ?? "w-[72px] shrink-0"}>
       {item.thumbnailURL ? (
@@ -37,8 +42,8 @@ function CartThumbnail({ item, className }: { item: LocalCartItem; className?: s
   );
 }
 
-/** One enclosed control. Loose −/+ glyphs either side of a bare number did not
- *  read as a single quantity the shopper could change. */
+/** A deliberately compact enclosed quantity control. It is a secondary action
+ *  in a cart row, so it must not compete with the print or Checkout button. */
 function QuantityStepper({
   item,
   onUpdateQuantity,
@@ -49,36 +54,36 @@ function QuantityStepper({
   return (
     <div
       aria-label={`Quantity for ${item.productName}`}
-      className="flex shrink-0 items-center gap-0.5 rounded-full border border-border bg-background/60 p-0.5"
+      className="flex h-6 shrink-0 items-center rounded-md border border-border bg-background/60 px-0.5"
       role="group"
     >
-      <Button
+      <button
         aria-label={`Decrease ${item.productName} quantity`}
-        className="size-8 p-0 text-lg"
+        className="grid size-5 place-items-center rounded text-[14px] leading-none text-muted-foreground transition-colors hover:bg-surface-warm hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
         disabled={item.quantity <= 1}
         onClick={() => onUpdateQuantity(item.id, item.quantity - 1)}
-        variant="ghost"
+        type="button"
       >
         −
-      </Button>
-      <span aria-live="polite" className="min-w-8 text-center font-mono text-[15px] text-foreground">
+      </button>
+      <span aria-live="polite" className="min-w-5 text-center font-mono text-[12px] text-foreground">
         {item.quantity}
       </span>
-      <Button
+      <button
         aria-label={`Increase ${item.productName} quantity`}
-        className="size-8 p-0 text-lg"
+        className="grid size-5 place-items-center rounded text-[14px] leading-none text-muted-foreground transition-colors hover:bg-surface-warm hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
         disabled={item.quantity >= 99}
         onClick={() => onUpdateQuantity(item.id, item.quantity + 1)}
-        variant="ghost"
+        type="button"
       >
         +
-      </Button>
+      </button>
     </div>
   );
 }
 
 /**
- * Demo cart as a right-edge sheet over the current step. It is only mounted
+ * Demo cart as a floating panel over the current step. It is only mounted
  * while open — nothing about the cart lives permanently in a page corner — and
  * checkout is clearly labelled and places no order.
  */
@@ -89,6 +94,7 @@ export function CartSheet({
   onRemoveItem,
   onUpdateQuantity,
   onConfirmCheckout,
+  templatePreviewFor,
 }: CartSheetProps) {
   const [checkingOut, setCheckingOut] = useState(false);
   const [complete, setComplete] = useState(false);
@@ -117,6 +123,27 @@ export function CartSheet({
     // `close` is stable enough for this handler; only open/checkingOut matter.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [checkingOut, open]);
+
+  // A floating modal must own scrolling for its entire lifetime. Without this,
+  // wheel/touch events at either end of a short or long cart chain through to
+  // the storefront underneath, moving the page behind an open dialog.
+  useEffect(() => {
+    if (!open) return;
+    const root = document.documentElement;
+    const body = document.body;
+    const rootOverflow = root.style.overflow;
+    const bodyOverflow = body.style.overflow;
+    const bodyPaddingRight = body.style.paddingRight;
+    const scrollbarWidth = Math.max(0, window.innerWidth - root.clientWidth);
+    root.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+    if (scrollbarWidth > 0) body.style.paddingRight = `${scrollbarWidth}px`;
+    return () => {
+      root.style.overflow = rootOverflow;
+      body.style.overflow = bodyOverflow;
+      body.style.paddingRight = bodyPaddingRight;
+    };
+  }, [open]);
 
   // Opening moves focus into the sheet; closing hands it back to the chip that
   // opened it, so nothing navigates and the page never scrolls.
@@ -147,20 +174,21 @@ export function CartSheet({
         onClick={close}
       />
 
-      {/* Surface owns `position: relative`, so the right-edge placement lives on
-          this wrapper rather than fighting it. */}
-      <div className="absolute inset-y-0 right-0 flex w-[min(92vw,400px)] animate-sheet-in">
+      {/* Surface owns `position: relative`, so the floating placement lives on
+          this wrapper rather than fighting it. A small gutter lets the panel
+          read as a distinct object instead of a continuation of the viewport. */}
+      <div className="absolute inset-x-3 inset-y-3 flex animate-sheet-in sm:inset-x-auto sm:inset-y-5 sm:right-5 sm:w-[min(92vw,400px)]">
         <Surface
           aria-labelledby="cart-sheet-title"
           aria-modal="true"
-          className="flex w-full flex-col gap-4 overflow-y-auto rounded-none rounded-l-[22px] border-y-0 border-r-0 p-5 shadow-warm-lg sm:p-6"
+          className="flex w-full flex-col gap-4 overflow-y-auto overscroll-contain rounded-[22px] p-5 shadow-warm-lg sm:p-6"
           id="cart-sheet"
           role="dialog"
         >
           <div className="flex items-start justify-between gap-3">
             <div className="flex flex-col gap-1">
               <h2 className="text-2xl font-semibold tracking-[-0.02em]" id="cart-sheet-title">
-                {checkingOut ? "Review your prints" : "Local cart"}
+                Cart
               </h2>
               <small className="text-sm text-muted-foreground">
                 {isEmpty
@@ -200,9 +228,9 @@ export function CartSheet({
                     <span className="font-mono text-[13px] text-muted-foreground">
                       {String(index + 1).padStart(2, "0")}
                     </span>
-                    <CartThumbnail className="w-12 shrink-0" item={item} />
+                    <CartThumbnail className="w-12" item={item} templatePreview={templatePreviewFor(item)} />
                     <div className="min-w-0 flex-1">
-                      <b className="block truncate text-[15px] font-semibold">{item.productName}</b>
+                      <b className="block truncate text-[15px] font-semibold">{cartItemDisplayName(item)}</b>
                       <small className="block text-[13px] text-muted-foreground">
                         Quantity {item.quantity}
                       </small>
@@ -234,34 +262,21 @@ export function CartSheet({
                 <ul className="flex flex-col divide-y divide-border">
                   {items.map((item) => (
                     <li className="flex items-start gap-3.5 py-3.5 first:pt-0" key={item.id}>
-                      <CartThumbnail item={item} />
+                      <CartThumbnail item={item} templatePreview={templatePreviewFor(item)} />
                       <div className="flex min-w-0 flex-1 flex-col gap-2.5">
                         <b className="text-base font-semibold leading-[1.375] tracking-[-0.01em]">
-                          {item.productName}
+                          {cartItemDisplayName(item)}
                         </b>
                         <div className="flex items-center justify-between gap-2">
-                          <Chip className="h-[22px] rounded-[6px] px-2 text-[11px] uppercase tracking-[0.09em]">
-                            {item.source}
-                          </Chip>
-                          <div className="flex shrink-0 items-center gap-2">
+                          <div className="flex shrink-0 items-center gap-1.5">
                             <QuantityStepper item={item} onUpdateQuantity={onUpdateQuantity} />
                             <Button
                               aria-label={`Remove ${item.productName}`}
-                              className="size-9 p-0"
+                              className="h-7 px-2 text-[12px] text-muted-foreground hover:text-foreground"
                               onClick={() => onRemoveItem(item.id)}
                               variant="ghost"
                             >
-                              <svg
-                                aria-hidden="true"
-                                className="size-3.5"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeLinecap="round"
-                                strokeWidth={1.7}
-                                viewBox="0 0 14 14"
-                              >
-                                <path d="M2.5 2.5l9 9M11.5 2.5l-9 9" />
-                              </svg>
+                              Remove
                             </Button>
                           </div>
                         </div>
@@ -271,21 +286,7 @@ export function CartSheet({
                 </ul>
               )}
 
-              {/* The demo disclosure moves off the button and under it, where
-                  there is room to say the whole thing. A one-word "Demo" chip
-                  in the header was easy to read past. */}
               <div className="mt-auto flex flex-col gap-3.5 border-t border-border pt-5">
-                {!isEmpty && (
-                  <div className="flex items-baseline justify-between gap-3">
-                    <span className="text-sm text-muted-foreground">Total prints</span>
-                    <span className="flex items-baseline gap-1.5">
-                      <b className="font-mono text-[22px] font-medium">{printCount}</b>
-                      <span className="text-sm text-muted-foreground">
-                        across {items.length} photo{items.length === 1 ? "" : "s"}
-                      </span>
-                    </span>
-                  </div>
-                )}
                 <Button
                   className="w-full"
                   disabled={isEmpty}
@@ -294,9 +295,6 @@ export function CartSheet({
                 >
                   Checkout
                 </Button>
-                <small className="text-center text-[13px] text-muted-foreground">
-                  Demo checkout — no order is placed and nothing is charged.
-                </small>
               </div>
             </>
           )}

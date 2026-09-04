@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useDraggablePhoto } from "@/components/storefront/photo-drag";
 import { PrintFrame } from "@/components/ui";
 import { cn } from "@/lib/cn";
@@ -19,9 +19,12 @@ import {
   type PhotoLibraryAction,
   type PhotoLibraryState,
 } from "@/lib/storefront/photo-library";
+import { fetchStarterPhotoFiles } from "@/lib/storefront/starter-photos";
 
 type TrayPhotoCardProps = {
   disabled: boolean;
+  /** The shopper-facing local face-detection result for this photograph. */
+  faceDetection?: FaceDebugEntry;
   /** Present only under the localhost-gated `?debug=faces` overlay. */
   faceDebug?: FaceDebugEntry;
   onSelect: () => void;
@@ -82,6 +85,35 @@ function FaceDebugLayer({ entry, sourceAspectRatio }: { entry: FaceDebugEntry; s
 }
 
 /**
+ * A quiet, useful readout of the local detector's completed result. A missing
+ * badge is deliberate while detection is pending or unavailable: showing a
+ * zero then would claim the browser had examined the photograph when it has
+ * not. The number caps visually at 3+ while the accessible label stays exact.
+ */
+function FaceDetectionBadge({ entry }: { entry: FaceDebugEntry | undefined }) {
+  if (!entry || entry.state === "pending" || entry.state === "unavailable") return null;
+  const count = entry.faces.length;
+  const label = count === 0 ? "No faces detected" : `${count} ${count === 1 ? "face" : "faces"} detected`;
+  return <span
+    aria-label={label}
+    className={cn(
+      "pointer-events-none absolute bottom-2 left-2 z-[3] inline-flex items-center gap-1 rounded-full border px-1.5 py-1 text-[11px] font-semibold leading-none shadow-warm",
+      count > 0
+        ? "border-primary/40 bg-card/95 text-foreground"
+        : "border-border-strong bg-card/90 text-muted-foreground",
+    )}
+    role="img"
+    title={label}
+  >
+    <span>{count > 3 ? "3+" : count}</span>
+    <svg aria-hidden="true" className="size-3" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} viewBox="0 0 24 24">
+      <circle cx="12" cy="8" r="3.25" />
+      <path d="M5.5 20c.35-3.35 3.2-5.75 6.5-5.75s6.15 2.4 6.5 5.75" />
+    </svg>
+  </span>;
+}
+
+/**
  * One tray photograph: a click selects it, and a drag carries it to a print
  * slot.
  *
@@ -90,7 +122,7 @@ function FaceDebugLayer({ entry, sourceAspectRatio }: { entry: FaceDebugEntry; s
  * a click. Keyboard dragging lives on its own handle instead, since Space on
  * the thumbnail must keep selecting.
  */
-function TrayPhotoCard({ disabled, faceDebug, onSelect, ordinal, photo, selected }: TrayPhotoCardProps) {
+function TrayPhotoCard({ disabled, faceDetection, faceDebug, onSelect, ordinal, photo, selected }: TrayPhotoCardProps) {
   const { bodyProps, connect, connectHandle, handleProps, isDragging } = useDraggablePhoto(photo, disabled);
   // The thumbnail crops with object-cover, so placing a box normalised to the
   // photograph needs the photograph's own aspect. Measured from the element
@@ -162,6 +194,7 @@ function TrayPhotoCard({ disabled, faceDebug, onSelect, ordinal, photo, selected
           <path d="m5 12.5 4.5 4.5L19 7" />
         </svg>
       </span> : null}
+      <FaceDetectionBadge entry={faceDetection} />
     </div>
 
     <div className="mt-3">
@@ -180,6 +213,8 @@ export type PhotoTrayProps = {
   disabled?: boolean;
   className?: string;
   onImportError?: (message: string) => void;
+  /** Finished local face-detection results, by photo id, for thumbnail badges. */
+  faceDetection?: FaceDebugMap;
   /**
    * Face boxes to draw over the thumbnails, by photo id. Supplied only when the
    * localhost-gated `?debug=faces` overlay is on; left undefined the tray
@@ -202,27 +237,55 @@ const hiddenInputStyle = {
 const pickerActionClassName =
   "cursor-pointer text-[15px] font-medium text-foreground underline decoration-border-strong underline-offset-[5px] transition-colors duration-200 ease-[var(--ease-out-expo)] hover:decoration-foreground disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none";
 
-export function PhotoTray({ library, onAction, disabled = false, className, onImportError, faceDebug }: PhotoTrayProps) {
+export function PhotoTray({ library, onAction, disabled = false, className, onImportError, faceDetection, faceDebug }: PhotoTrayProps) {
   const [dropActive, setDropActive] = useState(false);
   const [error, setError] = useState("");
   const [edgeFade, setEdgeFade] = useState({ left: false, right: false });
+  const [facesOnly, setFacesOnly] = useState(false);
   const imageInputID = useId();
   const folderInputID = useId();
   const folderInput = useRef<HTMLInputElement>(null);
   const scroller = useRef<HTMLOListElement>(null);
+  // A fresh demo is seeded only when a previously permitted folder is absent.
+  // If the shopper picks or drops files while that async check is underway,
+  // their own tray wins and the starter set never replaces it.
+  const shopperReplacedTray = useRef(false);
   const hasPhotos = library.photos.length > 0;
+  const faceFilter = useMemo(() => {
+    const entries = library.photos.map((photo) => faceDetection?.[photo.id]);
+    const detected = library.photos.filter((photo) => faceDetection?.[photo.id]?.state === "faces");
+    return {
+      detected,
+      pending: entries.some((entry) => !entry || entry.state === "pending"),
+      unavailable: entries.length > 0 && entries.every((entry) => entry?.state === "unavailable"),
+    };
+  }, [faceDetection, library.photos]);
+  const visiblePhotos = useMemo(
+    () => facesOnly ? faceFilter.detected : library.photos,
+    [faceFilter.detected, facesOnly, library.photos],
+  );
 
   useEffect(() => {
     let live = true;
     void (async () => {
       try {
         const handle = await rememberedPhotoFolderHandle();
-        if (!handle || !handle.queryPermission || await handle.queryPermission({ mode: "read" }) !== "granted") return;
-        const files = await filesFromPhotoFolder(handle);
-        if (live && files.length > 0) importFiles(files);
+        if (handle && handle.queryPermission && await handle.queryPermission({ mode: "read" }) === "granted") {
+          const files = await filesFromPhotoFolder(handle);
+          if (live && files.length > 0) {
+            importFiles(files, "remembered-folder");
+            return;
+          }
+        }
       } catch {
         // A remembered handle is optional browser-local convenience. The file
         // input remains the reliable fallback when permission was revoked.
+      }
+      try {
+        const files = await fetchStarterPhotoFiles();
+        if (live) importFiles(files, "starter");
+      } catch {
+        if (live) setError("Starter photographs could not be loaded. Select files to begin.");
       }
     })();
     return () => { live = false; };
@@ -254,11 +317,18 @@ export function PhotoTray({ library, onAction, disabled = false, className, onIm
       node.removeEventListener("scroll", update);
       observer.disconnect();
     };
-  }, [library.photos]);
+  }, [visiblePhotos]);
 
-  function importFiles(files: Iterable<File>) {
+  function importFiles(files: Iterable<File>, source: "shopper" | "remembered-folder" | "starter" = "shopper") {
+    if (source !== "shopper" && shopperReplacedTray.current) return;
     const result = createBrowserPhotos(files);
-    if (result.photos.length > 0) onAction({ type: "add", photos: result.photos });
+    // A picker result is the entire local photo set. It must never append to a
+    // prior selection, or “image 1” stops meaning what the shopper selected.
+    if (result.photos.length > 0) {
+      if (source === "shopper") shopperReplacedTray.current = true;
+      setFacesOnly(false);
+      onAction({ type: "replace", photos: result.photos });
+    }
     const message = result.rejected.map(({ message: reason }) => reason).join(" ");
     setError(message);
     if (message) onImportError?.(message);
@@ -321,6 +391,28 @@ export function PhotoTray({ library, onAction, disabled = false, className, onIm
     <button className={pickerActionClassName} disabled={disabled} onClick={() => void chooseFolder()} type="button">Select folder</button>
   </div>;
 
+  const faceFilterToggle = <button
+    aria-pressed={facesOnly}
+    className={cn(
+      "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-semibold transition-[background-color,border-color,color] duration-200 ease-[var(--ease-out-expo)] motion-reduce:transition-none",
+      facesOnly
+        ? "border-primary bg-primary text-primary-foreground"
+        : "border-border-strong bg-background/60 text-foreground hover:bg-surface-warm",
+      faceFilter.unavailable && "cursor-not-allowed opacity-50",
+    )}
+    disabled={faceFilter.unavailable}
+    onClick={() => setFacesOnly((current) => !current)}
+    title={faceFilter.unavailable ? "Face detection is unavailable in this browser." : "Show only photographs with detected faces."}
+    type="button"
+  >
+    <svg aria-hidden="true" className="size-3.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} viewBox="0 0 24 24">
+      <circle cx="12" cy="8" r="3.25" />
+      <path d="M5.5 20c.35-3.35 3.2-5.75 6.5-5.75s6.15 2.4 6.5 5.75" />
+    </svg>
+    Faces only
+    {faceFilter.detected.length > 0 ? <span className={cn("rounded-full px-1.5 py-px text-[11px] leading-none", facesOnly ? "bg-primary-foreground/20" : "bg-surface-warm")}>{faceFilter.detected.length}</span> : null}
+  </button>;
+
   return <section
     aria-label="Photo tray"
     className={cn(
@@ -337,13 +429,19 @@ export function PhotoTray({ library, onAction, disabled = false, className, onIm
     {fileInputs}
 
     {error ? <p aria-live="polite" className={cn("text-sm text-status-error", hasPhotos ? "px-5 pb-3 sm:px-8 lg:px-12" : "mb-4")}>{error}</p> : null}
-    {dropActive && !error ? <p className={cn("text-sm text-muted-foreground", hasPhotos ? "px-5 pb-3 sm:px-8 lg:px-12" : "mb-4")}>Release to add these images.</p> : null}
+    {dropActive && !error ? <p className={cn("text-sm text-muted-foreground", hasPhotos ? "px-5 pb-3 sm:px-8 lg:px-12" : "mb-4")}>Release to replace these images.</p> : null}
 
     {hasPhotos ? <>
-      <div className="mx-5 mb-2 inline-flex w-fit items-center rounded-full border border-dashed border-border-strong bg-background/60 px-4 py-1.5 sm:mx-8 lg:mx-12">
-        {pickers}
+      <div className="mx-5 mb-2 flex flex-wrap items-center gap-2 sm:mx-8 lg:mx-12">
+        <div className="inline-flex w-fit items-center rounded-full border border-dashed border-border-strong bg-background/60 px-4 py-1.5">
+          {pickers}
+        </div>
+        {faceFilterToggle}
       </div>
-      <ol
+      {facesOnly && visiblePhotos.length === 0 ? <div className="px-5 py-6 sm:px-8 lg:px-12">
+        <p className="text-sm text-muted-foreground">{faceFilter.pending ? "Scanning photographs for faces…" : "No faces were detected in these photographs."}</p>
+        <button className="mt-2 text-sm font-semibold text-primary underline decoration-primary/40 underline-offset-4 hover:decoration-primary" onClick={() => setFacesOnly(false)} type="button">Show all photographs</button>
+      </div> : <ol
         aria-label="Loaded photographs"
         className="flex gap-4 overflow-x-auto overscroll-x-contain px-5 py-3 sm:px-8 lg:px-12 [scrollbar-width:thin]"
         ref={scroller}
@@ -352,16 +450,17 @@ export function PhotoTray({ library, onAction, disabled = false, className, onIm
           WebkitMaskImage: `linear-gradient(to right, ${edgeFade.left ? "transparent" : "#000"} 0, #000 5rem, #000 calc(100% - 5rem), ${edgeFade.right ? "transparent" : "#000"} 100%)`,
         }}
       >
-        {library.photos.map((photo, index) => <TrayPhotoCard
+        {visiblePhotos.map((photo) => <TrayPhotoCard
           disabled={disabled}
+          faceDetection={faceDetection?.[photo.id]}
           faceDebug={faceDebug?.[photo.id]}
           key={photo.id}
           onSelect={() => onAction({ type: "select", photoId: photo.id })}
-          ordinal={index + 1}
+          ordinal={library.photos.indexOf(photo) + 1}
           photo={photo}
           selected={photo.id === library.selectedPhotoId}
         />)}
-      </ol>
+      </ol>}
     </> : <div className="rounded-[14px] border border-dashed border-border-strong bg-background/60 px-6 py-10 text-center">
       <h2 className="text-base font-semibold text-foreground">No photographs loaded</h2>
       <p className="mt-1 text-sm text-muted-foreground">Start with a folder or one or more JPEG or PNG images.</p>

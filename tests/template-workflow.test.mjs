@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { browserPreviewAssetProxyURL } from "../src/lib/storefront/client.ts";
 import { selectArtworkPath } from "../src/lib/storefront/customization.ts";
-import { localCartConfigurationKey, mergeLocalCartItem, mostRecentLocalCartItem } from "../src/lib/storefront/local-cart.ts";
+import { cartItemDisplayName, localCartConfigurationKey, mergeLocalCartItem, mostRecentLocalCartItem } from "../src/lib/storefront/local-cart.ts";
 import {
   browserPreviewCanvas,
   browserPreviewLayerPosition,
@@ -74,10 +74,19 @@ test("template compatibility keeps every canonical product and revision match an
   assert.match(ui, /void discoverTemplates\(\)/);
   assert.match(ui, /preloadedTemplatePreviews/);
   assert.match(ui, /warmedForOutput/);
-  assert.match(prepare, /label="Template"/);
+  assert.match(prepare, /<TemplateCarousel/);
+  assert.doesNotMatch(prepare, /<SelectField/);
   assert.doesNotMatch(prepare, /Compatible published output/);
   assert.match(ui, /rememberedCompatibleOutput\(draft\.template, template\.id, outputs\.revision_id, compatible\)/);
   assert.doesNotMatch(ui, /outputs\.outputs\.find\(/);
+});
+
+test("print detail follows framing, an applicable published template, then cart", async () => {
+  const prepare = await read("src/components/storefront/prepare-step.tsx");
+  assert.doesNotMatch(prepare, /Crop frame ·/);
+  assert.doesNotMatch(prepare, /The frame is a local crop aid/);
+  assert.match(prepare, /const hasPublishedTemplate = customization === "template" && Boolean\(selectedTemplateId\) && \(Boolean\(templateContract\) \|\| templateLoading\);/);
+  assert.match(prepare, /\{hasPublishedTemplate \? \([\s\S]*?title="Published studio template"[\s\S]*?\) : null\}\s*\{addToCartAction\}/);
 });
 
 test("a draft remembers an output only when the returned template revision still matches", () => {
@@ -316,6 +325,14 @@ test("cart quantities merge only exact finished-print configurations", () => {
   assert.equal(mergeLocalCartItem([first], changedPhoto).items.length, 2);
 });
 
+test("cart display prefers a non-numeric printed name and otherwise keeps the product name", () => {
+  const draft = {
+    textValues: { text_print_name: "Julian", text_jersey_number: "12" },
+  };
+  assert.equal(cartItemDisplayName({ productName: "8 × 10 Memory Mate", draft }), "Julian’s 8 × 10 Memory Mate");
+  assert.equal(cartItemDisplayName({ productName: "8 × 10 Print", draft: { textValues: { text_jersey_number: "12" } } }), "8 × 10 Print");
+});
+
 test("a published slot crop round-trips back through set_crop, so relative changes are grounded", () => {
   assert.equal(focusFromPreviewOffset(100), 0);
   assert.equal(focusFromPreviewOffset(0), 50);
@@ -356,7 +373,8 @@ test("the workbench is one screen with no shipping, quote, or sandbox order step
 
 test("the live template preview is the prepare step's primary visual", async () => {
   const prepare = await read("src/components/storefront/prepare-step.tsx");
-  assert.match(prepare, /const templatePreviewIsPrimary = customization === "template" && Boolean\(browserPreview\);/);
+  assert.match(prepare, /const templatePreviewIsPrimary = customization === "template"\s*&& \(Boolean\(browserPreview\) \|\| templateLoading \|\| Boolean\(selectedTemplateId && templateContract\)\);/);
+  assert.match(prepare, /<PreviewCrossfade transitionKey=\{selectedTemplateId\}>\{browserPreview\}<\/PreviewCrossfade>/);
   // The preview renders in the left visual column, ahead of the crop fallback.
   assert.ok(
     prepare.indexOf("{templatePreviewIsPrimary ? (") < prepare.indexOf('alt="Selected image crop preview"'),

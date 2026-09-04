@@ -52,6 +52,9 @@ export type PhotoLibraryState = {
 
 export type PhotoLibraryAction =
   | { type: "add"; photos: BrowserPhoto[] }
+  /** A new picker selection starts a new local tray rather than extending the
+   * previous one. Ordinal references must therefore only ever name this set. */
+  | { type: "replace"; photos: BrowserPhoto[] }
   | { type: "remove"; photoId: string }
   | { type: "move"; photoId: string; direction: "earlier" | "later" }
   | { type: "select"; photoId: string | null }
@@ -94,6 +97,18 @@ export function photoLibraryReducer(state: PhotoLibraryState, action: PhotoLibra
         ...state,
         photos: [...state.photos, ...additions],
         selectedPhotoId: state.selectedPhotoId ?? additions[0].id,
+        revision: state.revision + 1,
+      };
+    }
+    case "replace": {
+      const selectedPhotoId = action.photos[0]?.id ?? null;
+      return {
+        photos: action.photos,
+        selectedPhotoId,
+        // Preparations belong to a particular local photo id. Keeping them
+        // through a new import could silently associate prior work with the
+        // wrong ordinal, so a replacement always starts with none.
+        preparations: {},
         revision: state.revision + 1,
       };
     }

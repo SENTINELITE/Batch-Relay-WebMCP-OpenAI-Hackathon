@@ -29,6 +29,8 @@ export type CartProposal = {
   source: "direct" | "template";
   draft: PrintDraft;
   createdAt: string;
+  /** A shopper-visible follow-up marker. It never answers the proposal. */
+  reviewFlagged?: boolean;
 };
 
 /**
@@ -55,10 +57,10 @@ export const CART_PROPOSAL_VISIBLE_DEPTH = 3;
 
 /** How long each exit animation runs before its entry leaves the stack. */
 export const CART_PROPOSAL_EXIT_MS: Record<"accept" | "reject", number> = {
-  // Leave a small buffer after the 260ms/180ms CSS motion completes, while
-  // keeping the whole acknowledgement below the deck's 300ms motion budget.
-  accept: 280,
-  reject: 200,
+  // Leave a small buffer after the 380ms/280ms CSS motion completes, so the
+  // card behind has scaled into place before the answered card is dropped.
+  accept: 400,
+  reject: 300,
 };
 
 /** The proposals still awaiting the shopper, oldest first. */
@@ -89,6 +91,7 @@ export function cartProposalWireItems(proposals: readonly CartProposal[]) {
     product_id: proposal.productId,
     product_name: proposal.productName,
     quantity: proposal.quantity,
+    review_flagged: proposal.reviewFlagged === true,
     // Oldest first, so "the first one" and "the last one" mean something.
     position: index + 1,
     created_at: proposal.createdAt,
@@ -178,6 +181,20 @@ export function localCartConfigurationKey(item: Pick<LocalCartItem, "productId" 
 }
 
 export type LocalCartMerge = { items: LocalCartItem[]; line: LocalCartItem };
+
+/**
+ * A finished template often carries a human-readable print name, while the
+ * product name alone is repeated across every cart row. Prefer that value for
+ * display only; the canonical product name remains on the cart/tool wire.
+ */
+export function cartItemDisplayName(item: Pick<LocalCartItem, "productName" | "draft">): string {
+  const values = Object.values(item.draft.textValues)
+    .map((value) => value.trim())
+    // Jersey numbers and years are useful artwork inputs, not a person's name.
+    .filter((value) => value.length > 0 && value.length <= 80 && /[^\d\s]/.test(value));
+  const printName = values[0];
+  return printName ? `${printName}’s ${item.productName}` : item.productName;
+}
 
 /** Adds a finished-print snapshot, increasing quantity only when it is exact. */
 export function mergeLocalCartItem(items: readonly LocalCartItem[], incoming: LocalCartItem): LocalCartMerge {

@@ -131,7 +131,7 @@ export function FormatPicker({ products, selectedProductKey, state, onSelect }: 
     {state === "ready" && products.length === 0 && <Notice className="mt-6" tone="info">No supported published format is active.</Notice>}
     {products.length > 0 && <form
       {...searchFormToolAttributes}
-      className="mt-6 flex flex-col gap-3 rounded-[22px] border border-border bg-card p-4 sm:flex-row sm:items-end sm:gap-4 sm:p-5"
+      className="mt-6 hidden flex-col gap-3 rounded-[22px] border border-border bg-card p-4 sm:flex-row sm:items-end sm:gap-4 sm:p-5"
       ref={formRef}
     >
       <TextField
@@ -171,7 +171,7 @@ export function FormatPicker({ products, selectedProductKey, state, onSelect }: 
           </Surface>;
         })}
       </div>
-      {otherProducts.length > 0 && <details className="group rounded-[22px] border border-border bg-card transition-[background-color,border-color] duration-200 ease-[var(--ease-out-expo)] open:bg-surface-warm motion-reduce:transition-none">
+      {otherProducts.length > 0 && <details className="group hidden rounded-[22px] border border-border bg-card transition-[background-color,border-color] duration-200 ease-[var(--ease-out-expo)] open:bg-surface-warm motion-reduce:transition-none">
         <summary className="flex min-h-36 cursor-pointer list-none items-center justify-between gap-6 px-6 py-6 sm:px-8 [&::-webkit-details-marker]:hidden">
           <span className="flex flex-col gap-2">
             <span className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">Explore more print formats</span>

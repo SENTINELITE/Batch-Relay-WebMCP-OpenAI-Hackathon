@@ -633,7 +633,7 @@ test("the proposal card paints the proposed draft itself, not whatever is select
   assert.match(binding, /previewImageSlots\(\s*proposal\.draft\.slotAssignments,\s*proposal\.draft\.slotTransforms,\s*photoLibrary\.photos,?\s*\)/);
   // Every card is bound the same way, one per proposal.
   assert.match(source, /previewFor=\{proposalPreviewBinding\}/);
-  assert.match(stack, /const \{ aspect, templatePreview, review, foundInCatalog \} = previewFor\(proposal\)/);
+  assert.match(stack, /const \{ aspect, templatePreview, review \} = previewFor\(proposal\)/);
   assert.doesNotMatch(stack, /selectedDraftId|browserPreviewDocument/);
 });
 
@@ -645,12 +645,17 @@ test("proposals stack as an overlapping deck that promotes the next card when on
     read("src/lib/storefront/local-cart.ts"),
     read("src/app/globals.css"),
   ]);
-  // Anchored to the corner, and every card dealt onto the same spot: the deck's
-  // footprint is one card wide and one card tall however many are waiting, so a
-  // third proposal cannot eat the left edge of the screen.
-  assert.match(stack, /fixed bottom-5 left-5 z-50 w-\[min\(92vw,300px\)\]/);
+  // The deck has a dependable bottom-left home. The cards behind the active
+  // one fan toward the corner opposite the cursor, the active card leans a
+  // touch toward it, and the cursor never triggers a React render.
+  assert.match(stack, /fixed bottom-5 left-5 z-50 w-\[min\(92vw,264px\)\]/);
+  assert.doesNotMatch(stack, /pointerAnchor|deckPlacement/);
+  assert.match(stack, /window\.addEventListener\("pointermove"/);
+  assert.doesNotMatch(stack, /setPointer\(/);
+  assert.match(stack, /root\.style\.setProperty\("--deck-nx"/);
+  assert.match(stack, /deckLayerGeometry\(depth, side\)/);
   assert.doesNotMatch(stack, /flex-col/);
-  assert.match(stack, /absolute bottom-0 left-0 w-full origin-bottom-left/);
+  assert.match(stack, /absolute bottom-0 left-0 w-full origin-center/);
   assert.match(ui, /commitProposalStack\(\(entries\) => \[\.\.\.entries, \{ proposal, exit: null \}\]\)/);
   assert.match(stack, /mountedIds\.map\(\(id\) =>/);
 
@@ -692,14 +697,19 @@ test("proposals stack as an overlapping deck that promotes the next card when on
   assert.match(card, /animate-proposal-in motion-reduce:animate-none/);
   assert.match(card, /animate-proposal-accept/);
   assert.match(card, /animate-proposal-reject/);
-  assert.match(stack, /transition-\[transform,opacity\] duration-\[240ms\] ease-\[var\(--ease-out-expo\)\] motion-reduce:transition-none/);
-  assert.match(cartModel, /accept: 280/);
-  assert.match(cartModel, /reject: 200/);
+  assert.match(stack, /const DECK_SETTLE_MS = 420/);
+  assert.match(stack, /var\(--ease-spring\)/);
+  assert.match(stack, /motion-reduce:transition-none/);
+  assert.match(css, /--ease-spring: cubic-bezier/);
+  assert.match(cartModel, /accept: 400/);
+  assert.match(cartModel, /reject: 300/);
 
-  // Hover/focus fans background cards right. Horizontal wheel movement keeps
-  // the active card tied to its ID and never consumes ordinary vertical scroll.
-  assert.match(stack, /const fan = !prefersReducedMotion && finePointer && \(hovered \|\| focusWithin\)/);
-  assert.match(stack, /const right = \(fan \? FAN_RIGHT_PX : PEEK_RIGHT_PX\) \* depth/);
+  // The cards behind the active one move opposite the cursor while the deck
+  // itself stays parked. Horizontal wheel movement keeps the active card tied
+  // to its ID and never consumes ordinary vertical scroll.
+  assert.match(stack, /var\(--deck-nx, 0\) \* var\(--deck-kx, 0\)/);
+  assert.match(stack, /var\(--deck-ny, 0\) \* var\(--deck-ky, 0\)/);
+  assert.match(css, /@property --deck-kx/);
   assert.match(stack, /Math\.abs\(event\.deltaX\) > Math\.abs\(event\.deltaY\)/);
   assert.match(stack, /event\.preventDefault\(\)/);
   assert.match(stack, /ArrowLeft/);

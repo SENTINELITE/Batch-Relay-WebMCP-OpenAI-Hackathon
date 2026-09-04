@@ -15,7 +15,10 @@ import {
 import { CartProposalCard } from "@/components/storefront/cart-proposal-card";
 import {
   PROPOSAL_DECK_MAX_PREVIEWS,
+  PROPOSAL_DECK_SCALE_STEP,
   adjacentProposalId,
+  deckLayerGeometry,
+  normalisedPointer,
   proposalIndex,
   proposalPreviewWindow,
   proposalTravelGeometry,
@@ -36,13 +39,25 @@ export type CartProposalStackProps = {
   };
   onAccept: (proposal: CartProposal) => void;
   onReject: (proposal: CartProposal) => void;
+  onToggleFlag: (proposal: CartProposal) => void;
 };
 
 const WHEEL_SETTLE_MS = 140;
-const PEEK_RIGHT_PX = 11;
-const FAN_RIGHT_PX = 30;
-const PEEK_UP_PX = 10;
-const SCALE_STEP = 0.045;
+// How long a card takes to settle into a new depth after a neighbour is
+// answered or dealt. Wheel browsing follows the fingers more tightly.
+const DECK_SETTLE_MS = 420;
+const DECK_TRAVEL_MS = 160;
+const ARRIVAL_MS = 400;
+// The cursor is smoothed toward its target with this time constant so the
+// parallax breathes rather than snapping to every pointer event.
+const POINTER_SMOOTHING_MS = 110;
+const SCALE_STEP = PROPOSAL_DECK_SCALE_STEP;
+
+type DeckVars = CSSProperties & {
+  "--deck-kx"?: string;
+  "--deck-ky"?: string;
+  "--deck-kr"?: string;
+};
 
 function useMediaQuery(query: string) {
   const [matches, setMatches] = useState(false);
@@ -56,42 +71,68 @@ function useMediaQuery(query: string) {
   return matches;
 }
 
+/**
+ * The depth layout of one card: where it rests relative to the active card and
+ * how strongly it answers the cursor. The cursor itself is never part of this
+ * style; it lives in `--deck-nx`/`--deck-ny` on the deck root, written every
+ * frame without a React render, and the parallax element below multiplies the
+ * two. The coefficients are CSS custom properties so that a card promoted from
+ * depth 1 to 0 glides between parallax strengths instead of jumping.
+ */
 function layerStyle({
   depth,
   side = 1,
-  fan,
   travel,
   active,
   candidate,
+  settleMs,
 }: {
   depth: number;
   side?: -1 | 1;
-  fan: boolean;
   travel: number;
   active: boolean;
   candidate: boolean;
-}): CSSProperties {
+  settleMs: number;
+}): DeckVars {
   const amount = Math.abs(travel);
   const geometry = proposalTravelGeometry(travel);
+  const layer = deckLayerGeometry(depth, side);
   const scale = 1 - SCALE_STEP * depth;
-  const right = (fan ? FAN_RIGHT_PX : PEEK_RIGHT_PX) * depth;
-  const up = PEEK_UP_PX * depth;
+  const transition = settleMs > 0
+    ? `transform ${settleMs}ms var(--ease-spring), opacity ${Math.round(settleMs * 0.75)}ms ease-out, --deck-kx ${settleMs}ms var(--ease-spring), --deck-ky ${settleMs}ms var(--ease-spring), --deck-kr ${settleMs}ms var(--ease-spring)`
+    : "none";
+  const vars = {
+    "--deck-kx": `${layer.spread.x}`,
+    "--deck-ky": `${layer.spread.y}`,
+    "--deck-kr": `${layer.spread.rotate}`,
+    transition,
+  } satisfies DeckVars;
   if (active) return {
-    transform: `translate(${geometry.activeX}px, 0) scale(${1 - amount * 0.02})`,
+    ...vars,
+    transform: `translate(${geometry.activeX}px, 0px) rotate(${-travel * 2}deg) scale(${1 - amount * 0.02})`,
     opacity: 1 - amount * 0.08,
     zIndex: 100,
   };
   if (candidate && amount > 0) return {
-    transform: `translate(${geometry.candidateX}px, 0) scale(${geometry.candidateScale})`,
+    ...vars,
+    transform: `translate(${geometry.candidateX}px, 0px) rotate(0deg) scale(${geometry.candidateScale})`,
     opacity: 0.82 + amount * 0.18,
     zIndex: 101,
   };
   return {
-    transform: `translate(${side * right}px, ${-up}px) scale(${scale})`,
+    ...vars,
+    transform: `translate(${layer.rest.x}px, ${layer.rest.y}px) rotate(${layer.rest.rotate}deg) scale(${scale})`,
     opacity: 1 - 0.18 * depth,
     zIndex: 100 - depth,
   };
 }
+
+// The cards behind the active one move against the cursor, the active card
+// leans slightly toward it; both read the same smoothed cursor from the root.
+const parallaxStyle: CSSProperties = {
+  transform: "translate(calc(var(--deck-nx, 0) * var(--deck-kx, 0) * 1px), calc(var(--deck-ny, 0) * var(--deck-ky, 0) * 1px)) rotate(calc(var(--deck-nx, 0) * var(--deck-kr, 0) * 1deg))",
+  willChange: "transform",
+};
 
 /**
  * A cursor- and keyboard-browseable proposal deck. Selection is an id, never
@@ -99,7 +140,7 @@ function layerStyle({
  * the shopper was reviewing. Only three preview trees mount at once, with one
  * temporary fourth tree available for an exit flight.
  */
-export function CartProposalStack({ entries, previewFor, onAccept, onReject }: CartProposalStackProps) {
+export function CartProposalStack({ entries, previewFor, onAccept, onReject, onToggleFlag }: CartProposalStackProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const pendingEntries = useMemo(() => [...entries].filter((entry) => !entry.exit).reverse(), [entries]);
   const pendingIds = useMemo(() => pendingEntries.map((entry) => entry.proposal.id), [pendingEntries]);
@@ -107,8 +148,6 @@ export function CartProposalStack({ entries, previewFor, onAccept, onReject }: C
   const [activeProposalId, setActiveProposalId] = useState<string | null>(() => pendingIds[0] ?? null);
   const [announcement, setAnnouncement] = useState("");
   const [wheelTravel, setWheelTravel] = useState(0);
-  const [hovered, setHovered] = useState(false);
-  const [focusWithin, setFocusWithin] = useState(false);
   const previousPendingIds = useRef(pendingIds);
   const wheelTravelRef = useRef(0);
   const wheelDeltaRef = useRef(0);
@@ -124,13 +163,77 @@ export function CartProposalStack({ entries, previewFor, onAccept, onReject }: C
   const finePointer = useMediaQuery("(hover: hover) and (pointer: fine)");
   const [arrivalProposalId, setArrivalProposalId] = useState<string | null>(null);
 
+  const hasCards = entries.length > 0;
+  // Cursor parallax bypasses React entirely. The target is the cursor's
+  // normalised viewport position; the deck eases toward it each frame and
+  // publishes the result as two custom properties on the root, which every
+  // card's parallax element multiplies by its own depth coefficient.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    if (!finePointer || prefersReducedMotion || !hasCards) {
+      root.style.setProperty("--deck-nx", "0");
+      root.style.setProperty("--deck-ny", "0");
+      return;
+    }
+    const target = { x: 0, y: 0 };
+    const current = { x: 0, y: 0 };
+    let frame: number | null = null;
+    let last = 0;
+    const write = () => {
+      root.style.setProperty("--deck-nx", current.x.toFixed(4));
+      root.style.setProperty("--deck-ny", current.y.toFixed(4));
+    };
+    const tick = (now: number) => {
+      frame = null;
+      const dt = last ? Math.min(64, now - last) : 16;
+      last = now;
+      const k = 1 - Math.exp(-dt / POINTER_SMOOTHING_MS);
+      current.x += (target.x - current.x) * k;
+      current.y += (target.y - current.y) * k;
+      if (Math.abs(target.x - current.x) < 0.0015 && Math.abs(target.y - current.y) < 0.0015) {
+        current.x = target.x;
+        current.y = target.y;
+        write();
+        last = 0;
+        return;
+      }
+      write();
+      frame = window.requestAnimationFrame(tick);
+    };
+    const schedule = () => {
+      if (frame === null) frame = window.requestAnimationFrame(tick);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (event.pointerType !== "mouse") return;
+      const next = normalisedPointer(event.clientX, event.clientY, window.innerWidth, window.innerHeight);
+      target.x = next.x;
+      target.y = next.y;
+      schedule();
+    };
+    // Leaving the window lets the deck drift back to its resting fan.
+    const onPointerLeave = () => {
+      target.x = 0;
+      target.y = 0;
+      schedule();
+    };
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    document.documentElement.addEventListener("mouseleave", onPointerLeave);
+    window.addEventListener("blur", onPointerLeave);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      document.documentElement.removeEventListener("mouseleave", onPointerLeave);
+      window.removeEventListener("blur", onPointerLeave);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [finePointer, hasCards, prefersReducedMotion]);
+
   // The layout effect below restores a removed id to its nearest survivor
   // before paint. This render fallback only covers the first mounted frame.
   const activeId = activeProposalId && pendingIds.includes(activeProposalId)
     ? activeProposalId
     : pendingIds[0] ?? null;
   const activeIndex = proposalIndex(pendingIds, activeId);
-  const fan = !prefersReducedMotion && finePointer && (hovered || focusWithin);
 
   useLayoutEffect(() => {
     const previous = previousPendingIds.current;
@@ -156,7 +259,7 @@ export function CartProposalStack({ entries, previewFor, onAccept, onReject }: C
     if (!arrivalProposalId) return;
     const timer = window.setTimeout(() => {
       setArrivalProposalId((current) => current === arrivalProposalId ? null : current);
-    }, 240);
+    }, ARRIVAL_MS);
     return () => window.clearTimeout(timer);
   }, [arrivalProposalId]);
 
@@ -305,16 +408,13 @@ export function CartProposalStack({ entries, previewFor, onAccept, onReject }: C
   const entriesById = useMemo(() => new Map(entries.map((entry) => [entry.proposal.id, entry])), [entries]);
   const mountedPendingCount = mountedIds.filter((id) => pendingIds.includes(id)).length;
   const moreCount = Math.max(0, pendingIds.length - mountedPendingCount);
+  const settleMs = prefersReducedMotion ? 0 : wheelTravel !== 0 ? DECK_TRAVEL_MS : DECK_SETTLE_MS;
 
   return (
     <div
       aria-keyshortcuts="ArrowLeft ArrowRight Home End"
-      className="pointer-events-none fixed bottom-5 left-5 z-50 w-[min(92vw,300px)]"
-      onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusWithin(false); }}
-      onFocusCapture={() => setFocusWithin(true)}
+      className="pointer-events-none fixed bottom-5 left-5 z-50 w-[min(92vw,264px)]"
       onKeyDown={onKeyDown}
-      onPointerEnter={(event) => { if (event.pointerType === "mouse") setHovered(true); }}
-      onPointerLeave={() => setHovered(false)}
       ref={rootRef}
     >
       <p aria-atomic="true" aria-live="polite" className="sr-only">{announcement}</p>
@@ -327,39 +427,37 @@ export function CartProposalStack({ entries, previewFor, onAccept, onReject }: C
         const depth = exit ? 0 : Math.abs(relativeIndex);
         const onTop = !exit && id === activeId;
         const candidate = !exit && id === travelTarget;
-        const { aspect, templatePreview, review, foundInCatalog } = previewFor(proposal);
+        const { aspect, templatePreview, review } = previewFor(proposal);
         return (
           <div
             aria-hidden={!onTop}
-            className={`absolute bottom-0 left-0 w-full origin-bottom-left transition-[transform,opacity] duration-[240ms] ease-[var(--ease-out-expo)] motion-reduce:transition-none ${onTop && !exit ? "pointer-events-auto" : "pointer-events-none"}`}
+            className={`absolute bottom-0 left-0 w-full origin-center motion-reduce:transition-none ${onTop && !exit ? "pointer-events-auto" : "pointer-events-none"}`}
             data-proposal-card
             data-proposal-depth={depth}
             data-proposal-id={proposal.id}
             inert={!onTop || Boolean(exit)}
             key={proposal.id}
             style={exit
-              ? { ...layerStyle({ depth: 0, fan: false, travel: 0, active: true, candidate: false }), zIndex: 200 }
-              : layerStyle({ depth, side: relativeIndex < 0 ? -1 : 1, fan, travel: prefersReducedMotion ? 0 : wheelTravel, active: onTop, candidate })}
+              ? { ...layerStyle({ depth: 0, travel: 0, active: true, candidate: false, settleMs }), zIndex: 200 }
+              : layerStyle({ depth, side: relativeIndex < 0 ? -1 : 1, travel: prefersReducedMotion ? 0 : wheelTravel, active: onTop, candidate, settleMs })}
           >
+            <div className="origin-center motion-reduce:transform-none" data-proposal-parallax style={parallaxStyle}>
             <CartProposalCard
               aspect={aspect}
               animateArrival={onTop && !exit && arrivalProposalId === proposal.id && !prefersReducedMotion}
-              canGoNext={adjacentProposalId(pendingIds, activeId, 1) !== null}
-              canGoPrevious={adjacentProposalId(pendingIds, activeId, -1) !== null}
               depth={depth}
               exit={exit}
-              foundInCatalog={foundInCatalog}
               moreCount={moreCount}
               onAccept={() => onAccept(proposal)}
-              onNext={() => selectRelative(1)}
-              onPrevious={() => selectRelative(-1)}
               onReject={() => onReject(proposal)}
+              onToggleFlag={() => onToggleFlag(proposal)}
               position={activeIndex + 1}
               proposal={proposal}
               review={review}
               templatePreview={templatePreview}
               total={pendingIds.length}
             />
+            </div>
           </div>
         );
       })}

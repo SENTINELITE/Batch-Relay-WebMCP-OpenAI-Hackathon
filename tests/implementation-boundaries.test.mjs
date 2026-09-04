@@ -82,11 +82,11 @@ test("the demo cart proposal card is picture-in-picture and shopper-resolved", a
     read("src/components/storefront/cart-proposal-card.tsx"),
     read("src/components/storefront/cart-proposal-stack.tsx"),
   ]);
-  assert.match(stack, /fixed bottom-5 left-5 z-50 w-\[min\(92vw,300px\)\]/);
+  assert.match(stack, /fixed bottom-5 left-5 z-50 w-\[min\(92vw,264px\)\]/);
   // The cart no longer occupies the opposite corner; it is a sheet on demand.
   assert.doesNotMatch(ui, /fixed bottom-5 right-5/);
   assert.match(proposal, /Add to cart/);
-  assert.match(proposal, /Don&apos;t add/);
+  assert.match(proposal, /Skip/);
   assert.match(ui, /status: "awaiting_shopper_confirmation"/);
   assert.match(ui, /resolve_cart_proposal/);
 });

@@ -116,3 +116,54 @@ export function proposalTravelGeometry(progress: number): {
     candidateScale: 0.96 + amount * 0.04,
   };
 }
+
+/**
+ * How far one depth step of the deck fans out at rest, and how far it travels
+ * per unit of normalised cursor position. The cursor runs from -1 (left/top
+ * edge) to +1 (right/bottom edge); the cards behind the active one move to the
+ * opposite corner, so a cursor in the upper-left puts the deck's tail in the
+ * lower-right and vice versa. At dead centre only the rest fan remains, small
+ * enough that the top card is fully readable but every edge behind it shows.
+ */
+export const PROPOSAL_DECK_REST = { x: 6, y: -5, rotate: 1.8 } as const;
+export const PROPOSAL_DECK_SPREAD = { x: 13, y: 12, rotate: 1.6 } as const;
+/** The active card leans a little toward the cursor, the near layer of the parallax. */
+export const PROPOSAL_DECK_FOLLOW = { x: 4, y: 3, rotate: 0.5 } as const;
+export const PROPOSAL_DECK_SCALE_STEP = 0.035;
+
+export type DeckLayerGeometry = {
+  /** Resting offset from the active card, before any cursor influence. */
+  rest: { x: number; y: number; rotate: number };
+  /** Per-unit cursor coefficients; negative values move against the cursor. */
+  spread: { x: number; y: number; rotate: number };
+  scale: number;
+  opacity: number;
+};
+
+export function deckLayerGeometry(depth: number, side: -1 | 1 = 1): DeckLayerGeometry {
+  if (depth <= 0) {
+    return {
+      rest: { x: 0, y: 0, rotate: 0 },
+      spread: { x: PROPOSAL_DECK_FOLLOW.x, y: PROPOSAL_DECK_FOLLOW.y, rotate: PROPOSAL_DECK_FOLLOW.rotate },
+      scale: 1,
+      opacity: 1,
+    };
+  }
+  return {
+    // The rest fan always leans up and to the right, into the open corner of
+    // the viewport, so the deepest card never slides off the bottom-left edge.
+    rest: { x: PROPOSAL_DECK_REST.x * depth, y: PROPOSAL_DECK_REST.y * depth, rotate: side * -PROPOSAL_DECK_REST.rotate * depth },
+    spread: { x: -PROPOSAL_DECK_SPREAD.x * depth, y: -PROPOSAL_DECK_SPREAD.y * depth, rotate: -PROPOSAL_DECK_SPREAD.rotate * depth },
+    scale: 1 - PROPOSAL_DECK_SCALE_STEP * depth,
+    opacity: 1 - 0.18 * depth,
+  };
+}
+
+/** Normalises a viewport point to the -1..1 range the deck geometry expects. */
+export function normalisedPointer(x: number, y: number, width: number, height: number): { x: number; y: number } {
+  const clamp = (value: number) => Math.max(-1, Math.min(1, value));
+  return {
+    x: clamp((x / Math.max(1, width)) * 2 - 1),
+    y: clamp((y / Math.max(1, height)) * 2 - 1),
+  };
+}

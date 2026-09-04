@@ -389,7 +389,7 @@ export function BrowserTemplatePreview({
     {/* The print is the reason the page exists, so it takes the column it is
         given. It used to stop at 452px however wide the workbench got, which
         left the artwork smaller than the form describing it. */}
-    <PrintFrame className="mx-auto w-full max-w-[min(100%,780px)]">
+    <PrintFrame className="mx-auto w-full max-w-[min(80%,640px)]">
       <div className={canvasClassName} style={{ aspectRatio: `${canvas.widthIn} / ${canvas.heightIn}`, background: canvas.backgroundColor }} onLostPointerCapture={loseDrag} onPointerCancel={endDrag} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={endDrag}>
         {canvas.backgroundAssetRef && assetURLs[canvas.backgroundAssetRef] && <img alt="Published template background" className="pointer-events-none absolute inset-0 h-full w-full object-cover" src={assetURLs[canvas.backgroundAssetRef]} />}
         {!canvas.backgroundAssetRef && canvas.backgroundArt !== "none" && <span aria-hidden className="pointer-events-none absolute inset-0 h-full w-full opacity-[.55]" style={backgroundArtStyle(canvas.backgroundArt)} />}

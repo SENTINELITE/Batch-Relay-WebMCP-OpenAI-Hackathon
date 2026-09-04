@@ -4,9 +4,6 @@ import { useState } from "react";
 
 import { BatchRelayLockup } from "@/components/brand/batch-relay-lockup";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
-import { Notice } from "@/components/ui";
-
-export type StorefrontNotice = { tone: "error" | "info"; message: string };
 
 /** One accepted cart proposal. `id` changes per add so a repeat of the same
  *  quantity still re-fires the chip acknowledgement. */
@@ -17,7 +14,6 @@ export type StorefrontMastheadProps = {
   /** Latest accepted add. The chip flashes briefly instead of opening the cart
    *  sheet, so an agent-driven add is noticeable without stealing focus. */
   cartAcknowledgement?: CartAcknowledgement | null;
-  notice?: StorefrontNotice | null;
   onOpenCart?: () => void;
   onOpenHome?: () => void;
 };
@@ -25,7 +21,6 @@ export type StorefrontMastheadProps = {
 export function StorefrontMasthead({
   cartCount,
   cartAcknowledgement,
-  notice,
   onOpenCart,
   onOpenHome,
 }: StorefrontMastheadProps) {
@@ -88,11 +83,6 @@ export function StorefrontMasthead({
       <p aria-live="polite" className="sr-only">
         {acknowledging ? `${cartCount} in the local cart.` : ""}
       </p>
-      {notice ? (
-        <Notice tone={notice.tone} variant="banner">
-          {notice.message}
-        </Notice>
-      ) : null}
     </header>
   );
 }

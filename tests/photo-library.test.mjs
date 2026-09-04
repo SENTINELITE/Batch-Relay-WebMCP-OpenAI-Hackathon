@@ -56,6 +56,20 @@ test("keeps 1-based ordinals current through additive import, selection, and reo
   assert.equal(resolvePhotoReference(state.photos, 2).photo.id, "photo_a");
 });
 
+test("a later picker selection replaces the tray and discards prior preparations", () => {
+  const first = photo("photo_a", "first.jpg");
+  const second = photo("photo_b", "second.jpg");
+  const replacement = photo("photo_c", "replacement.jpg");
+  const target = { productId: "print-8x10", productRevision: 1 };
+  let state = photoLibraryReducer(emptyPhotoLibrary(), { type: "add", photos: [first, second] });
+  state = photoLibraryReducer(state, { type: "set-preparation", photoId: "photo_a", target, preparation: { status: "ready" } });
+  state = photoLibraryReducer(state, { type: "replace", photos: [replacement] });
+  assert.deepEqual(state.photos.map(({ id }) => id), ["photo_c"]);
+  assert.equal(state.selectedPhotoId, "photo_c");
+  assert.deepEqual(state.preparations, {});
+  assert.equal(resolvePhotoReference(state.photos, 1).photo.filename, "replacement.jpg");
+});
+
 test("resolves exact opaque ids and fails closed when filenames are duplicated", () => {
   const photos = [photo("photo_a", "1337.jpg"), photo("photo_b", "1337.jpg"), photo("photo_c", "team.jpg")];
   assert.equal(resolvePhotoReference(photos, "photo_c").photo.filename, "team.jpg");

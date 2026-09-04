@@ -42,6 +42,8 @@
   --shadow-warm-lg: var(--shadow-warm-lg-value);
 
   --ease-out-expo: cubic-bezier(0.22, 1, 0.36, 1);
+  /* A light overshoot for cards settling into a new depth in the deck. */
+  --ease-spring: cubic-bezier(0.34, 1.32, 0.64, 1);
 
   --animate-backdrop-in: backdrop-in 180ms ease-out;
   --animate-sheet-in: sheet-in 260ms var(--ease-out-expo);
@@ -50,9 +52,11 @@
 
   --animate-agent-pulse: agent-pulse 900ms var(--ease-out-expo) both;
 
-  --animate-proposal-in: proposal-in 220ms var(--ease-out-expo) both;
-  --animate-proposal-accept: proposal-accept 260ms var(--ease-out-expo) forwards;
-  --animate-proposal-reject: proposal-reject 180ms var(--ease-out-expo) forwards;
+  --animate-proposal-in: proposal-in 400ms var(--ease-out-expo) both;
+  --animate-preview-in: preview-in 480ms var(--ease-out-expo) both;
+  --animate-preview-out: preview-out 420ms ease-out forwards;
+  --animate-proposal-accept: proposal-accept 380ms var(--ease-out-expo) forwards;
+  --animate-proposal-reject: proposal-reject 280ms var(--ease-out-expo) forwards;
 
   @keyframes backdrop-in {
     from { opacity: 0; }
@@ -91,27 +95,58 @@
     100% { box-shadow: 0 0 0 8px transparent; }
   }
 
-  /* A proposal card arrives from the left edge it is anchored to, so the
-     stack reads as something sliding in rather than appearing on top. */
+  /* The main print dissolves from one template to the next: the old one
+     softens and recedes while the new one sharpens into place. */
+  @keyframes preview-in {
+    from { opacity: 0; filter: blur(10px); transform: scale(1.015); }
+    to { opacity: 1; filter: blur(0); transform: none; }
+  }
+
+  @keyframes preview-out {
+    from { opacity: 1; filter: blur(0); transform: none; }
+    to { opacity: 0; filter: blur(10px); transform: scale(0.985); }
+  }
+
+  /* A proposal card is dealt up from the corner it is anchored to, overshoots
+     a touch and settles, so the stack reads as something placed on top rather
+     than appearing there. */
   @keyframes proposal-in {
-    from { opacity: 0; transform: translateX(-28px) scale(0.94); }
-    to { opacity: 1; transform: none; }
+    0% { opacity: 0; transform: translate(-18px, 30px) rotate(-4deg) scale(0.9); }
+    65% { opacity: 1; transform: translate(2px, -4px) rotate(0.6deg) scale(1.012); }
+    100% { opacity: 1; transform: none; }
   }
 
   /* Accepting affirms in place for a beat, then carries the card toward the
      masthead cart chip — up and to the right — where the +1 flash lands. */
   @keyframes proposal-accept {
     0% { opacity: 1; transform: none; }
-    22% { opacity: 1; transform: scale(1.04); }
-    100% { opacity: 0; transform: translate(96px, -72px) scale(0.62); }
+    24% { opacity: 1; transform: translateY(-4px) rotate(1deg) scale(1.04); }
+    100% { opacity: 0; transform: translate(120px, -110px) rotate(8deg) scale(0.6); }
   }
 
-  /* Declining goes back out the way it came in, and faster. */
+  /* Skipping tosses the card back down into the corner it was dealt from. */
   @keyframes proposal-reject {
-    from { opacity: 1; transform: none; }
-    to { opacity: 0; transform: translateX(-32px) scale(0.96); }
+    0% { opacity: 1; transform: none; }
+    100% { opacity: 0; transform: translate(-48px, 56px) rotate(-9deg) scale(0.92); }
   }
 }
+
+/* A template card joining the ring fades up from the back rather than popping
+   into place. */
+.template-carousel-card {
+  @starting-style {
+    opacity: 0;
+  }
+}
+
+.preview-crossfade-enter { animation: var(--animate-preview-in); }
+.preview-crossfade-exit { animation: var(--animate-preview-out); }
+
+/* The deck's per-card parallax coefficients. Registered so a card promoted to a
+   new depth transitions its cursor response instead of jumping. */
+@property --deck-kx { syntax: "<number>"; inherits: true; initial-value: 0; }
+@property --deck-ky { syntax: "<number>"; inherits: true; initial-value: 0; }
+@property --deck-kr { syntax: "<number>"; inherits: true; initial-value: 0; }
 
 :root {
   --background: #fbf2eb;

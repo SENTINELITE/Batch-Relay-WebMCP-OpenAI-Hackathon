@@ -118,6 +118,37 @@ export function photoForRole(
 
 export type SlotPrefill = { slotKey: string; photoId: string; role: PhotoRole };
 
+/**
+ * Stable slot keys are deliberately template-specific, so switching artwork
+ * cannot carry an assignment by its old key. A shopper's individual/team
+ * intent can carry across only when both source and destination artwork name
+ * that role unambiguously. Matching destination keys are retained as well,
+ * which keeps an output change inside one template non-destructive.
+ */
+export function rekeySlotValuesByRole<Value>({
+  values,
+  sourceRolesBySlotKey,
+  targetRolesBySlotKey,
+}: {
+  values: Readonly<Record<string, Value>>;
+  sourceRolesBySlotKey: Readonly<Record<string, PhotoRole>>;
+  targetRolesBySlotKey: Readonly<Record<string, PhotoRole>>;
+}): Record<string, Value> {
+  const next: Record<string, Value> = {};
+  for (const targetSlotKey of Object.keys(targetRolesBySlotKey)) {
+    const value = values[targetSlotKey];
+    if (value !== undefined) next[targetSlotKey] = value;
+  }
+  for (const [sourceSlotKey, value] of Object.entries(values)) {
+    const role = sourceRolesBySlotKey[sourceSlotKey];
+    if (!role) continue;
+    const targetSlotKey = Object.entries(targetRolesBySlotKey)
+      .find(([, targetRole]) => targetRole === role)?.[0];
+    if (targetSlotKey && next[targetSlotKey] === undefined) next[targetSlotKey] = value;
+  }
+  return next;
+}
+
 /** Honest provenance wording shared by the UI hint and the tool response. */
 export function prefillProvenance(role: PhotoRole): string {
   return `${role} default`;

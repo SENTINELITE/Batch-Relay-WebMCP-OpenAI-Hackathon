@@ -10,6 +10,7 @@ import {
   photoRolesBySlotKey,
   prefillProvenance,
   prefillSlotAssignments,
+  rekeySlotValuesByRole,
   rememberDirectPhoto,
   rememberPhotoRole,
   rememberSlotAssignments,
@@ -132,6 +133,27 @@ test("prefills only empty slots and reports where each default came from", () =>
   assert.deepEqual(prefills, [{ slotKey: "image_face", photoId: "photo_a", role: "individual" }]);
   assert.equal(prefillProvenance("individual"), "individual default");
   assert.equal(prefillProvenance("team"), "team default");
+});
+
+test("switching templates rekeys individual and team values without leaking old stable keys", () => {
+  const sourceRoles = { image_122qlv9: "individual", image_12rkfks: "team" };
+  const targetRoles = { "athlete.portrait.5x7": "individual", "athlete.portrait.10x8": "team" };
+  assert.deepEqual(rekeySlotValuesByRole({
+    values: { image_122qlv9: "photo_individual", image_12rkfks: "photo_team", unknown: "photo_ignore" },
+    sourceRolesBySlotKey: sourceRoles,
+    targetRolesBySlotKey: targetRoles,
+  }), {
+    "athlete.portrait.5x7": "photo_individual",
+    "athlete.portrait.10x8": "photo_team",
+  });
+  assert.deepEqual(rekeySlotValuesByRole({
+    values: { image_122qlv9: { zoom: 1.2 }, image_12rkfks: { zoom: 1.4 } },
+    sourceRolesBySlotKey: sourceRoles,
+    targetRolesBySlotKey: targetRoles,
+  }), {
+    "athlete.portrait.5x7": { zoom: 1.2 },
+    "athlete.portrait.10x8": { zoom: 1.4 },
+  });
 });
 
 test("a remembered photograph that left the tray is no longer offered", () => {

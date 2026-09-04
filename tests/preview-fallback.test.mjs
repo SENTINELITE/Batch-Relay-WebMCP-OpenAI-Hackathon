@@ -175,10 +175,10 @@ test("three or more image slots become a hero over a row, and unusable product d
   }), null);
 });
 
-// The live storefront's exact published facts for the Modern Vintage memory
-// mate, taken from the working contract endpoint.
+// The restored Modern Vintage r2 contract is pinned from the supplied
+// render-request so the browser copy cannot silently drift from the picker.
 const memoryMateContract = {
-  template: { id: "tpl_9ede6ad441b647cdae32e781e16d39f5", revision_id: "rev_ce369fb614514a24a59972a5b8ec3dd2", revision_number: 1 },
+  template: { id: "tpl_9ede6ad441b647cdae32e781e16d39f5", revision_id: "rev_c926b893f2a144afa968b868bba503ca", revision_number: 2 },
   output: {
     id: "memory-mate-8x10-portrait-a",
     label: "8 × 10 Memory Mate (Portrait)",
@@ -186,8 +186,8 @@ const memoryMateContract = {
     surfaces: [{ id: "memory-mate-8x10-portrait", variant_id: "a", fulfillment_role: "artwork", ordinal: 0, width_in: 8, height_in: 10 }],
   },
   slots: [
-    { key: "image_122qlv9", kind: "image", ordinal: 1, required: false, suggested_label: "Athlete portrait (5x7)", suggested_semantic_key: "athlete.portrait", expected_aspect_ratio: { width: 5, height: 7 } },
-    { key: "image_12rkfks", kind: "image", ordinal: 6, required: false, suggested_label: "athlete.portrait", suggested_semantic_key: "athlete.portrait", expected_aspect_ratio: { width: 10, height: 8 } },
+    { key: "athlete.portrait.5x7", kind: "image", ordinal: 1, required: false, suggested_label: "Athlete portrait (5x7)", suggested_semantic_key: "athlete.portrait", expected_aspect_ratio: { width: 5, height: 7 } },
+    { key: "athlete.portrait.10x8", kind: "image", ordinal: 2, required: false, suggested_label: "athlete.portrait", suggested_semantic_key: "athlete.portrait", expected_aspect_ratio: { width: 10, height: 8 } },
   ],
 };
 
@@ -207,8 +207,8 @@ test("spec slot keys resolve to the contract keys the rest of the app binds by",
   // The spec names slots semantically; the storefront binds by stable key.
   // Both contract slots share a semantic key, so the 5:7 / 10:8 aspect ratios
   // are what disambiguate them.
-  assert.equal(keys.get("athlete.portrait.5x7"), "image_122qlv9");
-  assert.equal(keys.get("athlete.portrait.10x8"), "image_12rkfks");
+  assert.equal(keys.get("athlete.portrait.5x7"), "athlete.portrait.5x7");
+  assert.equal(keys.get("athlete.portrait.10x8"), "athlete.portrait.10x8");
 });
 
 test("aspect-ambiguous spec slots still resolve, by label and then declaration order", () => {
@@ -253,21 +253,21 @@ test("the bundled published spec converts into a parser-valid document with exac
   assert.equal(canvas.heightIn, 10);
   assert.equal(canvas.backgroundColor, "#ffede1", "the full-bleed solid base doubles as the canvas base colour");
 
-  // The grain pattern layer is a templateAsset with no fetchable bytes, so it
-  // is dropped; the base and tint shapes carry the published look.
-  assert.equal(canvas.layers.length, 4);
-  assert.ok(canvas.layers.every((layer) => !layer.assetRef), "no layer references unfetchable template asset bytes");
-  const [base, tint, individual, team] = canvas.layers;
+  const backgroundURL = "https://images.batchrelay.com/qs721nx4b560vgs1g9frmkt97d8c539d/templates/backgrounds/sha256/f547fc575716fc1ba04226cf7d5f08adca8615e6f4f96db8ccb893cde05dd324.jpg";
+  assert.equal(canvas.layers.length, 5);
+  const [base, background, tint, individual, team] = canvas.layers;
 
   assert.equal(base.fills[0].color, "#ffede1");
+  assert.equal(background.assetRef, backgroundURL);
+  assert.equal(background.fitMode, "cover");
   assert.equal(tint.fills[0].color, "#17110c");
   // The renderer paints a shape's first fill opaquely and applies alpha at the
   // layer, so the published fill opacity is folded in exactly once.
   assert.equal(tint.opacity, 0.55);
   assert.equal(tint.fills[0].opacity, 1);
 
-  assert.equal(individual.inputSlotKey, "image_122qlv9");
-  assert.equal(team.inputSlotKey, "image_12rkfks");
+  assert.equal(individual.inputSlotKey, "athlete.portrait.5x7");
+  assert.equal(team.inputSlotKey, "athlete.portrait.10x8");
   assert.equal(individual.inputSlotLabel, "Athlete portrait (5x7)");
   assert.equal(team.inputSlotLabel, "athlete.portrait");
   assert.equal(individual.anchor, "mc");
@@ -288,8 +288,8 @@ test("the bundled published spec converts into a parser-valid document with exac
   assert.ok(Math.abs((teamAt.x + team.sizeIn.width / 2) - canvas.widthIn / 2) < 0.001, "the team photo is horizontally centred");
 
   assert.deepEqual(document.input_slots, [
-    { surface_id: "memory-mate-8x10-portrait", variant_id: "a", node_id: "n_1c8755c5-ebdb-4cd8-a2bc-1b81d5213913", slot_key: "image_122qlv9" },
-    { surface_id: "memory-mate-8x10-portrait", variant_id: "a", node_id: "n_6ca10bb7-5a87-4a5e-bb28-27118ca09820", slot_key: "image_12rkfks" },
+    { surface_id: "memory-mate-8x10-portrait", variant_id: "a", node_id: "n_1c8755c5-ebdb-4cd8-a2bc-1b81d5213913", slot_key: "athlete.portrait.5x7" },
+    { surface_id: "memory-mate-8x10-portrait", variant_id: "a", node_id: "n_6ca10bb7-5a87-4a5e-bb28-27118ca09820", slot_key: "athlete.portrait.10x8" },
   ]);
 });
 
@@ -305,7 +305,7 @@ test("the bundled copy is pinned to the template and revision it was taken from"
   // The preview prefers the bundled copy only for this exact template id; the
   // storefront looks it up by that key before falling back to synthesis.
   assert.equal(modernVintageSpec.templateId, "tpl_9ede6ad441b647cdae32e781e16d39f5");
-  assert.equal(modernVintageSpec.revisionId, "rev_ce369fb614514a24a59972a5b8ec3dd2");
+  assert.equal(modernVintageSpec.revisionId, "rev_c926b893f2a144afa968b868bba503ca");
   assert.equal(modernVintageSpec.schemaVersion, "batchrelay.render-template/v6");
 });
 
@@ -400,12 +400,12 @@ test("the Neon Lights spec keeps its CDN background beneath the published tint",
     ...memoryMateContract,
     template: { id: neonLightsSpec.templateId, revision_id: neonLightsSpec.revisionId, revision_number: 3 },
     slots: [
-      memoryMateContract.slots[0],
+      { key: "image_122qlv9", kind: "image", ordinal: 1, required: false, suggested_label: "Athlete portrait (5x7)", suggested_semantic_key: "athlete.portrait", expected_aspect_ratio: { width: 5, height: 7 } },
       { key: "text_5106920550f5", kind: "text", ordinal: 2, required: false, suggested_label: "Print Name", suggested_semantic_key: "athlete_print_name" },
       { key: "text_171cff5dcfde", kind: "text", ordinal: 3, required: false, suggested_label: "Jersey Number", suggested_semantic_key: "athlete_jersey_number" },
       { key: "text_746edef46a4a", kind: "text", ordinal: 4, required: false, suggested_label: "Team", suggested_semantic_key: "athlete_team" },
       { key: "text_1e6560b98c6e", kind: "text", ordinal: 5, required: false, suggested_label: "Year", suggested_semantic_key: "athlete_year" },
-      { ...memoryMateContract.slots[1], ordinal: 10 },
+      { key: "image_12rkfks", kind: "image", ordinal: 10, required: false, suggested_label: "athlete.portrait", suggested_semantic_key: "athlete.portrait", expected_aspect_ratio: { width: 10, height: 8 } },
     ],
   };
   const document = specBrowserPreviewDocument({ spec: neonLightsSpec, contract, output: memoryMateOutput });
@@ -459,9 +459,9 @@ test("the Neon Lights spec keeps its CDN background beneath the published tint",
 test("the two bundled templates share a composition but stay separately addressable", () => {
   assert.notEqual(modernVintageSpec.templateId, neonLightsSpec.templateId);
   assert.equal(neonLightsSpec.revisionId, "rev_398677279733464cafb253d610f0e891");
-  // Modern Vintage's grain pattern is a builtin ref with no fetchable bytes,
-  // so it is still dropped while the frozen Neon Lights art stays independent.
+  // Modern Vintage's restored r2 background remains separate from the frozen
+  // Neon Lights artwork while both templates are independently selectable.
   const modernVintage = specDocument();
-  assert.deepEqual(modernVintage.assets, []);
-  assert.ok(canvasFor(modernVintage).layers.every((layer) => !layer.assetRef));
+  assert.equal(modernVintage.assets.length, 1);
+  assert.equal(modernVintage.assets[0].kind, "public_template_asset");
 });

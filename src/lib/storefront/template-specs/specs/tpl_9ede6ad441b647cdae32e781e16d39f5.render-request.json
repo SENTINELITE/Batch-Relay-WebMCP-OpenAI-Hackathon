@@ -4,11 +4,11 @@
     "schemaVersion": "batchrelay.render-template/v6",
     "templateEngineVersion": "0.11.0",
     "templateId": "tpl_9ede6ad441b647cdae32e781e16d39f5",
-    "revisionId": "rev_ce369fb614514a24a59972a5b8ec3dd2",
-    "revisionNumber": 1,
+    "revisionId": "rev_c926b893f2a144afa968b868bba503ca",
+    "revisionNumber": 2,
     "name": "Modern Vintage",
     "createdAt": "2026-08-11T03:06:59.355Z",
-    "updatedAt": "2026-09-01T05:47:51.228Z",
+    "updatedAt": "2026-09-03T06:00:23.570Z",
     "units": "inches",
     "origin": "top-left",
     "safeAreaIn": 0.25,
@@ -64,6 +64,24 @@
                 "fills": [{ "kind": "solid", "color": "#ffede1" }]
               },
               {
+                "id": "bg_memory-mate-8x10-portrait_a_image",
+                "name": "Background image",
+                "kind": "image",
+                "frame": {
+                  "anchor": "tl",
+                  "offsetIn": { "x": 0, "y": 0 },
+                  "sizeIn": { "width": 8, "height": 10 }
+                },
+                "rotationDeg": 0,
+                "opacity": 1,
+                "blendMode": "normal",
+                "source": { "kind": "templateAsset", "assetRef": "https://images.batchrelay.com/qs721nx4b560vgs1g9frmkt97d8c539d/templates/backgrounds/sha256/f547fc575716fc1ba04226cf7d5f08adca8615e6f4f96db8ccb893cde05dd324.jpg" },
+                "fit": { "mode": "cover" },
+                "orientationPolicy": "auto",
+                "orientationAnchor": "bottom-center",
+                "sourcePixelSize": { "width": 3861, "height": 4834 }
+              },
+              {
                 "id": "bg_memory-mate-8x10-portrait_a_tint",
                 "name": "Background tint",
                 "kind": "shape",
@@ -76,23 +94,6 @@
                 "opacity": 1,
                 "blendMode": "normal",
                 "fills": [{ "kind": "solid", "color": "#17110c", "opacity": 0.55 }]
-              },
-              {
-                "id": "bg_memory-mate-8x10-portrait_a_pattern",
-                "name": "Background pattern",
-                "kind": "image",
-                "frame": {
-                  "anchor": "tl",
-                  "offsetIn": { "x": 0, "y": 0 },
-                  "sizeIn": { "width": 8, "height": 10 }
-                },
-                "rotationDeg": 0,
-                "opacity": 1,
-                "blendMode": "normal",
-                "source": { "kind": "templateAsset", "assetRef": "builtin:pattern/grain/v1" },
-                "fit": { "mode": "contain" },
-                "orientationPolicy": "auto",
-                "orientationAnchor": "bottom-center"
               },
               {
                 "id": "n_1c8755c5-ebdb-4cd8-a2bc-1b81d5213913",
