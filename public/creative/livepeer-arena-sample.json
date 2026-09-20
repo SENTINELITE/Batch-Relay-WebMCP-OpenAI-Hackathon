@@ -1,0 +1,12 @@
+{
+  "kind": "previously-generated sample",
+  "provider": "Livepeer Creative MCP",
+  "model": "flux-schnell",
+  "created": "2026-09-19",
+  "width": 1024,
+  "height": 768,
+  "estimatedCostUsd": 0.0032,
+  "actualCostUsd": null,
+  "prompt": "Empty indoor basketball arena with deep forest green and warm gold lighting, restrained haze, clear space on the right for a separately composited athlete. Clean professional sports event artwork. Palette: primary #163D2B, accent #D3AA42. No people, no lettering, no logos; leave clear negative space for separately composited foreground layers.",
+  "verification": "Generated through the application estimate/approval/polling/image route. Reusing this bundled image makes no provider request."
+}

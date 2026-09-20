@@ -92,6 +92,27 @@ API origin is `https://api.batchrelay.com`; override
 `NEXT_PUBLIC_WEBMCP_TRACKING_KEY` is optional telemetry. Tools work without
 it.
 
+## Creative workbench
+
+The `/creative` route provides a local-first sports event kit with independent
+athlete, logo, background, and text layers. It exports a 1080 × 1350 social
+card and a 1920 × 1080 digital banner from the same deterministic renderer.
+Text corrections and format switches do not spend on image generation.
+
+Its WebMCP surface is documented in [`docs/creative/README.md`](docs/creative/README.md):
+inspect the project, update event details, propose and check a background,
+apply a reviewed candidate, switch layout, export PNGs, and undo or redo. A
+background proposal only returns a bounded estimate or pending job reference;
+the person must approve the visible quote before the server can execute it.
+The browser agent never waits for the provider job, and it cannot silently
+confirm spend.
+
+The creative implementation is new work on baseline `84ce005` of this public
+storefront. Provider credentials, participant access details, and submission
+receipts remain private. See [`docs/creative/developer-guide.md`](docs/creative/developer-guide.md)
+for the editor bridge contract and [`docs/creative/demo-script.md`](docs/creative/demo-script.md)
+for the review flow.
+
 ## Verification
 
 ```bash
