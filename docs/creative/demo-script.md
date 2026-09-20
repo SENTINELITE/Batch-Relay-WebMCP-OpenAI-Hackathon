@@ -33,3 +33,12 @@ result, apply it, and show the generated scene through the removed background.
 Restore the original, then reapply the existing cutout without another render.
 Reload and verify both assets survive. Do not describe generated smoke or
 source-based refinement as available until those separate phases ship.
+
+## Manual finishing
+
+Select the athlete on the proof and drag it into position. Show the precise
+position and proportional size controls, then select the event title and adjust
+its size and alignment. Undo the drag with one action. Switch formats to show
+that each layout retains its own placement, and export a clean PNG with no
+selection outline. These finishing edits use the existing assets without
+another provider request.

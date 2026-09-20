@@ -12,6 +12,19 @@ Changing event text, switching layouts, applying a reviewed candidate, and
 undoing or redoing edits are local composition operations. Switching formats
 reuses the approved background and does not request another generated image.
 
+## Manual layer editing
+
+Select a layer on the proof or use the layer selector to reach overlapping
+content. The selection outline belongs to the editor and is excluded from PNG
+exports. Drag the selected layer to reposition it, or enter precise X/Y values
+in its inspector. Image sizing keeps proportions locked; text controls adjust
+font size and alignment. Event wording remains editable in the event fields.
+
+Arrow keys nudge a layer while the proof has focus. Dragging creates one undo
+step when released. Layout changes apply to the active format, so portrait and
+banner placement can be tuned independently. These edits remain local and do
+not call Livepeer.
+
 ## Athlete cutout layer
 
 Use **Upload photo & estimate** to send a reduced processing copy of the

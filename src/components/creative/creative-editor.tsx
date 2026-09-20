@@ -8,10 +8,12 @@ import {
   subscribeToCreativeWebMcpActions,
   type CreativeWebMcpActionRequest,
 } from "@/webmcp/creative/bridge";
-import { applyAthleteCutout, applyBackground, createProject, restoreOriginalAthlete, updateProject } from "@/lib/creative/project";
+import { applyAthleteCutout, applyBackground, cloneProject, createProject, restoreOriginalAthlete, updateProject } from "@/lib/creative/project";
 import { exportCreativePng, renderCreative } from "@/lib/creative/renderer";
 import { createIndexedDbCreativePersistence, loadCreativeProject, saveCreativeProject } from "@/lib/creative/persistence";
 import type { CreativeAssetReference, CreativeCutoutCandidate, CreativeFormat, CreativeProject } from "@/lib/creative/types";
+import { CREATIVE_FORMAT_DIMENSIONS, type CreativeLayerTransform, type CreativeTextLayer } from "@/lib/creative/types";
+import { clampLayerPosition, hitTestCreativeLayer, interactionRectForLayer, layerLabel, moveLayer, resizeImageProportionally, setTextFontSize, textFontSizePixels, type CreativeImageDimensions, type CreativeInteractionLayer } from "@/lib/creative/interaction";
 
 type Format = CreativeFormat;
 type JobStatus = "idle" | "estimating" | "quoted" | "queued" | "running" | "succeeded" | "failed" | "unconfigured";
@@ -28,6 +30,22 @@ type HistoryAction =
   | { type: "replace"; project: Project }
   | { type: "undo" }
   | { type: "redo" };
+
+type InteractionPreview = {
+  layer: CreativeInteractionLayer;
+  transform: CreativeLayerTransform;
+};
+
+type DragState = {
+  layer: CreativeInteractionLayer;
+  pointerId: number;
+  format: Format;
+  revision: number;
+  start: { x: number; y: number };
+  transform: CreativeLayerTransform;
+  latest: CreativeLayerTransform;
+  moved: boolean;
+};
 
 function historyReducer(state: HistoryState, action: HistoryAction): HistoryState {
   if (action.type === "replace") return { project: action.project, past: [], future: [] };
@@ -88,6 +106,75 @@ function formatCost(value: number) {
   return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
 }
 
+function projectLayerTransform(project: Project, layer: CreativeInteractionLayer, format = project.format): CreativeLayerTransform | null {
+  const layout = project.layouts[format];
+  if (layer === "background" || layer === "athlete" || layer === "logo") return layout[layer];
+  return layout.text.find((candidate) => candidate.id === layer.slice("text:".length))?.transform ?? null;
+}
+
+function updateProjectLayerTransform(project: Project, layer: CreativeInteractionLayer, transform: CreativeLayerTransform, format = project.format): Project {
+  const layout = project.layouts[format];
+  if (layer === "background" || layer === "athlete" || layer === "logo") {
+    return updateProject(project, { layouts: { ...project.layouts, [format]: { ...layout, [layer]: transform } } });
+  }
+  const textId = layer.slice("text:".length);
+  return updateProject(project, { layouts: { ...project.layouts, [format]: { ...layout, text: layout.text.map((candidate) => candidate.id === textId ? { ...candidate, transform } : candidate) } } });
+}
+
+function previewProjectLayerTransform(project: Project, layer: CreativeInteractionLayer, transform: CreativeLayerTransform): Project {
+  const next = cloneProject(project);
+  const layout = next.layouts[next.format];
+  if (layer === "background" || layer === "athlete" || layer === "logo") {
+    layout[layer] = transform;
+  } else {
+    const textId = layer.slice("text:".length);
+    layout.text = layout.text.map((candidate) => candidate.id === textId ? { ...candidate, transform } : candidate);
+  }
+  return next;
+}
+
+type NumericFieldProps = {
+  label: string;
+  unit: string;
+  value: number;
+  onCommit: (value: number) => void;
+  min?: number;
+  max?: number;
+};
+
+function NumericField({ label, unit, value, onCommit, min, max }: NumericFieldProps) {
+  const [draft, setDraft] = useState(String(value));
+  const [editing, setEditing] = useState(false);
+  const cancelOnBlur = useRef(false);
+
+  const finish = () => {
+    if (cancelOnBlur.current) {
+      cancelOnBlur.current = false;
+      setEditing(false);
+      setDraft(String(value));
+      return;
+    }
+    setEditing(false);
+    const parsed = Number(draft.trim());
+    if (!draft.trim() || !Number.isFinite(parsed)) {
+      setDraft(String(value));
+      return;
+    }
+    const bounded = Math.min(max ?? parsed, Math.max(min ?? parsed, parsed));
+    setDraft(String(bounded));
+    if (bounded !== value) onCommit(bounded);
+  };
+
+  const cancel = (input: HTMLInputElement) => {
+    cancelOnBlur.current = true;
+    setEditing(false);
+    setDraft(String(value));
+    input.blur();
+  };
+
+  return <label className={styles.inspectorField}><span>{label} <small>{unit}</small></span><input type="number" inputMode="decimal" min={min} max={max} step="1" value={editing ? draft : String(value)} onFocus={() => { cancelOnBlur.current = false; setEditing(true); setDraft(String(value)); }} onChange={(event) => { setEditing(true); setDraft(event.currentTarget.value); }} onBlur={finish} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); event.currentTarget.blur(); } else if (event.key === "Escape") { event.preventDefault(); cancel(event.currentTarget); } }} /></label>;
+}
+
 function imageElementFromBlob(blob: Blob): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(blob);
@@ -146,9 +233,14 @@ export default function CreativeEditor() {
   const [showPasscode, setShowPasscode] = useState(false);
   const [passcode, setPasscode] = useState("");
   const [sessionPending, setSessionPending] = useState(false);
+  const [selectedLayer, setSelectedLayer] = useState<CreativeInteractionLayer | null>(null);
+  const [interactionPreview, setInteractionPreview] = useState<InteractionPreview | null>(null);
+  const [assetDimensions, setAssetDimensions] = useState<Record<string, CreativeImageDimensions>>({});
   const persistence = useRef(createIndexedDbCreativePersistence());
   const hydrated = useRef(false);
   const previewCanvas = useRef<HTMLCanvasElement | null>(null);
+  const proofFrame = useRef<HTMLDivElement | null>(null);
+  const dragState = useRef<DragState | null>(null);
   const pollInFlight = useRef(false);
   const approveInFlight = useRef(false);
   const exportUrl = useRef<string | null>(null);
@@ -228,18 +320,6 @@ export default function CreativeEditor() {
     return candidate ? applyAthleteCutout(current, candidate) : current;
   }), [commit]);
   const restoreAthlete = useCallback(() => commit((current) => restoreOriginalAthlete(current)), [commit]);
-
-  const updateAthleteTransform = useCallback((key: "x" | "y" | "scale", value: number) => {
-    commit((current) => {
-      const layout = current.layouts[current.format];
-      const athlete = layout.athlete;
-      const aspect = athlete.height / Math.max(athlete.width, 0.001);
-      const nextAthlete = key === "scale"
-        ? { ...athlete, width: value, height: value * aspect }
-        : { ...athlete, [key]: value };
-      return updateProject(current, { layouts: { ...current.layouts, [current.format]: { ...layout, athlete: nextAthlete } } });
-    });
-  }, [commit]);
 
   const undo = useCallback(() => {
     dispatchHistory({ type: "undo" });
@@ -424,6 +504,73 @@ export default function CreativeEditor() {
     logo: project.assets.logo ? assetUrls[project.assets.logo.blobKey] ?? assetUrls[project.assets.logo.id] ?? project.assets.logo.url : undefined,
   }), [assetUrls, project.assets]);
 
+  useEffect(() => {
+    let cancelled = false;
+    for (const [slot, url] of Object.entries(resolvedAssets) as Array<["background" | "athlete" | "logo", string | undefined]>) {
+      if (!url || typeof Image === "undefined") continue;
+      const image = new Image();
+      image.onload = () => {
+        if (cancelled || image.naturalWidth <= 0 || image.naturalHeight <= 0) return;
+        const reference = project.assets[slot];
+        if (!reference) return;
+        setAssetDimensions((current) => ({ ...current, [reference.blobKey]: { width: image.naturalWidth, height: image.naturalHeight }, [reference.id]: { width: image.naturalWidth, height: image.naturalHeight } }));
+      };
+      image.src = url;
+    }
+    return () => { cancelled = true; };
+  }, [project.assets, resolvedAssets]);
+
+  const assetDimensionsForSlot = useCallback((slot: "background" | "athlete" | "logo") => {
+    const reference = project.assets[slot];
+    if (!reference) return undefined;
+    return assetDimensions[reference.blobKey] ?? assetDimensions[reference.id] ?? (reference.width && reference.height ? { width: reference.width, height: reference.height } : undefined);
+  }, [assetDimensions, project.assets]);
+
+  const availableAssets = useMemo(() => ({
+    background: Boolean(project.assets.background),
+    athlete: Boolean(project.assets.athlete),
+    logo: Boolean(project.assets.logo),
+  }), [project.assets]);
+
+  const previewProject = useMemo(() => interactionPreview ? previewProjectLayerTransform(project, interactionPreview.layer, interactionPreview.transform) : project, [interactionPreview, project]);
+
+  const commitLayerTransform = useCallback((layer: CreativeInteractionLayer, transform: CreativeLayerTransform) => {
+    commit((current) => updateProjectLayerTransform(current, layer, transform));
+  }, [commit]);
+
+  const updateLayerPositionPixels = useCallback((layer: CreativeInteractionLayer, axis: "x" | "y", value: number) => {
+    if (!Number.isFinite(value)) return;
+    const transform = projectLayerTransform(project, layer);
+    if (!transform) return;
+    const dimensions = CREATIVE_FORMAT_DIMENSIONS[project.format];
+    const nextPosition = clampLayerPosition(transform, axis === "x" ? value / dimensions.width : transform.x, axis === "y" ? value / dimensions.height : transform.y);
+    commitLayerTransform(layer, { ...transform, ...nextPosition });
+  }, [commitLayerTransform, project]);
+
+  const resizeSelectedImage = useCallback((value: number) => {
+    if (!selectedLayer || !["background", "athlete", "logo"].includes(selectedLayer) || !Number.isFinite(value)) return;
+    const transform = projectLayerTransform(project, selectedLayer);
+    if (!transform) return;
+    const dimensions = CREATIVE_FORMAT_DIMENSIONS[project.format];
+    commitLayerTransform(selectedLayer, resizeImageProportionally(transform, value / dimensions.width));
+  }, [commitLayerTransform, project, selectedLayer]);
+
+  const updateSelectedTextSize = useCallback((value: number) => {
+    if (!selectedLayer?.startsWith("text:") || !Number.isFinite(value)) return;
+    const textId = selectedLayer.slice("text:".length);
+    const layer = project.layouts[project.format].text.find((candidate) => candidate.id === textId);
+    if (!layer) return;
+    const dimensions = CREATIVE_FORMAT_DIMENSIONS[project.format];
+    const next = setTextFontSize(layer, value, dimensions.width, dimensions.height);
+    commit((current) => updateProject(current, { layouts: { ...current.layouts, [current.format]: { ...current.layouts[current.format], text: current.layouts[current.format].text.map((candidate) => candidate.id === textId ? next : candidate) } } }));
+  }, [commit, project, selectedLayer]);
+
+  const updateSelectedTextAlignment = useCallback((align: CreativeTextLayer["align"]) => {
+    if (!selectedLayer?.startsWith("text:") || !align) return;
+    const textId = selectedLayer.slice("text:".length);
+    commit((current) => updateProject(current, { layouts: { ...current.layouts, [current.format]: { ...current.layouts[current.format], text: current.layouts[current.format].text.map((candidate) => candidate.id === textId ? { ...candidate, align } : candidate) } } }));
+  }, [commit, selectedLayer]);
+
   const proposeCutout = useCallback(async () => {
     const source = project.athleteOriginal ?? project.assets.athlete;
     const sourceUrl = source ? assetUrls[source.blobKey] ?? assetUrls[source.id] ?? source.url : undefined;
@@ -447,8 +594,90 @@ export default function CreativeEditor() {
   useEffect(() => {
     const canvas = previewCanvas.current;
     if (!canvas) return;
-    void renderCreative(project, resolvedAssets, { canvas, format: project.format }).catch(() => setStatusMessage("Preview could not resolve one or more source layers"));
-  }, [project, resolvedAssets]);
+    void renderCreative(previewProject, resolvedAssets, { canvas, format: previewProject.format }).catch(() => setStatusMessage("Preview could not resolve one or more source layers"));
+  }, [previewProject, resolvedAssets]);
+
+  const canvasPoint = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const frame = proofFrame.current;
+    if (!frame) return null;
+    const bounds = frame.getBoundingClientRect();
+    const dimensions = CREATIVE_FORMAT_DIMENSIONS[project.format];
+    return {
+      x: ((event.clientX - bounds.left) / Math.max(bounds.width, 1)) * dimensions.width,
+      y: ((event.clientY - bounds.top) / Math.max(bounds.height, 1)) * dimensions.height,
+    };
+  }, [project.format]);
+
+  const handleCanvasPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !event.isPrimary) return;
+    const point = canvasPoint(event);
+    if (!point) return;
+    const layer = hitTestCreativeLayer(point, project.layouts[project.format], project.format, {
+      background: assetDimensionsForSlot("background"),
+      athlete: assetDimensionsForSlot("athlete"),
+      logo: assetDimensionsForSlot("logo"),
+    }, availableAssets);
+    if (!layer) {
+      setSelectedLayer(null);
+      return;
+    }
+    const transform = projectLayerTransform(project, layer);
+    if (!transform) return;
+    setSelectedLayer(layer);
+    dragState.current = { layer, pointerId: event.pointerId, format: project.format, revision: project.revision, start: point, transform, latest: transform, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    proofFrame.current?.focus();
+  }, [assetDimensionsForSlot, availableAssets, canvasPoint, project]);
+
+  const handleCanvasPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragState.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (drag.format !== project.format || drag.revision !== project.revision) {
+      dragState.current = null;
+      setInteractionPreview(null);
+      return;
+    }
+    const point = canvasPoint(event);
+    if (!point) return;
+    const dimensions = CREATIVE_FORMAT_DIMENSIONS[project.format];
+    const delta = { x: (point.x - drag.start.x) / dimensions.width, y: (point.y - drag.start.y) / dimensions.height };
+    if (!drag.moved && Math.hypot(delta.x, delta.y) < 0.002) return;
+    drag.moved = true;
+    const nextTransform = moveLayer(drag.transform, delta);
+    drag.latest = nextTransform;
+    setInteractionPreview({ layer: drag.layer, transform: nextTransform });
+  }, [canvasPoint, project.format, project.revision]);
+
+  const finishCanvasDrag = useCallback((event: React.PointerEvent<HTMLDivElement>, cancelled = false) => {
+    const drag = dragState.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (!cancelled && drag.moved && drag.format === project.format && drag.revision === project.revision) {
+      commitLayerTransform(drag.layer, drag.latest);
+    }
+    dragState.current = null;
+    setInteractionPreview(null);
+  }, [commitLayerTransform, project.format, project.revision]);
+
+  const handleCanvasKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === "Escape" && dragState.current) {
+      dragState.current = null;
+      setInteractionPreview(null);
+      event.preventDefault();
+      return;
+    }
+    if (!selectedLayer) return;
+    const directions: Record<string, { x: number; y: number }> = { ArrowLeft: { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 }, ArrowUp: { x: 0, y: -1 }, ArrowDown: { x: 0, y: 1 } };
+    const direction = directions[event.key];
+    if (!direction) return;
+    event.preventDefault();
+    const transform = projectLayerTransform(project, selectedLayer);
+    if (!transform) return;
+    const dimensions = CREATIVE_FORMAT_DIMENSIONS[project.format];
+    const step = event.shiftKey ? 10 : 1;
+    commitLayerTransform(selectedLayer, moveLayer(transform, { x: (direction.x * step) / dimensions.width, y: (direction.y * step) / dimensions.height }));
+  }, [commitLayerTransform, project, selectedLayer]);
 
   const exportArtwork = useCallback(async (requestedFormat = project.format) => {
     setExportError(null);
@@ -556,6 +785,22 @@ export default function CreativeEditor() {
     await persistence.current.saveAssetBlob(blobKey, file);
   };
 
+  const layerOptions = useMemo<CreativeInteractionLayer[]>(() => [
+    "background",
+    "athlete",
+    "logo",
+    ...project.layouts[project.format].text.map((layer) => `text:${layer.id}` as const),
+  ], [project.format, project.layouts]);
+  const selectedTransform = selectedLayer ? projectLayerTransform(project, selectedLayer) : null;
+  const selectedText = selectedLayer?.startsWith("text:") ? project.layouts[project.format].text.find((layer) => layer.id === selectedLayer.slice("text:".length)) : null;
+  const previewLayout = previewProject.layouts[previewProject.format];
+  const selectedRect = selectedLayer ? interactionRectForLayer(previewLayout, project.format, selectedLayer, {
+    background: assetDimensionsForSlot("background"),
+    athlete: assetDimensionsForSlot("athlete"),
+    logo: assetDimensionsForSlot("logo"),
+  }) : null;
+  const canvasDimensions = CREATIVE_FORMAT_DIMENSIONS[project.format];
+
   return (
     <main className={styles.workbench}>
       <header className={styles.topbar}>
@@ -572,26 +817,35 @@ export default function CreativeEditor() {
             <div className={styles.field}><label htmlFor="event-cta">Call to action</label><input id="event-cta" value={project.event.callToAction} onChange={(event) => updateEvent("callToAction", event.target.value)} /></div>
           </section>
           <section className={styles.railSection}><p className={styles.eyebrow}>02 / Output format</p><div className={styles.formatSwitch}><button className={styles.formatButton} type="button" aria-pressed={project.format === "card"} onClick={() => switchLayout("card")}><strong>PORTRAIT</strong><span>1080 × 1350</span></button><button className={styles.formatButton} type="button" aria-pressed={project.format === "banner"} onClick={() => switchLayout("banner")}><strong>BANNER</strong><span>1920 × 1080</span></button></div></section>
-          <section className={styles.railSection}><p className={styles.eyebrow}>03 / Source layers</p>
+          <section className={styles.railSection}><div className={styles.sectionHeading}><p className={styles.eyebrow}>03 / Direct layer edit</p><span className={styles.tinyLabel}>{project.format.toUpperCase()}</span></div>
+            <p className={styles.inspectorHint}>Select a layer, then drag to move or use precise controls. Arrow keys nudge by 1 px, or 10 px with Shift.</p>
+            <label className={styles.layerSelectLabel} htmlFor="creative-layer-select">LAYER</label><select id="creative-layer-select" className={styles.layerSelect} value={selectedLayer ?? ""} onChange={(event) => setSelectedLayer((event.target.value || null) as CreativeInteractionLayer | null)}><option value="">Choose a layer…</option>{layerOptions.map((layer) => <option key={layer} value={layer}>{layerLabel(layer)}</option>)}</select>
+            {selectedLayer && selectedTransform && <div className={styles.layerInspector} aria-label={`${layerLabel(selectedLayer)} controls`}>
+              <div className={styles.inspectorTitle}><strong>{layerLabel(selectedLayer)}</strong><span>LAYOUT / {project.format.toUpperCase()}</span></div>
+              <div className={styles.inspectorGrid}><NumericField label="X" unit="px" value={Math.round(selectedTransform.x * canvasDimensions.width)} onCommit={(value) => updateLayerPositionPixels(selectedLayer, "x", value)} /><NumericField label="Y" unit="px" value={Math.round(selectedTransform.y * canvasDimensions.height)} onCommit={(value) => updateLayerPositionPixels(selectedLayer, "y", value)} /></div>
+              {selectedLayer === "background" || selectedLayer === "athlete" || selectedLayer === "logo" ? <NumericField label="WIDTH" unit="px · aspect locked" min={40} max={Math.round(canvasDimensions.width * 1.8)} value={Math.round(selectedTransform.width * canvasDimensions.width)} onCommit={resizeSelectedImage} /> : null}
+              {selectedText ? <><NumericField label="FONT SIZE" unit="px" min={10} max={Math.round(canvasDimensions.width * 0.25)} value={textFontSizePixels(selectedText, canvasDimensions.width)} onCommit={updateSelectedTextSize} /><div className={styles.alignmentControl}><span>ALIGNMENT</span><div>{(["left", "center", "right"] as const).map((align) => <button key={align} className={selectedText.align === align ? styles.alignmentSelected : ""} type="button" aria-pressed={selectedText.align === align} onClick={() => updateSelectedTextAlignment(align)}>{align}</button>)}</div></div><p className={styles.inspectorHint}>Long text wraps to fit the layer.</p></> : null}
+            </div>}
+          </section>
+          <section className={styles.railSection}><p className={styles.eyebrow}>04 / Source layers</p>
             <label className={styles.upload}><input type="file" accept="image/png,image/jpeg" onChange={(event) => void updateUpload("athlete", event.target.files?.[0])} />{resolvedAssets.athlete ? <img className={styles.uploadThumb} src={resolvedAssets.athlete} alt="Athlete source preview" /> : <span className={styles.uploadMark}>+</span>}<span className={styles.uploadText}><strong>Photograph</strong><span>PNG / JPEG · pixels retained</span></span></label>
             <label className={styles.upload} style={{ marginTop: 8 }}><input type="file" accept="image/png,image/svg+xml" onChange={(event) => void updateUpload("logo", event.target.files?.[0])} />{resolvedAssets.logo ? <img className={styles.uploadThumb} src={resolvedAssets.logo} alt="Logo source preview" /> : <span className={styles.uploadMark}>+</span>}<span className={styles.uploadText}><strong>Event logo</strong><span>PNG / SVG · independent layer</span></span></label>
-            <div className={styles.transformControls} aria-label="Athlete placement controls"><span className={styles.tinyLabel}>ATHLETE PLACEMENT / {project.format.toUpperCase()}</span><label className={styles.transformControl}><span>X</span><input type="range" min="-0.1" max="0.8" step="0.01" value={project.layouts[project.format].athlete.x} onChange={(event) => updateAthleteTransform("x", Number(event.target.value))} /><span className={styles.transformValue}>{project.layouts[project.format].athlete.x.toFixed(2)}</span></label><label className={styles.transformControl}><span>Y</span><input type="range" min="-0.1" max="0.8" step="0.01" value={project.layouts[project.format].athlete.y} onChange={(event) => updateAthleteTransform("y", Number(event.target.value))} /><span className={styles.transformValue}>{project.layouts[project.format].athlete.y.toFixed(2)}</span></label><label className={styles.transformControl}><span>SIZE</span><input type="range" min="0.3" max="1.2" step="0.01" value={project.layouts[project.format].athlete.width} onChange={(event) => updateAthleteTransform("scale", Number(event.target.value))} /><span className={styles.transformValue}>{project.layouts[project.format].athlete.width.toFixed(2)}</span></label></div>
             <p className={styles.cutoutDisclosure}>Background removal sends a copy of your photograph to Livepeer. Your original photo stays saved locally.</p><button className={`${styles.orangeButton} ${styles.cutoutAction}`} type="button" disabled={!project.assets.athlete || status === "estimating" || status === "running" || status === "queued"} onClick={() => void proposeCutout()}>Upload photo &amp; estimate</button>
             {project.athleteOriginal && project.assets.athlete?.id !== project.athleteOriginal.id && <button className={styles.directionButton} type="button" style={{ marginTop: 8, width: "100%" }} onClick={restoreAthlete}>Restore original photo</button>}
             {(project.athleteCutoutCandidates?.length ?? 0) > 0 && <div className={styles.cutoutCandidates} aria-label="Athlete cutout candidates">{project.athleteCutoutCandidates?.map((candidate) => { const sourceId = project.athleteOriginal?.id ?? project.assets.athlete?.id; const sourceMatches = candidate.sourceAssetId === sourceId; const candidateUrl = assetUrls[candidate.asset.blobKey] ?? candidate.asset.url; return <div className={styles.cutoutCard} key={candidate.id}>{candidateUrl ? <img className={styles.cutoutThumb} src={candidateUrl} alt="Athlete cutout candidate" /> : <div className={styles.cutoutThumb} aria-hidden="true" />}<div className={styles.cutoutMeta}><strong>{candidate.status === "ready" ? "Cutout ready" : candidate.status === "pending" ? "Cutout processing" : "Cutout unavailable"}</strong><span>{sourceMatches ? "Matches current photo" : "For an earlier photo"}</span>{candidate.warning && candidate.status === "failed" && <span>{candidate.warning}</span>}{candidate.status === "ready" && <button type="button" disabled={!sourceMatches} onClick={() => applyCutoutCandidate(candidate.id)}>Apply cutout</button>}</div></div>; })}</div>}
           </section>
-          <section className={styles.railSection}><p className={styles.eyebrow}>04 / History</p><div className={styles.history}><button className={styles.iconButton} type="button" aria-label="Undo last change" disabled={!past.length} onClick={undo}>↶</button><button className={styles.iconButton} type="button" aria-label="Redo last change" disabled={!future.length} onClick={redo}>↷</button><span className={styles.recovery}><i className={styles.recoveryDot} />{recovered ? "Recovered locally" : "Saved locally"}</span></div></section>
+          <section className={styles.railSection}><p className={styles.eyebrow}>05 / History</p><div className={styles.history}><button className={styles.iconButton} type="button" aria-label="Undo last change" disabled={!past.length} onClick={undo}>↶</button><button className={styles.iconButton} type="button" aria-label="Redo last change" disabled={!future.length} onClick={redo}>↷</button><span className={styles.recovery}><i className={styles.recoveryDot} />{recovered ? "Recovered locally" : "Saved locally"}</span></div></section>
         </aside>
 
         <section className={styles.main} aria-label="Creative proof canvas"><div className={styles.canvasBar}><p className={styles.eyebrow}>Proof canvas / approved layers</p><div className={styles.canvasMeta}><span>{project.format === "card" ? "1080 × 1350" : "1920 × 1080"}</span><span>PNG / sRGB</span></div></div>
-          <div className={styles.proofStage}><i className={styles.corner} /><i className={styles.corner} /><div className={`${styles.proofFrame} ${project.format === "banner" ? styles.banner : ""}`}><canvas ref={previewCanvas} className={styles.proofCanvas} aria-label="Rendered creative proof" /><span className={`${styles.sampleTag} ${selectedCandidate?.asset.source === "generated" ? styles.candidateAppliedTag : ""}`}>{selectedCandidate?.asset.source === "sample" ? "Previously generated sample" : selectedCandidate?.status === "ready" ? "Candidate ready" : "Proof"}</span></div></div>
+          <div className={styles.proofStage}><i className={styles.corner} /><i className={styles.corner} /><div ref={proofFrame} className={`${styles.proofFrame} ${project.format === "banner" ? styles.banner : ""}`} tabIndex={0} aria-label="Creative proof editor" onKeyDown={handleCanvasKeyDown}><canvas ref={previewCanvas} className={styles.proofCanvas} aria-label="Rendered creative proof" /><span className={`${styles.sampleTag} ${selectedCandidate?.asset.source === "generated" ? styles.candidateAppliedTag : ""}`}>{selectedCandidate?.asset.source === "sample" ? "Previously generated sample" : selectedCandidate?.status === "ready" ? "Candidate ready" : "Proof"}</span><div className={styles.layerInteraction} role="application" aria-label="Click or drag a creative layer to edit" onPointerDown={handleCanvasPointerDown} onPointerMove={handleCanvasPointerMove} onPointerUp={finishCanvasDrag} onPointerCancel={(event) => finishCanvasDrag(event, true)}>{selectedLayer && selectedRect && <div className={styles.selectedOutline} aria-hidden="true" style={{ left: `${(selectedRect.x / canvasDimensions.width) * 100}%`, top: `${(selectedRect.y / canvasDimensions.height) * 100}%`, width: `${(selectedRect.width / canvasDimensions.width) * 100}%`, height: `${(selectedRect.height / canvasDimensions.height) * 100}%` }} />}</div></div></div>
           <div className={styles.underCanvas}><span className={styles.recovery}><i className={styles.recoveryDot} />{statusMessage}</span><div className={styles.history}><button className={styles.iconButton} type="button" aria-label="Undo last change" disabled={!past.length} onClick={undo}>↶</button><button className={styles.iconButton} type="button" aria-label="Redo last change" disabled={!future.length} onClick={redo}>↷</button></div></div>
         </section>
 
         <aside className={`${styles.rail} ${styles.rightRail}`} aria-label="Background direction and exports">
-          <section className={styles.railSection}><div className={styles.sectionHeading}><p className={styles.eyebrow}>05 / Background direction</p><span className={styles.tinyLabel}>LIVEPEER</span></div><div className={styles.directionCard}><p className={styles.directionText}><strong>Describe the atmosphere.</strong> During background generation, your photograph, logo, and type stay local. A background proposal is quoted separately before any render.</p><div className={styles.field}><label htmlFor="creative-brief">Brief / revision note</label><textarea id="creative-brief" value={project.brief} onChange={(event) => updateBrief(event.target.value)} /></div><div className={styles.directionButtons}><button className={styles.directionButton} type="button" onClick={() => updateBrief(`${project.brief} More negative space behind the headline.`)}>+ Clear headline space</button><button className={styles.directionButton} type="button" onClick={() => updateBrief(`${project.brief} Add warmer sideline light.`)}>+ Warm the sideline light</button><button className={styles.orangeButton} type="button" disabled={status === "estimating" || status === "running" || status === "queued"} onClick={() => void createEstimate()}>{status === "estimating" ? "Preparing estimate…" : "Get a render estimate"}</button></div>{generationError && <div className={`${styles.notice} ${styles.noticeError}`} role="alert">{generationError}</div>}{status === "running" || status === "queued" ? <div className={styles.progress} aria-live="polite"><div className={styles.progressTrack}><div className={styles.progressFill} /></div><div className={styles.progressLabel}><span>{pendingOperation === "cutout" ? "Removing athlete background" : "Generating background"}</span><span>In progress</span></div></div> : null}</div>{quote && <div className={styles.quote}><div className={styles.quoteHeader}><span>Estimated cost</span><span>{quote.operation === "cutout" ? "Athlete cutout" : "Background"}</span></div><div className={styles.quoteCost}>{formatCost(quote.cost)}</div><div className={styles.quoteMeta}>{quote.model || "fast background model"} · one render · no automatic retries</div><button className={styles.orangeButton} type="button" disabled={status === "queued" || status === "running"} onClick={() => void approveQuote()}>{quote.operation === "cutout" ? "Approve cutout" : "Approve & render"}</button></div>}{status === "unconfigured" && <div className={styles.notice}>Live rendering is unavailable until setup is complete. Local editing and PNG export remain available.{showPasscode ? <form onSubmit={(event) => { event.preventDefault(); setSessionPending(true); void fetch("/api/creative/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ passcode }) }).then(async (response) => { if (!response.ok) { const body = await response.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || "Passcode was rejected"); } setProviderConfigured(true); setStatus(jobId ? "running" : "idle"); setStatusMessage(jobId ? "Live generation resumed" : "Live generation ready"); setGenerationError(null); setShowPasscode(false); }).catch((error) => { setGenerationError(error instanceof Error ? error.message : "Passcode was rejected"); setStatus("unconfigured"); }).finally(() => setSessionPending(false)); }}><div className={styles.field}><label htmlFor="provider-passcode">Passcode</label><input id="provider-passcode" type="password" value={passcode} onChange={(event) => setPasscode(event.target.value)} /><button className={styles.orangeButton} style={{ marginTop: 8, width: "100%" }} disabled={sessionPending} type="submit">{sessionPending ? "Unlocking…" : "Unlock live generation"}</button></div></form> : <button className={styles.directionButton} style={{ marginTop: 10, width: "100%" }} type="button" onClick={() => setShowPasscode(true)}>Unlock live generation</button>}</div>}</section>
-          <section className={styles.railSection}><div className={styles.sectionHeading}><p className={styles.eyebrow}>06 / Candidate review</p><span className={styles.tinyLabel}>{project.backgroundCandidates.length} OPTIONS</span></div>{project.backgroundCandidates.map((candidate, index) => { const applied = candidate.asset.id === project.assets.background?.id; const pending = candidate.status === "pending"; const candidateUrl = assetUrls[candidate.asset.blobKey] ?? assetUrls[candidate.asset.id] ?? candidate.asset.url; return <article className={`${styles.candidate} ${applied ? styles.selected : ""}`} key={candidate.id}><div className={`${styles.candidateVisual} ${index % 3 === 1 ? styles.alt : index % 3 === 2 ? styles.revision : ""}`}>{candidateUrl && <img className={styles.candidateImage} src={candidateUrl} alt="" />}<span>{pending ? "Rendering…" : candidate.asset.source === "sample" ? "Previously generated sample" : candidate.status === "ready" ? "Ready to review" : candidate.warning || "Unavailable"}</span></div><div className={styles.candidateInfo}><strong>{candidate.asset.name}</strong><span>{pending ? "PENDING" : candidate.asset.source === "sample" ? "LOCAL" : candidate.status === "ready" ? "NEW" : "FAILED"}</span></div>{candidate.status === "ready" && <button className={styles.candidateAction} type="button" onClick={() => applyCandidate(candidate.id)}>{applied ? "Applied to proof" : "Apply to proof"}</button>}</article>; })}</section>
-          <section className={styles.railSection}><p className={styles.eyebrow}>07 / Export set</p><div className={styles.exportList}><button className={styles.exportButton} type="button" onClick={() => void exportArtwork("card").catch(() => undefined)}>Portrait social card <span>PNG · 1080 × 1350 ↗</span></button><button className={styles.exportButton} type="button" onClick={() => void exportArtwork("banner").catch(() => undefined)}>Digital banner <span>PNG · 1920 × 1080 ↗</span></button></div>{exportError && <div className={`${styles.notice} ${styles.noticeError}`} role="alert">{exportError}</div>}{lastExport && <div className={styles.exportResult}><img className={styles.exportPreview} src={lastExport.url} alt="Latest exported creative" /><div className={styles.exportDetails}><strong>{lastExport.filename}</strong><span>{lastExport.width} × {lastExport.height} · {(lastExport.size / 1024).toFixed(0)} KB</span><a className={styles.exportLink} href={lastExport.url} download={lastExport.filename}>Download this PNG</a></div></div>}</section>
+          <section className={styles.railSection}><div className={styles.sectionHeading}><p className={styles.eyebrow}>06 / Background direction</p><span className={styles.tinyLabel}>LIVEPEER</span></div><div className={styles.directionCard}><p className={styles.directionText}><strong>Describe the atmosphere.</strong> During background generation, your photograph, logo, and type stay local. A background proposal is quoted separately before any render.</p><div className={styles.field}><label htmlFor="creative-brief">Brief / revision note</label><textarea id="creative-brief" value={project.brief} onChange={(event) => updateBrief(event.target.value)} /></div><div className={styles.directionButtons}><button className={styles.directionButton} type="button" onClick={() => updateBrief(`${project.brief} More negative space behind the headline.`)}>+ Clear headline space</button><button className={styles.directionButton} type="button" onClick={() => updateBrief(`${project.brief} Add warmer sideline light.`)}>+ Warm the sideline light</button><button className={styles.orangeButton} type="button" disabled={status === "estimating" || status === "running" || status === "queued"} onClick={() => void createEstimate()}>{status === "estimating" ? "Preparing estimate…" : "Get a render estimate"}</button></div>{generationError && <div className={`${styles.notice} ${styles.noticeError}`} role="alert">{generationError}</div>}{status === "running" || status === "queued" ? <div className={styles.progress} aria-live="polite"><div className={styles.progressTrack}><div className={styles.progressFill} /></div><div className={styles.progressLabel}><span>{pendingOperation === "cutout" ? "Removing athlete background" : "Generating background"}</span><span>In progress</span></div></div> : null}</div>{quote && <div className={styles.quote}><div className={styles.quoteHeader}><span>Estimated cost</span><span>{quote.operation === "cutout" ? "Athlete cutout" : "Background"}</span></div><div className={styles.quoteCost}>{formatCost(quote.cost)}</div><div className={styles.quoteMeta}>{quote.model || "fast background model"} · one render · no automatic retries</div><button className={styles.orangeButton} type="button" disabled={status === "queued" || status === "running"} onClick={() => void approveQuote()}>{quote.operation === "cutout" ? "Approve cutout" : "Approve & render"}</button></div>}{status === "unconfigured" && <div className={styles.notice}>Live rendering is unavailable until setup is complete. Local editing and PNG export remain available.{showPasscode ? <form onSubmit={(event) => { event.preventDefault(); setSessionPending(true); void fetch("/api/creative/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ passcode }) }).then(async (response) => { if (!response.ok) { const body = await response.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || "Passcode was rejected"); } setProviderConfigured(true); setStatus(jobId ? "running" : "idle"); setStatusMessage(jobId ? "Live generation resumed" : "Live generation ready"); setGenerationError(null); setShowPasscode(false); }).catch((error) => { setGenerationError(error instanceof Error ? error.message : "Passcode was rejected"); setStatus("unconfigured"); }).finally(() => setSessionPending(false)); }}><div className={styles.field}><label htmlFor="provider-passcode">Passcode</label><input id="provider-passcode" type="password" value={passcode} onChange={(event) => setPasscode(event.target.value)} /><button className={styles.orangeButton} style={{ marginTop: 8, width: "100%" }} disabled={sessionPending} type="submit">{sessionPending ? "Unlocking…" : "Unlock live generation"}</button></div></form> : <button className={styles.directionButton} style={{ marginTop: 10, width: "100%" }} type="button" onClick={() => setShowPasscode(true)}>Unlock live generation</button>}</div>}</section>
+          <section className={styles.railSection}><div className={styles.sectionHeading}><p className={styles.eyebrow}>07 / Candidate review</p><span className={styles.tinyLabel}>{project.backgroundCandidates.length} OPTIONS</span></div>{project.backgroundCandidates.map((candidate, index) => { const applied = candidate.asset.id === project.assets.background?.id; const pending = candidate.status === "pending"; const candidateUrl = assetUrls[candidate.asset.blobKey] ?? assetUrls[candidate.asset.id] ?? candidate.asset.url; return <article className={`${styles.candidate} ${applied ? styles.selected : ""}`} key={candidate.id}><div className={`${styles.candidateVisual} ${index % 3 === 1 ? styles.alt : index % 3 === 2 ? styles.revision : ""}`}>{candidateUrl && <img className={styles.candidateImage} src={candidateUrl} alt="" />}<span>{pending ? "Rendering…" : candidate.asset.source === "sample" ? "Previously generated sample" : candidate.status === "ready" ? "Ready to review" : candidate.warning || "Unavailable"}</span></div><div className={styles.candidateInfo}><strong>{candidate.asset.name}</strong><span>{pending ? "PENDING" : candidate.asset.source === "sample" ? "LOCAL" : candidate.status === "ready" ? "NEW" : "FAILED"}</span></div>{candidate.status === "ready" && <button className={styles.candidateAction} type="button" onClick={() => applyCandidate(candidate.id)}>{applied ? "Applied to proof" : "Apply to proof"}</button>}</article>; })}</section>
+          <section className={styles.railSection}><p className={styles.eyebrow}>08 / Export set</p><div className={styles.exportList}><button className={styles.exportButton} type="button" onClick={() => void exportArtwork("card").catch(() => undefined)}>Portrait social card <span>PNG · 1080 × 1350 ↗</span></button><button className={styles.exportButton} type="button" onClick={() => void exportArtwork("banner").catch(() => undefined)}>Digital banner <span>PNG · 1920 × 1080 ↗</span></button></div>{exportError && <div className={`${styles.notice} ${styles.noticeError}`} role="alert">{exportError}</div>}{lastExport && <div className={styles.exportResult}><img className={styles.exportPreview} src={lastExport.url} alt="Latest exported creative" /><div className={styles.exportDetails}><strong>{lastExport.filename}</strong><span>{lastExport.width} × {lastExport.height} · {(lastExport.size / 1024).toFixed(0)} KB</span><a className={styles.exportLink} href={lastExport.url} download={lastExport.filename}>Download this PNG</a></div></div>}</section>
         </aside>
       </div>
     </main>
