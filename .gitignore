@@ -7,5 +7,6 @@ out/
 *.log
 .DS_Store
 coverage/
+.creative-data/
 *.tsbuildinfo
 .vercel

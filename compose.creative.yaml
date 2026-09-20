@@ -1,0 +1,40 @@
+services:
+  creative:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: batch-relay-creative:local
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${CREATIVE_PORT:-3000}:3000"
+    # A named volume is mounted as root by Docker on first use. Initialize its
+    # ownership, then drop privileges before starting Next's server process.
+    user: "0:0"
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        install -d -m 700 -o node -g node "$${CREATIVE_DATA_DIR}" &&
+        exec su node -s /bin/sh -c 'exec node server.js'
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+      CREATIVE_DATA_DIR: /data/creative
+      LIVEPEER_JOURNAL_PATH: /data/creative/journal.json
+      LIVEPEER_MCP_URL: "${LIVEPEER_MCP_URL:?LIVEPEER_MCP_URL must be supplied at runtime}"
+      LIVEPEER_API_KEY: "${LIVEPEER_API_KEY-}"
+      # Livepeer's image result may redirect to the provider's media host.
+      # Keep this allowlist server-side and override it only when the provider
+      # documents a different HTTPS result host.
+      LIVEPEER_IMAGE_HOSTS: "${LIVEPEER_IMAGE_HOSTS:-v3b.fal.media}"
+      LIVEPEER_SESSION_SECRET: "${LIVEPEER_SESSION_SECRET:?LIVEPEER_SESSION_SECRET must be supplied at runtime}"
+      LIVEPEER_CREATIVE_PASSCODE: "${LIVEPEER_CREATIVE_PASSCODE:?LIVEPEER_CREATIVE_PASSCODE must be supplied at runtime}"
+      LIVEPEER_CREATIVE_BUDGET_USD: "${LIVEPEER_CREATIVE_BUDGET_USD:-20}"
+    volumes:
+      - creative-journal:/data/creative
+
+volumes:
+  creative-journal:
