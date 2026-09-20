@@ -1,6 +1,7 @@
 import {
   type CreativeAssetReference,
   type CreativeBackgroundCandidate,
+  type CreativeCutoutCandidate,
   type CreativeEvent,
   type CreativeFormat,
   type CreativeFormatLayout,
@@ -82,6 +83,8 @@ export type CreateProjectOptions = {
   brief?: string;
   format?: CreativeFormat;
   assets?: Partial<CreativeProject["assets"]>;
+  athleteOriginal?: CreativeProject["athleteOriginal"];
+  athleteCutoutCandidates?: CreativeProject["athleteCutoutCandidates"];
 };
 
 const DEFAULT_EVENT: CreativeEvent = {
@@ -116,6 +119,8 @@ export function createProject(options: CreateProjectOptions = {}): CreativeProje
     assets: { ...options.assets },
     layouts,
     backgroundCandidates: [],
+    ...(options.athleteOriginal ? { athleteOriginal: copy(options.athleteOriginal) } : {}),
+    ...(options.athleteCutoutCandidates ? { athleteCutoutCandidates: copy(options.athleteCutoutCandidates) } : {}),
     generationRefs: [],
     createdAt: stamp,
     updatedAt: stamp,
@@ -137,6 +142,8 @@ export function updateProject(project: CreativeProject, update: CreativeProjectU
   if (update.assets) next.assets = { ...next.assets, ...update.assets };
   if (update.layouts) next.layouts = { ...next.layouts, ...copy(update.layouts) };
   if (update.backgroundCandidates) next.backgroundCandidates = copy(update.backgroundCandidates);
+  if (update.athleteOriginal !== undefined) next.athleteOriginal = copy(update.athleteOriginal);
+  if (update.athleteCutoutCandidates) next.athleteCutoutCandidates = copy(update.athleteCutoutCandidates);
   if (update.generationRefs) next.generationRefs = copy(update.generationRefs);
   next.revision += 1;
   next.updatedAt = updatedAt;
@@ -169,6 +176,50 @@ export function applyBackground(
   const reference = "asset" in candidate ? candidate.asset : candidate;
   const next = copy(project);
   next.assets = { ...next.assets, background: reference };
+  next.revision += 1;
+  next.updatedAt = updatedAt;
+  return next;
+}
+
+/**
+ * Applies a reviewed cutout only when it belongs to the exact athlete source
+ * currently represented by the project. Invalid or stale candidates are a
+ * no-op, which lets a reconnecting UI keep its last approved composition.
+ */
+export function applyAthleteCutout(
+  project: CreativeProject,
+  candidate: CreativeCutoutCandidate,
+  updatedAt = now(),
+): CreativeProject {
+  const sourceAssetId = project.athleteOriginal?.id ?? project.assets.athlete?.id;
+  if (candidate.status !== "ready" || candidate.sourceAssetId !== sourceAssetId || candidate.asset.slot !== "athlete") return project;
+  const next = copy(project);
+  if (!next.athleteOriginal && next.assets.athlete) next.athleteOriginal = copy(next.assets.athlete);
+  next.assets = { ...next.assets, athlete: copy(candidate.asset) };
+  // Transparent cutouts should fit inside the same editable frame. Position,
+  // scale, rotation, and opacity remain exactly as the user set them.
+  for (const format of ["card", "banner"] as const) {
+    next.layouts[format] = {
+      ...next.layouts[format],
+      athlete: { ...next.layouts[format].athlete, fit: "contain" },
+    };
+  }
+  next.revision += 1;
+  next.updatedAt = updatedAt;
+  return next;
+}
+
+/** Restores the retained supplied athlete while leaving cutout candidates available. */
+export function restoreOriginalAthlete(project: CreativeProject, updatedAt = now()): CreativeProject {
+  if (!project.athleteOriginal) return project;
+  const next = copy(project);
+  next.assets = { ...next.assets, athlete: copy(next.athleteOriginal) };
+  for (const format of ["card", "banner"] as const) {
+    next.layouts[format] = {
+      ...next.layouts[format],
+      athlete: { ...next.layouts[format].athlete, fit: "cover" },
+    };
+  }
   next.revision += 1;
   next.updatedAt = updatedAt;
   return next;

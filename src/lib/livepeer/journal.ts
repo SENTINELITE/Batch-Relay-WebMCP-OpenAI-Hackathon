@@ -7,7 +7,7 @@ import path from "node:path";
 import { CreativeAPIError } from "./errors";
 import type { CreativeJournal } from "./types";
 
-const DEFAULT_JOURNAL: CreativeJournal = { version: 1, estimates: {}, jobs: {}, idempotency: {} };
+const DEFAULT_JOURNAL: CreativeJournal = { version: 1, estimates: {}, jobs: {}, idempotency: {}, sourceUploads: {} };
 const APP_BUDGET_USD = 20;
 
 function journalPath(): string {
@@ -40,7 +40,7 @@ async function readJournal(): Promise<CreativeJournal> {
   try {
     const parsed = JSON.parse(await readFile(file, "utf8")) as Partial<CreativeJournal>;
     if (parsed.version !== 1 || !parsed.estimates || !parsed.jobs || !parsed.idempotency) throw new Error("invalid");
-    return parsed as CreativeJournal;
+    return { ...parsed, sourceUploads: parsed.sourceUploads ?? {} } as CreativeJournal;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(DEFAULT_JOURNAL);
     if (error instanceof CreativeAPIError) throw error;
@@ -61,7 +61,23 @@ async function acquireLock(lockPath: string): Promise<() => Promise<void>> {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       try {
         const info = await stat(lockPath);
-        if (Date.now() - info.mtimeMs > 30_000) await unlink(lockPath);
+        if (Date.now() - info.mtimeMs > 30_000) {
+          let ownerAlive = false;
+          try {
+            const ownerPID = Number((await readFile(lockPath, "utf8")).trim());
+            if (Number.isInteger(ownerPID) && ownerPID > 0) {
+              try {
+                process.kill(ownerPID, 0);
+                ownerAlive = true;
+              } catch (ownerError) {
+                ownerAlive = (ownerError as NodeJS.ErrnoException).code !== "ESRCH";
+              }
+            }
+          } catch {
+            // A malformed or unreadable stale lock has no live owner to protect.
+          }
+          if (!ownerAlive) await unlink(lockPath);
+        }
       } catch {
         // A concurrent writer may have released the lock between stat/unlink.
       }

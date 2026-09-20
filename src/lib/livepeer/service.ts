@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { isIP } from "node:net";
 
 import { assert, CreativeAPIError } from "./errors";
@@ -11,9 +12,11 @@ import type {
   CreativeJob,
   CreativeJobStatus,
   CreativePalette,
+  CreativeOperation,
   EstimateRecord,
   JobRecord,
   ProviderToolResult,
+  SourceUploadRecord,
 } from "./types";
 
 const MODEL = "flux-schnell";
@@ -40,7 +43,7 @@ function palette(value: unknown): CreativePalette {
   return { primary, accent };
 }
 
-function bindingHash(input: { projectId: string; revision: number; prompt: string; palette: CreativePalette; model: string; output: { aspectRatio: string; format: string } }): string {
+function bindingHash(input: { projectId: string; revision: number; prompt: string; palette?: CreativePalette; model: string; output: { aspectRatio?: string; format: string }; operation: CreativeOperation; sourceAssetId?: string; sourceContentHash?: string }): string {
   return createHash("sha256").update(JSON.stringify(input)).digest("hex");
 }
 
@@ -69,16 +72,21 @@ function nestedValue(value: unknown, keys: string[]): unknown {
   return undefined;
 }
 
-function estimateFromProvider(result: ProviderToolResult): { planId: string; cost: number; model: string } {
+function estimateFromProvider(result: ProviderToolResult, expectedModel?: string): { planId: string; cost: number; model: string } {
   const value = providerJSON(result);
   const steps = Array.isArray(value.steps) ? value.steps : [];
   const firstStep = (steps[0] && typeof steps[0] === "object" ? steps[0] : {}) as Record<string, unknown>;
   const args = firstStep.args && typeof firstStep.args === "object" ? firstStep.args as Record<string, unknown> : {};
   const planId = stringValue(value.plan_id, value.planId, value.id);
   const cost = numberValue(value.total_est_cost_usd, value.totalEstCostUsd, firstStep.est_cost_usd, firstStep.estimated_cost_usd);
-  const model = stringValue(value.model, args.model_override, MODEL) ?? MODEL;
+  // Some Creative proposals omit the model when the requested override is
+  // accepted. Preserve the operation's expected model in that case, while
+  // still rejecting an explicitly reported substitution below.
+  const reportedModel = stringValue(value.model, args.model_override);
+  const model = reportedModel ?? expectedModel ?? MODEL;
   assert(planId, 502, "livepeer_invalid_estimate", "Livepeer Creative returned no plan identifier.");
   assert(cost !== undefined && cost >= 0 && cost <= MAX_RENDER_USD, 502, "livepeer_invalid_estimate", "Livepeer Creative returned an unusable estimate.");
+  if (expectedModel) assert(model === expectedModel, 502, "livepeer_model_mismatch", "Livepeer Creative returned an unexpected cutout model.");
   return { planId, cost, model };
 }
 
@@ -95,6 +103,9 @@ function estimateView(record: EstimateRecord): CreativeEstimate {
     planId: record.planId,
     expiresAt: record.expiresAt,
     requestId: record.requestId,
+    operation: record.operation,
+    ...(record.sourceAssetId ? { sourceAssetId: record.sourceAssetId } : {}),
+    ...(record.sourceContentHash ? { sourceContentHash: record.sourceContentHash } : {}),
   };
 }
 
@@ -107,6 +118,8 @@ function responseJob(record: JobRecord): CreativeJob {
     estimatedCostUsd: record.estimatedCostUsd,
     ...(record.actualCostUsd === undefined ? {} : { actualCostUsd: record.actualCostUsd }),
     ...(record.model ? { model: record.model } : {}),
+    ...(record.operation ? { operation: record.operation } : {}),
+    ...(record.sourceAssetId ? { sourceAssetId: record.sourceAssetId } : {}),
     ...(record.warnings?.length ? { warnings: record.warnings } : {}),
     ...(record.error ? { error: record.error } : {}),
     ...(record.status === "succeeded" ? { imageUrl: `/api/creative/jobs/${encodeURIComponent(record.id)}/image` } : {}),
@@ -126,7 +139,7 @@ export function validateEstimateInput(value: Record<string, unknown>): { project
 export async function proposeEstimate(input: { projectId: string; revision: number; prompt: string; palette: CreativePalette; requestId: string }): Promise<CreativeEstimate> {
   if (!isLivepeerConfigured()) throw new CreativeAPIError(503, "livepeer_unconfigured", "Livepeer Creative is not configured.");
   const output = { aspectRatio: ASPECT_RATIO, format: "background" } as const;
-  const hash = bindingHash({ ...input, model: MODEL, output });
+  const hash = bindingHash({ ...input, model: MODEL, output, operation: "background" });
   const key = `estimate:${input.requestId}`;
   const existing = await readJournalSnapshot();
   const existingId = existing.idempotency[key];
@@ -176,6 +189,140 @@ export async function proposeEstimate(input: { projectId: string; revision: numb
     bindingHash: hash,
     createdAt: now.toISOString(),
     state: "proposed",
+    operation: "background",
+  };
+  const persisted = await withJournal((journal) => {
+    const concurrentID = journal.idempotency[key];
+    const concurrent = concurrentID ? journal.estimates[concurrentID] : undefined;
+    if (concurrent && concurrent.bindingHash === hash && new Date(concurrent.expiresAt).getTime() > Date.now()) return concurrent;
+    journal.estimates[record.id] = record;
+    journal.idempotency[key] = record.id;
+    return record;
+  });
+  return estimateView(persisted);
+}
+
+const CUTOUT_MODEL = "bg-remove";
+const CUTOUT_PROMPT = "Remove only the background from the supplied subject photo. Preserve the subject's original pixels, edges, colors, logos, and proportions. Return the subject on a transparent alpha background with no added styling, text, or objects.";
+const cutoutEstimateInFlight = new Map<string, { bindingHash: string; promise: Promise<CreativeEstimate> }>();
+
+function sourceAssetID(value: unknown): string {
+  return stringField(value, "source_asset_id", 200);
+}
+
+function sourceContentHash(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Uploads once per source asset identity and content hash under the journal lock. */
+export async function uploadSourceImage(input: { sourceAssetId: string; contentHash: string; bytes: Uint8Array; mimeType: string; filename: string }): Promise<SourceUploadRecord> {
+  if (!isLivepeerConfigured()) throw new CreativeAPIError(503, "livepeer_unconfigured", "Livepeer Creative is not configured.");
+  return withJournal(async (journal) => {
+    const existing = journal.sourceUploads[input.sourceAssetId];
+    if (existing) {
+      if (existing.contentHash !== input.contentHash) throw new CreativeAPIError(409, "creative_source_asset_conflict", "This source asset ID is already bound to different image bytes.");
+      return existing;
+    }
+    const result = await callLivepeerTool("upload_image", {
+      data: Buffer.from(input.bytes).toString("base64"),
+      mime_type: input.mimeType,
+      filename: input.filename,
+    });
+    const value = providerValue(result);
+    const url = mediaURLFrom(value, true);
+    assert(url && isTrustedImageURL(url), 502, "livepeer_invalid_upload", "Livepeer Creative returned an invalid uploaded image URL.");
+    const record: SourceUploadRecord = {
+      sourceAssetId: input.sourceAssetId,
+      contentHash: input.contentHash,
+      url,
+      mimeType: input.mimeType,
+      filename: input.filename,
+      createdAt: new Date().toISOString(),
+    };
+    journal.sourceUploads[input.sourceAssetId] = record;
+    return record;
+  });
+}
+
+export function validateCutoutMetadata(value: { projectId: unknown; revision: unknown; requestId: unknown; sourceAssetId: unknown }): { projectId: string; revision: number; requestId: string; sourceAssetId: string } {
+  return {
+    projectId: stringField(value.projectId, "project_id", 200),
+    revision: projectRevision(value.revision),
+    requestId: stringField(value.requestId, "request_id", 200),
+    sourceAssetId: sourceAssetID(value.sourceAssetId),
+  };
+}
+
+export function proposeCutoutEstimate(input: { projectId: string; revision: number; requestId: string; sourceAssetId: string; bytes: Uint8Array; mimeType: string; filename: string }): Promise<CreativeEstimate> {
+  if (!isLivepeerConfigured()) throw new CreativeAPIError(503, "livepeer_unconfigured", "Livepeer Creative is not configured.");
+  const contentHash = sourceContentHash(input.bytes);
+  const output = { format: "cutout" } as const;
+  const hash = bindingHash({ projectId: input.projectId, revision: input.revision, prompt: CUTOUT_PROMPT, model: CUTOUT_MODEL, output, operation: "cutout", sourceAssetId: input.sourceAssetId, sourceContentHash: contentHash });
+  const key = `estimate:cutout:${input.requestId}`;
+  const active = cutoutEstimateInFlight.get(key);
+  if (active) {
+    if (active.bindingHash !== hash) return Promise.reject(new CreativeAPIError(409, "creative_idempotency_conflict", "This request ID is already bound to different cutout input."));
+    return active.promise;
+  }
+  const promise = proposeCutoutEstimateInternal(input, contentHash, hash, key);
+  cutoutEstimateInFlight.set(key, { bindingHash: hash, promise });
+  void promise.finally(() => {
+    const current = cutoutEstimateInFlight.get(key);
+    if (current?.promise === promise) cutoutEstimateInFlight.delete(key);
+  }).catch(() => undefined);
+  return promise;
+}
+
+async function proposeCutoutEstimateInternal(input: { projectId: string; revision: number; requestId: string; sourceAssetId: string; bytes: Uint8Array; mimeType: string; filename: string }, contentHash: string, hash: string, key: string): Promise<CreativeEstimate> {
+  const output = { format: "cutout" } as const;
+  const existing = await readJournalSnapshot();
+  const existingID = existing.idempotency[key];
+  const existingEstimate = existingID ? existing.estimates[existingID] : undefined;
+  if (existingEstimate) {
+    if (existingEstimate.bindingHash !== hash) throw new CreativeAPIError(409, "creative_idempotency_conflict", "This request ID is already bound to different cutout input.");
+    if (new Date(existingEstimate.expiresAt).getTime() > Date.now()) return estimateView(existingEstimate);
+  }
+  const upload = await uploadSourceImage({ sourceAssetId: input.sourceAssetId, contentHash, bytes: input.bytes, mimeType: input.mimeType, filename: input.filename });
+  const stepRequestId = `creative-cutout-${createHash("sha256").update(`${hash}:${input.requestId}`).digest("hex").slice(0, 40)}`;
+  const result = await callLivepeerTool("submit_plan", {
+    goal: "Batch Relay Creative transparent athlete cutout proposal",
+    budget_usd: MAX_RENDER_USD,
+    steps: [{
+      tool: "create_media",
+      label: "Remove the supplied photo background",
+      args: {
+        action: "generate",
+        model_override: CUTOUT_MODEL,
+        source_url: upload.url,
+        prompt: CUTOUT_PROMPT,
+        max_cost_usd: MAX_RENDER_USD,
+        max_quality_retries: 0,
+        quality_gate: false,
+        idempotency_key: stepRequestId,
+        session_id: `batch-relay-creative:${input.projectId}`,
+      },
+    }],
+  });
+  const providerEstimate = estimateFromProvider(result, CUTOUT_MODEL);
+  const now = new Date();
+  const record: EstimateRecord = {
+    id: `est_${randomUUID().replaceAll("-", "")}`,
+    projectId: input.projectId,
+    revision: input.revision,
+    prompt: CUTOUT_PROMPT,
+    output,
+    estimatedCostUsd: providerEstimate.cost,
+    model: providerEstimate.model,
+    planId: providerEstimate.planId,
+    expiresAt: new Date(now.getTime() + ESTIMATE_TTL_MS).toISOString(),
+    requestId: input.requestId,
+    bindingHash: hash,
+    createdAt: now.toISOString(),
+    state: "proposed",
+    operation: "cutout",
+    sourceAssetId: input.sourceAssetId,
+    sourceContentHash: contentHash,
+    sourceURL: upload.url,
   };
   const persisted = await withJournal((journal) => {
     const concurrentID = journal.idempotency[key];
@@ -200,14 +347,14 @@ function jobIDFrom(value: unknown): string | undefined {
   return undefined;
 }
 
-function mediaURLFrom(value: unknown): string | undefined {
+function mediaURLFrom(value: unknown, includeSourceURL = false): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const object = value as Record<string, unknown>;
-  const direct = stringValue(object.url, object.image_url, object.imageUrl, object.media_url, object.mediaUrl, object.output_url, object.outputUrl, object.source_url, object.sourceUrl);
+  const direct = stringValue(object.url, object.image_url, object.imageUrl, object.media_url, object.mediaUrl, object.output_url, object.outputUrl, ...(includeSourceURL ? [object.source_url, object.sourceUrl] : []));
   if (direct && /^https:\/\//i.test(direct)) return direct;
   for (const child of Object.values(object)) {
-    if (Array.isArray(child)) for (const item of child) { const found = mediaURLFrom(item); if (found) return found; }
-    else { const found = mediaURLFrom(child); if (found) return found; }
+    if (Array.isArray(child)) for (const item of child) { const found = mediaURLFrom(item, includeSourceURL); if (found) return found; }
+    else { const found = mediaURLFrom(child, includeSourceURL); if (found) return found; }
   }
   return undefined;
 }
@@ -284,6 +431,8 @@ export async function executeEstimate(input: { estimateId: string; requestId: st
       reservationState: "held",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      operation: estimate.operation ?? "background",
+      ...(estimate.sourceAssetId ? { sourceAssetId: estimate.sourceAssetId } : {}),
     };
     estimate.state = "executing";
     journal.jobs[job.id] = job;
@@ -369,7 +518,7 @@ export async function getCreativeJob(id: string): Promise<CreativeJob> {
   }
 }
 
-export async function getStoredImageURL(id: string): Promise<{ url: string; host: string }> {
+export async function getStoredImageURL(id: string): Promise<{ url: string; host: string; operation?: CreativeOperation }> {
   assert(/^job_[A-Za-z0-9]+$/.test(id), 400, "creative_job_invalid", "The creative job ID is invalid.");
   const journal = await readJournalSnapshot();
   const job = journal.jobs[id];
@@ -378,7 +527,7 @@ export async function getStoredImageURL(id: string): Promise<{ url: string; host
   let url: URL;
   try { url = new URL(job.imageUrl); } catch { throw new CreativeAPIError(502, "creative_image_invalid", "The generated background URL is invalid."); }
   assert(isTrustedImageURL(url), 502, "creative_image_untrusted", "The generated background host is not trusted.");
-  return { url: url.toString(), host: url.hostname };
+  return { url: url.toString(), host: url.hostname, operation: job.operation };
 }
 
 /** Validate each image URL and redirect destination against an operator-owned allowlist. */

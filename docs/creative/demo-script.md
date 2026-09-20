@@ -23,3 +23,13 @@ show the estimate before the person approves it.
 The browser agent should never be left waiting through a provider render.
 Use the job check tool for progress and show failures honestly. A live demo
 requires a configured server environment and a fresh estimate for each render.
+
+## Cutout demonstration
+
+Before generating a background, show the original photograph, choose Upload
+photo & estimate, explain that a processing copy goes to Livepeer, then display
+the returned cost. Approve the quoted removal. Review the real transparent
+result, apply it, and show the generated scene through the removed background.
+Restore the original, then reapply the existing cutout without another render.
+Reload and verify both assets survive. Do not describe generated smoke or
+source-based refinement as available until those separate phases ship.

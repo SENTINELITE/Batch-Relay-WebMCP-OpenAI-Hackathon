@@ -91,6 +91,17 @@
 .transformControl { display: grid; grid-template-columns: 38px 1fr 42px; align-items: center; gap: 8px; color: var(--muted); font: 10px/1 var(--font-geist-mono), monospace; }
 .transformControl input { width: 100%; accent-color: var(--orange); }
 .transformValue { color: var(--dim); text-align: right; }
+.cutoutDisclosure { margin: 13px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.cutoutAction { width: 100%; margin-top: 9px; }
+.cutoutCandidates { display: grid; gap: 8px; margin-top: 12px; }
+.cutoutCard { display: grid; grid-template-columns: 54px 1fr; gap: 9px; align-items: center; padding: 8px; border: 1px solid var(--line); background: #111818; }
+.cutoutThumb { width: 54px; height: 54px; object-fit: contain; background-color: #d6ded9; background-image: linear-gradient(45deg, #b9c3bd 25%, transparent 25%), linear-gradient(-45deg, #b9c3bd 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #b9c3bd 75%), linear-gradient(-45deg, transparent 75%, #b9c3bd 75%); background-size: 12px 12px; background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+}
+.cutoutMeta { min-width: 0; display: grid; gap: 4px; }
+.cutoutMeta strong { color: var(--ink); font-size: 10px; }
+.cutoutMeta span { color: var(--dim); font: 9px/1.25 var(--font-geist-mono), monospace; }
+.cutoutMeta button { min-height: 25px; color: var(--ink); border: 1px solid var(--line); background: transparent; font-size: 10px; }
+.cutoutMeta button:disabled { opacity: .42; cursor: not-allowed; }
 
 .main { min-width: 0; padding: 25px clamp(20px, 4vw, 60px) 40px; background: radial-gradient(circle at 50% 15%, rgb(42 69 65 / .13), transparent 45%), var(--desk); }
 .canvasBar { display: flex; justify-content: space-between; align-items: center; gap: 14px; margin-bottom: 18px; }

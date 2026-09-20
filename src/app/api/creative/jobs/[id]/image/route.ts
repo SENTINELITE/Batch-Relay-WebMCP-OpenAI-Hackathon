@@ -7,7 +7,7 @@ const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
 const RASTER_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/avif", "image/gif", "image/bmp", "image/tiff"]);
 
-async function boundedImageFetch(startURL: string, signal: AbortSignal): Promise<{ bytes: Uint8Array; contentType: string }> {
+async function boundedImageFetch(startURL: string, signal: AbortSignal, operation?: "background" | "cutout"): Promise<{ bytes: Uint8Array; contentType: string }> {
   let currentURL = new URL(startURL);
   for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
     if (!isTrustedImageURL(currentURL)) throw new CreativeAPIError(502, "creative_image_untrusted", "The generated background host is not trusted.");
@@ -42,6 +42,9 @@ async function boundedImageFetch(startURL: string, signal: AbortSignal): Promise
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
     const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     if (!contentType || !RASTER_IMAGE_TYPES.has(contentType)) throw new CreativeAPIError(502, "creative_image_invalid", "The generated background is not a supported raster image.");
+    if (operation === "cutout" && !new Set(["image/png", "image/webp", "image/avif", "image/gif"]).has(contentType)) {
+      throw new CreativeAPIError(502, "creative_cutout_alpha_invalid", "The cutout provider result does not preserve a transparent-capable raster format.");
+    }
     return { bytes, contentType };
   }
   throw new CreativeAPIError(502, "creative_image_redirect_limit", "The generated background redirected too many times.");
@@ -50,11 +53,11 @@ async function boundedImageFetch(startURL: string, signal: AbortSignal): Promise
 export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     await requireCreativeSession();
-    const { url } = await getStoredImageURL((await params).id);
+    const { url, operation } = await getStoredImageURL((await params).id);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 20_000);
     try {
-      const { bytes, contentType } = await boundedImageFetch(url, controller.signal);
+      const { bytes, contentType } = await boundedImageFetch(url, controller.signal, operation);
       const responseBody = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(responseBody).set(bytes);
       return new Response(responseBody, {

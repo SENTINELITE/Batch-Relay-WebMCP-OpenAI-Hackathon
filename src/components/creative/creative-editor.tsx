@@ -8,17 +8,18 @@ import {
   subscribeToCreativeWebMcpActions,
   type CreativeWebMcpActionRequest,
 } from "@/webmcp/creative/bridge";
-import { applyBackground, createProject, updateProject } from "@/lib/creative/project";
+import { applyAthleteCutout, applyBackground, createProject, restoreOriginalAthlete, updateProject } from "@/lib/creative/project";
 import { exportCreativePng, renderCreative } from "@/lib/creative/renderer";
 import { createIndexedDbCreativePersistence, loadCreativeProject, saveCreativeProject } from "@/lib/creative/persistence";
-import type { CreativeAssetReference, CreativeFormat, CreativeProject } from "@/lib/creative/types";
+import type { CreativeAssetReference, CreativeCutoutCandidate, CreativeFormat, CreativeProject } from "@/lib/creative/types";
 
 type Format = CreativeFormat;
 type JobStatus = "idle" | "estimating" | "quoted" | "queued" | "running" | "succeeded" | "failed" | "unconfigured";
 
 type Project = CreativeProject;
+type CutoutCandidate = CreativeCutoutCandidate;
 
-type Quote = { id: string; cost: number; expiresAt?: string; model?: string; prompt: string; revision: number; requestId: string };
+type Quote = { id: string; cost: number; expiresAt?: string; model?: string; prompt: string; revision: number; requestId: string; operation: "background" | "cutout"; sourceAssetId?: string };
 type ExportResult = { url: string; filename: string; width: number; height: number; size: number };
 
 type HistoryState = { project: Project; past: Project[]; future: Project[] };
@@ -73,6 +74,8 @@ const initialSeed = (() => {
     athlete: assetReference("athlete", "sample-athlete", "Rishab.jpg", "image/jpeg", "sample", sampleAthlete),
     logo: assetReference("logo", "sample-logo", "Batch Relay lockup", "image/svg+xml", "sample", sampleLogo),
   };
+  seed.athleteOriginal = seed.assets.athlete;
+  seed.athleteCutoutCandidates = [];
   seed.backgroundCandidates = [{ id: "sample-01", asset: background, prompt: seed.brief, createdAt: seed.createdAt, status: "ready", warning: "Previously generated sample; no new provider render was used." }];
   return seed;
 })();
@@ -83,6 +86,48 @@ const initialProject: Project = {
 
 function formatCost(value: number) {
   return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}
+
+function imageElementFromBlob(blob: Blob): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const image = new Image();
+    image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error("The photograph could not be prepared.")); };
+    image.src = url;
+  });
+}
+
+async function prepareCutoutCopy(url: string): Promise<Blob> {
+  const source = await (await fetch(url)).blob();
+  const image = await imageElementFromBlob(source);
+  const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
+  for (const quality of [0.82, 0.72, 0.62, 0.52, 0.42]) {
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+    if (blob && blob.size <= 900 * 1024) return blob;
+  }
+  throw new Error("This photograph is still larger than 900 KiB after preparation.");
+}
+
+async function hasValidCutoutAlpha(blob: Blob): Promise<boolean> {
+  if (typeof createImageBitmap !== "function") throw new Error("This browser cannot verify transparent pixels.");
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas"); canvas.width = bitmap.width; canvas.height = bitmap.height;
+  const context = canvas.getContext("2d"); if (!context) { bitmap.close(); throw new Error("The cutout could not be inspected."); }
+  context.drawImage(bitmap, 0, 0); bitmap.close();
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  let transparent = false;
+  let visible = false;
+  for (let index = 3; index < pixels.length; index += 4) {
+    if (pixels[index] < 8) transparent = true;
+    if (pixels[index] > 247) visible = true;
+    if (transparent && visible) return true;
+  }
+  return false;
 }
 
 export default function CreativeEditor() {
@@ -96,6 +141,7 @@ export default function CreativeEditor() {
   const [exportError, setExportError] = useState<string | null>(null);
   const [lastExport, setLastExport] = useState<ExportResult | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
+  const [pendingOperation, setPendingOperation] = useState<"background" | "cutout" | null>(null);
   const [providerConfigured, setProviderConfigured] = useState(true);
   const [showPasscode, setShowPasscode] = useState(false);
   const [passcode, setPasscode] = useState("");
@@ -104,6 +150,7 @@ export default function CreativeEditor() {
   const hydrated = useRef(false);
   const previewCanvas = useRef<HTMLCanvasElement | null>(null);
   const pollInFlight = useRef(false);
+  const approveInFlight = useRef(false);
   const exportUrl = useRef<string | null>(null);
 
   useEffect(() => () => {
@@ -117,8 +164,11 @@ export default function CreativeEditor() {
       if (cancelled) return;
       if (saved) {
         const urls: Record<string, string> = {};
-        for (const slot of ["background", "athlete", "logo"] as const) {
-          const asset = saved.assets[slot];
+        const assetsToHydrate = [
+          ...(["background", "athlete", "logo"] as const).map((slot) => saved.assets[slot]),
+          saved.athleteOriginal,
+        ];
+        for (const asset of assetsToHydrate) {
           if (!asset) continue;
           if (asset.url) urls[asset.blobKey] = asset.url;
           const blob = await persistence.current.loadAssetBlob(asset.blobKey);
@@ -129,11 +179,17 @@ export default function CreativeEditor() {
           const blob = await persistence.current.loadAssetBlob(candidate.asset.blobKey);
           if (blob) urls[candidate.asset.blobKey] = URL.createObjectURL(blob);
         }
+        const savedCutouts = saved.athleteCutoutCandidates ?? [];
+        for (const candidate of savedCutouts) {
+          if (candidate.asset.url) urls[candidate.asset.blobKey] = candidate.asset.url;
+          const blob = await persistence.current.loadAssetBlob(candidate.asset.blobKey);
+          if (blob) urls[candidate.asset.blobKey] = URL.createObjectURL(blob);
+        }
         setAssetUrls(urls);
         dispatchHistory({ type: "replace", project: saved });
         setRecovered(true);
         const pending = saved.generationRefs.find((reference) => reference.status === "queued" || reference.status === "running");
-        if (pending) { setJobId(pending.id); setStatus("running"); setStatusMessage("Resuming background generation…"); }
+        if (pending) { setJobId(pending.id); setPendingOperation(pending.target === "athlete" ? "cutout" : "background"); setStatus("running"); setStatusMessage(pending.target === "athlete" ? "Resuming athlete cutout…" : "Resuming background generation…"); }
       } else {
         await saveCreativeProject(initialProject, {}, persistence.current);
       }
@@ -165,8 +221,13 @@ export default function CreativeEditor() {
   const switchLayout = useCallback((format: Format) => commit((current) => updateProject(current, { format })), [commit]);
   const applyCandidate = useCallback((id: string) => commit((current) => {
     const candidate = current.backgroundCandidates.find((item) => item.id === id);
-    return candidate ? applyBackground(current, candidate) : current;
+    return candidate?.status === "ready" ? applyBackground(current, candidate) : current;
   }), [commit]);
+  const applyCutoutCandidate = useCallback((id: string) => commit((current) => {
+    const candidate = current.athleteCutoutCandidates?.find((item) => item.id === id);
+    return candidate ? applyAthleteCutout(current, candidate) : current;
+  }), [commit]);
+  const restoreAthlete = useCallback(() => commit((current) => restoreOriginalAthlete(current)), [commit]);
 
   const updateAthleteTransform = useCallback((key: "x" | "y" | "scale", value: number) => {
     commit((current) => {
@@ -203,7 +264,7 @@ export default function CreativeEditor() {
       const response = await fetch("/api/creative/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ projectId: project.id, revision: requestedRevision, prompt, palette: { primary: palette.primary, accent: palette.accent }, requestId: estimateRequestId }) });
       const data = await response.json() as { id?: string; estimatedCostUsd?: number; expiresAt?: string; model?: string; error?: string };
       if (!response.ok || !data.id) throw new Error(data.error || "Estimate unavailable");
-      const nextQuote = { id: data.id, cost: data.estimatedCostUsd ?? 0.1, expiresAt: data.expiresAt, model: data.model, prompt, revision: requestedRevision, requestId: `${data.id}:execute` };
+      const nextQuote = { id: data.id, cost: data.estimatedCostUsd ?? 0.1, expiresAt: data.expiresAt, model: data.model, prompt, revision: requestedRevision, requestId: `${data.id}:execute`, operation: "background" as const };
       setQuote(nextQuote);
       setStatus("quoted"); setStatusMessage("Estimate ready · approval required");
       return nextQuote;
@@ -214,19 +275,36 @@ export default function CreativeEditor() {
   }, [project, providerConfigured]);
 
   const approveQuote = useCallback(async () => {
-    if (!quote) return;
+    if (!quote || approveInFlight.current || status === "queued" || status === "running") return;
     if (quote.revision !== project.revision) {
       setGenerationError("This estimate belongs to an earlier revision. Request a new estimate before rendering.");
       setStatus("failed"); setStatusMessage("Estimate is out of date"); return;
     }
-    setStatus("queued"); setStatusMessage("Submitting approved background request…"); setGenerationError(null);
+    if (quote.operation === "cutout" && quote.sourceAssetId !== (project.athleteOriginal?.id ?? project.assets.athlete?.id)) {
+      setGenerationError("This cutout estimate belongs to an earlier photograph. Upload or choose the current photograph and request a new estimate.");
+      setStatus("failed"); setStatusMessage("Cutout estimate is out of date"); return;
+    }
+    approveInFlight.current = true;
+    setStatus("queued"); setPendingOperation(quote.operation); setStatusMessage(quote.operation === "cutout" ? "Submitting approved cutout request…" : "Submitting approved background request…"); setGenerationError(null);
     try {
-      const response = await fetch("/api/creative/generate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ estimateId: quote.id, requestId: quote.requestId, projectId: project.id, revision: quote.revision }) });
+      const response = await fetch("/api/creative/generate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ estimateId: quote.id, requestId: quote.requestId, projectId: project.id, revision: quote.revision, operation: quote.operation }) });
       const data = await response.json() as { id?: string; error?: string };
       if (!response.ok || !data.id) throw new Error(data.error || "Render could not be queued");
       const job = data.id;
-      setJobId(job); setStatus("running"); setStatusMessage("Livepeer is preparing a background…"); setQuote(null);
+      setJobId(job); setStatus("running"); setStatusMessage(quote.operation === "cutout" ? "Livepeer is removing the athlete background…" : "Livepeer is preparing a background…"); setQuote(null);
       const candidateId = `candidate-${job}`;
+      if (quote.operation === "cutout") {
+        const sourceAssetId = quote.sourceAssetId as string;
+        commit((current) => {
+          const typed = current;
+          const candidate: CutoutCandidate = { id: candidateId, asset: assetReference("athlete", candidateId, "Athlete cutout", "image/png", "generated", "", `creative/${candidateId}`), prompt: quote.prompt, createdAt: new Date().toISOString(), generationId: job, status: "pending", sourceAssetId };
+          const next = updateProject(current, { generationRefs: [...current.generationRefs, { id: job, candidateId, prompt: quote.prompt, estimatedCostUsd: quote.cost, model: quote.model, status: "running", createdAt: new Date().toISOString(), target: "athlete", sourceAssetId }] });
+          next.athleteOriginal = typed.athleteOriginal ?? current.assets.athlete;
+          next.athleteCutoutCandidates = [...(typed.athleteCutoutCandidates ?? []), candidate];
+          return next;
+        });
+        return;
+      }
       commit((current) => updateProject(current, {
         backgroundCandidates: [...current.backgroundCandidates, {
           id: candidateId,
@@ -236,12 +314,14 @@ export default function CreativeEditor() {
           generationId: job,
           status: "pending",
         }],
-        generationRefs: [...current.generationRefs, { id: job, candidateId, prompt: quote.prompt, estimatedCostUsd: quote.cost, model: quote.model, status: "running", createdAt: new Date().toISOString() }],
+        generationRefs: [...current.generationRefs, { id: job, candidateId, prompt: quote.prompt, estimatedCostUsd: quote.cost, model: quote.model, status: "running", createdAt: new Date().toISOString(), target: "background" }],
       }));
     } catch (error) {
-      setStatus("failed"); setStatusMessage("Render was not started"); setGenerationError(error instanceof Error ? error.message : "Unknown render error");
+      setStatus("failed"); setPendingOperation(null); setStatusMessage("Render was not started"); setGenerationError(error instanceof Error ? error.message : "Unknown render error");
+    } finally {
+      approveInFlight.current = false;
     }
-  }, [commit, project.id, project.revision, quote]);
+  }, [commit, project.assets.athlete?.id, project.athleteOriginal?.id, project.id, project.revision, quote, status]);
 
   useEffect(() => {
     if (!jobId || !["running", "queued"].includes(status)) return;
@@ -258,10 +338,43 @@ export default function CreativeEditor() {
         const data = await response.json() as { status?: string; imageUrl?: string; error?: string; warnings?: string[] };
         if (cancelled) return;
         if (data.status === "succeeded") {
+          if (pendingOperation === "cutout") {
+            const candidate = (project.athleteCutoutCandidates ?? []).find((item) => item.generationId === jobId);
+            if (!candidate || candidate.sourceAssetId !== (project.athleteOriginal?.id ?? project.assets.athlete?.id) || !data.imageUrl) {
+              setStatus("failed"); setStatusMessage("Cutout no longer matches this photograph"); setGenerationError("Upload changes made this cutout obsolete. Request a new cutout for the current photograph."); setJobId(null); setPendingOperation(null); return;
+            }
+            try {
+              const imageResponse = await fetch(data.imageUrl);
+              if (imageResponse.status === 401) { setProviderConfigured(false); setStatus("unconfigured"); setStatusMessage("Live generation session expired; unlock to resume"); setShowPasscode(true); return; }
+              if (!imageResponse.ok) throw new Error("Image proxy did not return the cutout.");
+              const blob = await imageResponse.blob();
+              if (!(await hasValidCutoutAlpha(blob))) throw new Error("The returned cutout did not contain both transparent and visible pixels.");
+              if (cancelled) return;
+              await persistence.current.saveAssetBlob(candidate.asset.blobKey, blob);
+              if (cancelled) return;
+              const localUrl = URL.createObjectURL(blob);
+              setAssetUrls((current) => ({ ...current, [candidate.asset.blobKey]: localUrl }));
+              commit((current) => {
+                const next = updateProject(current, { generationRefs: current.generationRefs.map((item) => item.id === jobId ? { ...item, status: "succeeded" } : item) });
+                next.athleteOriginal = current.athleteOriginal ?? current.assets.athlete;
+                next.athleteCutoutCandidates = (current.athleteCutoutCandidates ?? []).map((item) => item.id === candidate.id ? { ...item, status: "ready", warning: "Cutout ready; review before applying.", asset: { ...item.asset, url: data.imageUrl, mimeType: blob.type || item.asset.mimeType } } : item);
+                return next;
+              });
+              setStatus("succeeded"); setStatusMessage("Athlete cutout ready for review"); setJobId(null); setPendingOperation(null); return;
+            } catch (error) {
+              commit((current) => {
+                const next = updateProject(current, { generationRefs: current.generationRefs.map((item) => item.id === jobId ? { ...item, status: "failed" } : item) });
+                next.athleteOriginal = current.athleteOriginal ?? current.assets.athlete;
+                next.athleteCutoutCandidates = (current.athleteCutoutCandidates ?? []).map((item) => item.id === candidate.id ? { ...item, status: "failed", warning: error instanceof Error ? error.message : "Cutout validation failed." } : item);
+                return next;
+              });
+              setStatus("failed"); setStatusMessage("Cutout validation failed"); setGenerationError(error instanceof Error ? error.message : "Cutout validation failed."); setJobId(null); setPendingOperation(null); return;
+            }
+          }
           const candidateId = `candidate-${jobId}`;
           const candidate = project.backgroundCandidates.find((item) => item.id === candidateId);
           if (!candidate || !data.imageUrl) {
-            setStatus("failed"); setStatusMessage("Background render returned no image"); setGenerationError("The provider finished without a retrievable image."); setJobId(null); return;
+            setStatus("failed"); setPendingOperation(null); setStatusMessage("Background render returned no image"); setGenerationError("The provider finished without a retrievable image."); setJobId(null); return;
           }
           let completedMimeType = candidate.asset.mimeType;
           try {
@@ -282,20 +395,20 @@ export default function CreativeEditor() {
               backgroundCandidates: current.backgroundCandidates.map((item) => item.id === candidateId ? { ...item, status: "failed", warning: error instanceof Error ? error.message : "Rendered image could not be stored." } : item),
               generationRefs: current.generationRefs.map((item) => item.id === jobId ? { ...item, status: "failed" } : item),
             }));
-            setStatus("failed"); setStatusMessage("Rendered image could not be stored"); setGenerationError(error instanceof Error ? error.message : "Rendered image could not be stored."); setJobId(null); return;
+            setStatus("failed"); setPendingOperation(null); setStatusMessage("Rendered image could not be stored"); setGenerationError(error instanceof Error ? error.message : "Rendered image could not be stored."); setJobId(null); return;
           }
           commit((current) => updateProject(current, {
             backgroundCandidates: current.backgroundCandidates.map((item) => item.id === candidateId ? { ...item, status: "ready", warning: "Live render ready; review before applying.", asset: { ...item.asset, url: data.imageUrl, mimeType: completedMimeType } } : item),
             generationRefs: current.generationRefs.map((item) => item.id === jobId ? { ...item, status: "succeeded" } : item),
           }));
-          setStatus("succeeded"); setStatusMessage("Background ready for review"); setJobId(null);
+          setStatus("succeeded"); setPendingOperation(null); setStatusMessage("Background ready for review"); setJobId(null);
         } else if (data.status === "failed" || data.status === "unknown") {
           const candidateId = `candidate-${jobId}`;
           commit((current) => updateProject(current, {
             backgroundCandidates: current.backgroundCandidates.map((item) => item.id === candidateId ? { ...item, status: "failed", warning: data.error || "Provider returned no artwork." } : item),
             generationRefs: current.generationRefs.map((item) => item.id === jobId ? { ...item, status: data.status === "unknown" ? "unknown" : "failed" } : item),
           }));
-          setStatus("failed"); setStatusMessage("Background render failed"); setGenerationError(data.error || "Provider returned no artwork"); setJobId(null);
+          setStatus("failed"); setPendingOperation(null); setStatusMessage("Background render failed"); setGenerationError(data.error || "Provider returned no artwork"); setJobId(null);
         }
       } catch { /* transient poll errors keep the pending job recoverable */ }
       finally { pollInFlight.current = false; }
@@ -303,13 +416,33 @@ export default function CreativeEditor() {
     const timer = window.setInterval(() => void poll(), 1800);
     void poll();
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [commit, jobId, project.backgroundCandidates, status]);
+  }, [commit, jobId, pendingOperation, project.athleteCutoutCandidates, project.backgroundCandidates, project.assets.athlete?.id, project.athleteOriginal?.id, status]);
 
   const resolvedAssets = useMemo(() => ({
     background: project.assets.background ? assetUrls[project.assets.background.blobKey] ?? assetUrls[project.assets.background.id] ?? project.assets.background.url : undefined,
     athlete: project.assets.athlete ? assetUrls[project.assets.athlete.blobKey] ?? assetUrls[project.assets.athlete.id] ?? project.assets.athlete.url : undefined,
     logo: project.assets.logo ? assetUrls[project.assets.logo.blobKey] ?? assetUrls[project.assets.logo.id] ?? project.assets.logo.url : undefined,
   }), [assetUrls, project.assets]);
+
+  const proposeCutout = useCallback(async () => {
+    const source = project.athleteOriginal ?? project.assets.athlete;
+    const sourceUrl = source ? assetUrls[source.blobKey] ?? assetUrls[source.id] ?? source.url : undefined;
+    if (!source || typeof sourceUrl !== "string") { setGenerationError("Add a photograph before requesting a cutout."); return; }
+    if (!providerConfigured) { setStatus("unconfigured"); setStatusMessage("Live provider is not configured"); setShowPasscode(true); return; }
+    setGenerationError(null); setStatus("estimating"); setStatusMessage("Preparing a private cutout estimate…");
+    try {
+      const copy = await prepareCutoutCopy(sourceUrl);
+      const form = new FormData();
+      form.set("projectId", project.id); form.set("revision", String(project.revision)); form.set("requestId", crypto.randomUUID()); form.set("sourceAssetId", source.id); form.set("image", copy, "athlete-cutout.jpg");
+      const response = await fetch("/api/creative/cutouts/estimate", { method: "POST", body: form });
+      const data = await response.json() as { id?: string; estimatedCostUsd?: number; expiresAt?: string; model?: string; error?: string; operation?: string; sourceAssetId?: string };
+      if (!response.ok || !data.id) throw new Error(data.error || "Cutout estimate unavailable");
+      const nextQuote: Quote = { id: data.id, cost: data.estimatedCostUsd ?? 0.1, expiresAt: data.expiresAt, model: data.model, prompt: "Remove the background from the supplied athlete photograph while preserving the subject.", revision: project.revision, requestId: `${data.id}:execute`, operation: "cutout", sourceAssetId: data.sourceAssetId || source.id };
+      setQuote(nextQuote); setStatus("quoted"); setStatusMessage("Cutout estimate ready · approval required");
+    } catch (error) {
+      setStatus("failed"); setStatusMessage("Cutout estimate could not be prepared"); setGenerationError(error instanceof Error ? error.message : "Cutout estimate unavailable");
+    }
+  }, [assetUrls, project, providerConfigured]);
 
   useEffect(() => {
     const canvas = previewCanvas.current;
@@ -416,7 +549,10 @@ export default function CreativeEditor() {
     const url = URL.createObjectURL(file);
     setAssetUrls((current) => ({ ...current, [blobKey]: url }));
     const reference = assetReference(kind, `${kind}-${crypto.randomUUID()}`, file.name, file.type || "application/octet-stream", "upload", url, blobKey);
-    commit((current) => updateProject(current, { assets: { ...current.assets, [kind]: reference } }));
+    commit((current) => {
+      const next = updateProject(current, { assets: { ...current.assets, [kind]: reference }, ...(kind === "athlete" ? { athleteOriginal: reference, athleteCutoutCandidates: [] } : {}) });
+      return next;
+    });
     await persistence.current.saveAssetBlob(blobKey, file);
   };
 
@@ -440,6 +576,9 @@ export default function CreativeEditor() {
             <label className={styles.upload}><input type="file" accept="image/png,image/jpeg" onChange={(event) => void updateUpload("athlete", event.target.files?.[0])} />{resolvedAssets.athlete ? <img className={styles.uploadThumb} src={resolvedAssets.athlete} alt="Athlete source preview" /> : <span className={styles.uploadMark}>+</span>}<span className={styles.uploadText}><strong>Photograph</strong><span>PNG / JPEG · pixels retained</span></span></label>
             <label className={styles.upload} style={{ marginTop: 8 }}><input type="file" accept="image/png,image/svg+xml" onChange={(event) => void updateUpload("logo", event.target.files?.[0])} />{resolvedAssets.logo ? <img className={styles.uploadThumb} src={resolvedAssets.logo} alt="Logo source preview" /> : <span className={styles.uploadMark}>+</span>}<span className={styles.uploadText}><strong>Event logo</strong><span>PNG / SVG · independent layer</span></span></label>
             <div className={styles.transformControls} aria-label="Athlete placement controls"><span className={styles.tinyLabel}>ATHLETE PLACEMENT / {project.format.toUpperCase()}</span><label className={styles.transformControl}><span>X</span><input type="range" min="-0.1" max="0.8" step="0.01" value={project.layouts[project.format].athlete.x} onChange={(event) => updateAthleteTransform("x", Number(event.target.value))} /><span className={styles.transformValue}>{project.layouts[project.format].athlete.x.toFixed(2)}</span></label><label className={styles.transformControl}><span>Y</span><input type="range" min="-0.1" max="0.8" step="0.01" value={project.layouts[project.format].athlete.y} onChange={(event) => updateAthleteTransform("y", Number(event.target.value))} /><span className={styles.transformValue}>{project.layouts[project.format].athlete.y.toFixed(2)}</span></label><label className={styles.transformControl}><span>SIZE</span><input type="range" min="0.3" max="1.2" step="0.01" value={project.layouts[project.format].athlete.width} onChange={(event) => updateAthleteTransform("scale", Number(event.target.value))} /><span className={styles.transformValue}>{project.layouts[project.format].athlete.width.toFixed(2)}</span></label></div>
+            <p className={styles.cutoutDisclosure}>Background removal sends a copy of your photograph to Livepeer. Your original photo stays saved locally.</p><button className={`${styles.orangeButton} ${styles.cutoutAction}`} type="button" disabled={!project.assets.athlete || status === "estimating" || status === "running" || status === "queued"} onClick={() => void proposeCutout()}>Upload photo &amp; estimate</button>
+            {project.athleteOriginal && project.assets.athlete?.id !== project.athleteOriginal.id && <button className={styles.directionButton} type="button" style={{ marginTop: 8, width: "100%" }} onClick={restoreAthlete}>Restore original photo</button>}
+            {(project.athleteCutoutCandidates?.length ?? 0) > 0 && <div className={styles.cutoutCandidates} aria-label="Athlete cutout candidates">{project.athleteCutoutCandidates?.map((candidate) => { const sourceId = project.athleteOriginal?.id ?? project.assets.athlete?.id; const sourceMatches = candidate.sourceAssetId === sourceId; const candidateUrl = assetUrls[candidate.asset.blobKey] ?? candidate.asset.url; return <div className={styles.cutoutCard} key={candidate.id}>{candidateUrl ? <img className={styles.cutoutThumb} src={candidateUrl} alt="Athlete cutout candidate" /> : <div className={styles.cutoutThumb} aria-hidden="true" />}<div className={styles.cutoutMeta}><strong>{candidate.status === "ready" ? "Cutout ready" : candidate.status === "pending" ? "Cutout processing" : "Cutout unavailable"}</strong><span>{sourceMatches ? "Matches current photo" : "For an earlier photo"}</span>{candidate.warning && candidate.status === "failed" && <span>{candidate.warning}</span>}{candidate.status === "ready" && <button type="button" disabled={!sourceMatches} onClick={() => applyCutoutCandidate(candidate.id)}>Apply cutout</button>}</div></div>; })}</div>}
           </section>
           <section className={styles.railSection}><p className={styles.eyebrow}>04 / History</p><div className={styles.history}><button className={styles.iconButton} type="button" aria-label="Undo last change" disabled={!past.length} onClick={undo}>↶</button><button className={styles.iconButton} type="button" aria-label="Redo last change" disabled={!future.length} onClick={redo}>↷</button><span className={styles.recovery}><i className={styles.recoveryDot} />{recovered ? "Recovered locally" : "Saved locally"}</span></div></section>
         </aside>
@@ -450,7 +589,7 @@ export default function CreativeEditor() {
         </section>
 
         <aside className={`${styles.rail} ${styles.rightRail}`} aria-label="Background direction and exports">
-          <section className={styles.railSection}><div className={styles.sectionHeading}><p className={styles.eyebrow}>05 / Background direction</p><span className={styles.tinyLabel}>LIVEPEER</span></div><div className={styles.directionCard}><p className={styles.directionText}><strong>Describe the atmosphere.</strong> The supplied photograph, logo, and type stay local. A background proposal is quoted separately before any render.</p><div className={styles.field}><label htmlFor="creative-brief">Brief / revision note</label><textarea id="creative-brief" value={project.brief} onChange={(event) => updateBrief(event.target.value)} /></div><div className={styles.directionButtons}><button className={styles.directionButton} type="button" onClick={() => updateBrief(`${project.brief} More negative space behind the headline.`)}>+ Clear headline space</button><button className={styles.directionButton} type="button" onClick={() => updateBrief(`${project.brief} Add warmer sideline light.`)}>+ Warm the sideline light</button><button className={styles.orangeButton} type="button" disabled={status === "estimating" || status === "running" || status === "queued"} onClick={() => void createEstimate()}>{status === "estimating" ? "Preparing estimate…" : "Get a render estimate"}</button></div>{generationError && <div className={`${styles.notice} ${styles.noticeError}`} role="alert">{generationError}</div>}{status === "running" || status === "queued" ? <div className={styles.progress} aria-live="polite"><div className={styles.progressTrack}><div className={styles.progressFill} /></div><div className={styles.progressLabel}><span>Generating background</span><span>In progress</span></div></div> : null}</div>{quote && <div className={styles.quote}><div className={styles.quoteHeader}><span>Estimated cost</span><span>Review</span></div><div className={styles.quoteCost}>{formatCost(quote.cost)}</div><div className={styles.quoteMeta}>{quote.model || "fast background model"} · one render · no automatic retries</div><button className={styles.orangeButton} type="button" disabled={status === "queued" || status === "running"} onClick={() => void approveQuote()}>Approve &amp; render</button></div>}{status === "unconfigured" && <div className={styles.notice}>Live rendering is unavailable until setup is complete. Local editing and PNG export remain available.{showPasscode ? <form onSubmit={(event) => { event.preventDefault(); setSessionPending(true); void fetch("/api/creative/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ passcode }) }).then(async (response) => { if (!response.ok) { const body = await response.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || "Passcode was rejected"); } setProviderConfigured(true); setStatus(jobId ? "running" : "idle"); setStatusMessage(jobId ? "Live generation resumed" : "Live generation ready"); setGenerationError(null); setShowPasscode(false); }).catch((error) => { setGenerationError(error instanceof Error ? error.message : "Passcode was rejected"); setStatus("unconfigured"); }).finally(() => setSessionPending(false)); }}><div className={styles.field}><label htmlFor="provider-passcode">Passcode</label><input id="provider-passcode" type="password" value={passcode} onChange={(event) => setPasscode(event.target.value)} /><button className={styles.orangeButton} style={{ marginTop: 8, width: "100%" }} disabled={sessionPending} type="submit">{sessionPending ? "Unlocking…" : "Unlock live generation"}</button></div></form> : <button className={styles.directionButton} style={{ marginTop: 10, width: "100%" }} type="button" onClick={() => setShowPasscode(true)}>Unlock live generation</button>}</div>}</section>
+          <section className={styles.railSection}><div className={styles.sectionHeading}><p className={styles.eyebrow}>05 / Background direction</p><span className={styles.tinyLabel}>LIVEPEER</span></div><div className={styles.directionCard}><p className={styles.directionText}><strong>Describe the atmosphere.</strong> During background generation, your photograph, logo, and type stay local. A background proposal is quoted separately before any render.</p><div className={styles.field}><label htmlFor="creative-brief">Brief / revision note</label><textarea id="creative-brief" value={project.brief} onChange={(event) => updateBrief(event.target.value)} /></div><div className={styles.directionButtons}><button className={styles.directionButton} type="button" onClick={() => updateBrief(`${project.brief} More negative space behind the headline.`)}>+ Clear headline space</button><button className={styles.directionButton} type="button" onClick={() => updateBrief(`${project.brief} Add warmer sideline light.`)}>+ Warm the sideline light</button><button className={styles.orangeButton} type="button" disabled={status === "estimating" || status === "running" || status === "queued"} onClick={() => void createEstimate()}>{status === "estimating" ? "Preparing estimate…" : "Get a render estimate"}</button></div>{generationError && <div className={`${styles.notice} ${styles.noticeError}`} role="alert">{generationError}</div>}{status === "running" || status === "queued" ? <div className={styles.progress} aria-live="polite"><div className={styles.progressTrack}><div className={styles.progressFill} /></div><div className={styles.progressLabel}><span>{pendingOperation === "cutout" ? "Removing athlete background" : "Generating background"}</span><span>In progress</span></div></div> : null}</div>{quote && <div className={styles.quote}><div className={styles.quoteHeader}><span>Estimated cost</span><span>{quote.operation === "cutout" ? "Athlete cutout" : "Background"}</span></div><div className={styles.quoteCost}>{formatCost(quote.cost)}</div><div className={styles.quoteMeta}>{quote.model || "fast background model"} · one render · no automatic retries</div><button className={styles.orangeButton} type="button" disabled={status === "queued" || status === "running"} onClick={() => void approveQuote()}>{quote.operation === "cutout" ? "Approve cutout" : "Approve & render"}</button></div>}{status === "unconfigured" && <div className={styles.notice}>Live rendering is unavailable until setup is complete. Local editing and PNG export remain available.{showPasscode ? <form onSubmit={(event) => { event.preventDefault(); setSessionPending(true); void fetch("/api/creative/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ passcode }) }).then(async (response) => { if (!response.ok) { const body = await response.json().catch(() => ({})) as { error?: string }; throw new Error(body.error || "Passcode was rejected"); } setProviderConfigured(true); setStatus(jobId ? "running" : "idle"); setStatusMessage(jobId ? "Live generation resumed" : "Live generation ready"); setGenerationError(null); setShowPasscode(false); }).catch((error) => { setGenerationError(error instanceof Error ? error.message : "Passcode was rejected"); setStatus("unconfigured"); }).finally(() => setSessionPending(false)); }}><div className={styles.field}><label htmlFor="provider-passcode">Passcode</label><input id="provider-passcode" type="password" value={passcode} onChange={(event) => setPasscode(event.target.value)} /><button className={styles.orangeButton} style={{ marginTop: 8, width: "100%" }} disabled={sessionPending} type="submit">{sessionPending ? "Unlocking…" : "Unlock live generation"}</button></div></form> : <button className={styles.directionButton} style={{ marginTop: 10, width: "100%" }} type="button" onClick={() => setShowPasscode(true)}>Unlock live generation</button>}</div>}</section>
           <section className={styles.railSection}><div className={styles.sectionHeading}><p className={styles.eyebrow}>06 / Candidate review</p><span className={styles.tinyLabel}>{project.backgroundCandidates.length} OPTIONS</span></div>{project.backgroundCandidates.map((candidate, index) => { const applied = candidate.asset.id === project.assets.background?.id; const pending = candidate.status === "pending"; const candidateUrl = assetUrls[candidate.asset.blobKey] ?? assetUrls[candidate.asset.id] ?? candidate.asset.url; return <article className={`${styles.candidate} ${applied ? styles.selected : ""}`} key={candidate.id}><div className={`${styles.candidateVisual} ${index % 3 === 1 ? styles.alt : index % 3 === 2 ? styles.revision : ""}`}>{candidateUrl && <img className={styles.candidateImage} src={candidateUrl} alt="" />}<span>{pending ? "Rendering…" : candidate.asset.source === "sample" ? "Previously generated sample" : candidate.status === "ready" ? "Ready to review" : candidate.warning || "Unavailable"}</span></div><div className={styles.candidateInfo}><strong>{candidate.asset.name}</strong><span>{pending ? "PENDING" : candidate.asset.source === "sample" ? "LOCAL" : candidate.status === "ready" ? "NEW" : "FAILED"}</span></div>{candidate.status === "ready" && <button className={styles.candidateAction} type="button" onClick={() => applyCandidate(candidate.id)}>{applied ? "Applied to proof" : "Apply to proof"}</button>}</article>; })}</section>
           <section className={styles.railSection}><p className={styles.eyebrow}>07 / Export set</p><div className={styles.exportList}><button className={styles.exportButton} type="button" onClick={() => void exportArtwork("card").catch(() => undefined)}>Portrait social card <span>PNG · 1080 × 1350 ↗</span></button><button className={styles.exportButton} type="button" onClick={() => void exportArtwork("banner").catch(() => undefined)}>Digital banner <span>PNG · 1920 × 1080 ↗</span></button></div>{exportError && <div className={`${styles.notice} ${styles.noticeError}`} role="alert">{exportError}</div>}{lastExport && <div className={styles.exportResult}><img className={styles.exportPreview} src={lastExport.url} alt="Latest exported creative" /><div className={styles.exportDetails}><strong>{lastExport.filename}</strong><span>{lastExport.width} × {lastExport.height} · {(lastExport.size / 1024).toFixed(0)} KB</span><a className={styles.exportLink} href={lastExport.url} download={lastExport.filename}>Download this PNG</a></div></div>}</section>
         </aside>

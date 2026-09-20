@@ -1,4 +1,4 @@
-import type { CreativeAssetReference, CreativeProject } from "./types.ts";
+import type { CreativeAssetReference, CreativeCutoutCandidate, CreativeProject } from "./types.ts";
 
 export const CREATIVE_DB_NAME = "batch-relay-creative";
 export const CREATIVE_DB_VERSION = 1;
@@ -34,6 +34,17 @@ function isAssetReference(value: unknown): value is CreativeAssetReference {
     && typeof value.blobKey === "string";
 }
 
+function isCutoutCandidate(value: unknown): value is CreativeCutoutCandidate {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.sourceAssetId === "string"
+    && typeof value.prompt === "string"
+    && typeof value.createdAt === "string"
+    && isAssetReference(value.asset)
+    && value.asset.slot === "athlete"
+    && (value.status === undefined || value.status === "pending" || value.status === "ready" || value.status === "failed");
+}
+
 /** A shallow runtime guard prevents a corrupt browser record from reaching UI state. */
 export function isCreativeProject(value: unknown): value is CreativeProject {
   if (!isRecord(value)) return false;
@@ -49,6 +60,8 @@ export function isCreativeProject(value: unknown): value is CreativeProject {
     const asset = assets[key];
     if (asset !== undefined && !isAssetReference(asset)) return false;
   }
+  if (value.athleteOriginal !== undefined && (!isAssetReference(value.athleteOriginal) || value.athleteOriginal.slot !== "athlete")) return false;
+  if (value.athleteCutoutCandidates !== undefined && (!Array.isArray(value.athleteCutoutCandidates) || !value.athleteCutoutCandidates.every(isCutoutCandidate))) return false;
   if (!Array.isArray(value.backgroundCandidates) || !Array.isArray(value.generationRefs)) return false;
   if (!isRecord(layouts.card) || !isRecord(layouts.banner) || !Array.isArray(layouts.card.text) || !Array.isArray(layouts.banner.text)) return false;
   return typeof value.createdAt === "string" && typeof value.updatedAt === "string";
@@ -154,6 +167,8 @@ export function createIndexedDbCreativePersistence(options: {
         const keys = new Set<string>();
         for (const asset of Object.values(record.assets)) if (asset?.blobKey) keys.add(asset.blobKey);
         for (const candidate of record.backgroundCandidates) if (candidate.asset.blobKey) keys.add(candidate.asset.blobKey);
+        if (record.athleteOriginal?.blobKey) keys.add(record.athleteOriginal.blobKey);
+        for (const candidate of record.athleteCutoutCandidates ?? []) if (candidate.asset.blobKey) keys.add(candidate.asset.blobKey);
         for (const key of keys) blobStore.delete(key);
       }
       projectStore.delete(projectId);
@@ -189,6 +204,8 @@ export function createMemoryCreativePersistence(): CreativePersistence {
       if (project) {
         for (const asset of Object.values(project.assets)) if (asset?.blobKey) blobs.delete(asset.blobKey);
         for (const candidate of project.backgroundCandidates) blobs.delete(candidate.asset.blobKey);
+        if (project.athleteOriginal?.blobKey) blobs.delete(project.athleteOriginal.blobKey);
+        for (const candidate of project.athleteCutoutCandidates ?? []) blobs.delete(candidate.asset.blobKey);
       }
       projects.delete(projectId);
     },

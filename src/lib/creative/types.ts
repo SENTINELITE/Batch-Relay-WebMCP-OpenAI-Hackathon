@@ -108,6 +108,18 @@ export type CreativeBackgroundCandidate = {
   warning?: string;
 };
 
+/** A reviewed transparent athlete result tied to one exact source asset. */
+export type CreativeCutoutCandidate = {
+  id: string;
+  asset: CreativeAssetReference;
+  sourceAssetId: string;
+  prompt: string;
+  createdAt: string;
+  generationId?: string;
+  status?: "pending" | "ready" | "failed";
+  warning?: string;
+};
+
 export type CreativeGenerationReference = {
   id: string;
   candidateId?: string;
@@ -117,6 +129,8 @@ export type CreativeGenerationReference = {
   actualCostUsd?: number;
   status: "proposed" | "queued" | "running" | "succeeded" | "failed" | "unknown";
   createdAt: string;
+  target?: "athlete" | "background";
+  sourceAssetId?: string;
 };
 
 export type CreativeProject = {
@@ -129,6 +143,9 @@ export type CreativeProject = {
   assets: Partial<Record<CreativeAssetSlot, CreativeAssetReference>>;
   layouts: Record<CreativeFormat, CreativeFormatLayout>;
   backgroundCandidates: CreativeBackgroundCandidate[];
+  /** The supplied athlete, retained when a transparent cutout is applied. */
+  athleteOriginal?: CreativeAssetReference;
+  athleteCutoutCandidates?: CreativeCutoutCandidate[];
   generationRefs: CreativeGenerationReference[];
   createdAt: string;
   updatedAt: string;
@@ -154,4 +171,4 @@ export type CreativeRenderTarget = {
   convertToBlob?: (options?: { type?: string; quality?: number }) => Promise<Blob>;
 };
 
-export type CreativeProjectUpdate = Partial<Pick<CreativeProject, "event" | "palette" | "brief" | "format" | "assets" | "layouts" | "backgroundCandidates" | "generationRefs">>;
+export type CreativeProjectUpdate = Partial<Pick<CreativeProject, "event" | "palette" | "brief" | "format" | "assets" | "layouts" | "backgroundCandidates" | "athleteOriginal" | "athleteCutoutCandidates" | "generationRefs">>;

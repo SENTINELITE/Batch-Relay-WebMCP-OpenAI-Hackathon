@@ -12,6 +12,24 @@ Changing event text, switching layouts, applying a reviewed candidate, and
 undoing or redoing edits are local composition operations. Switching formats
 reuses the approved background and does not request another generated image.
 
+## Athlete cutout layer
+
+Use **Upload photo & estimate** to send a reduced processing copy of the
+original athlete photograph to Livepeer. The original stays in the local
+project. Review the quote, approve background removal, and review the
+checkerboard cutout before applying it. Restoring the original or undoing the
+layer change does not request another render. A cutout belongs to its source
+photo; it cannot be applied to a different uploaded photograph.
+
+Both original and processed image bytes are retained in IndexedDB for local
+recovery. Background generation does not upload the athlete; only the explicit
+background-removal action sends that copy externally. Event text and the logo
+remain independent.
+
+Generated effects and source-based refinement are described in
+[the next-capabilities plan](effects-and-refinement-plan.md); they are not
+implemented by the cutout feature.
+
 ## WebMCP contract
 
 The `/creative` page mounts `CreativeWebMcpRegistrar` from
